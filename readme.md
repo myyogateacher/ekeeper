@@ -9,6 +9,8 @@ It combines:
 - issue assignment and lifecycle workflow
 - a polished glass-style enterprise dashboard
 
+![eKeeper landing page](images/landing-page.png)
+
 ![eKeeper error details](images/error-details.png)
 
 ## Features
