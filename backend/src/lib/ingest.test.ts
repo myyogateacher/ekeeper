@@ -1,0 +1,44 @@
+import { describe, expect, test } from "bun:test";
+import { computeGroupFingerprint, normalizeEvent, parseEnvelope } from "./ingest";
+
+describe("ingest helpers", () => {
+  test("fingerprint is stable for same payload", () => {
+    const payload = {
+      message: "Boom",
+      exception: {
+        values: [
+          {
+            type: "TypeError",
+            value: "Boom",
+            stacktrace: {
+              frames: [{ filename: "index.ts", function: "run", lineno: 12 }],
+            },
+          },
+        ],
+      },
+    };
+
+    expect(computeGroupFingerprint(payload)).toBe(computeGroupFingerprint(payload));
+  });
+
+  test("normalize event keeps breadcrumbs", () => {
+    const event = normalizeEvent("project_1", {
+      event_id: "evt_1",
+      message: "Oops",
+      breadcrumbs: [{ category: "ui.click", level: "info", message: "Clicked save" }],
+    });
+
+    expect(event.projectId).toBe("project_1");
+    expect(event.breadcrumbs).toHaveLength(1);
+  });
+
+  test("parse envelope extracts event items", () => {
+    const raw = [
+      JSON.stringify({ event_id: "env_1" }),
+      JSON.stringify({ type: "event" }),
+      JSON.stringify({ event_id: "env_1", message: "Envelope" }),
+    ].join("\n");
+
+    expect(parseEnvelope(raw)).toHaveLength(1);
+  });
+});

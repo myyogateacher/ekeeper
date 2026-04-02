@@ -1,0 +1,27 @@
+{
+  "name": "ekeeper-backend",
+  "private": true,
+  "version": "0.0.1",
+  "type": "module",
+  "scripts": {
+    "dev": "bun --env-file=../.env --watch src/index.ts",
+    "build": "bun build ./src/index.ts --outdir ./dist --target bun",
+    "start": "bun --env-file=../.env run ./src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "migrate": "bun --env-file=../.env run ./src/migrate.ts",
+    "test": "bun test"
+  },
+  "dependencies": {
+    "@clickhouse/client": "^1.11.0",
+    "@ekeeper/shared": "workspace:*",
+    "fflate": "^0.8.2",
+    "hono": "^4.7.10",
+    "jose": "^6.0.11",
+    "source-map-js": "^1.2.1",
+    "zod": "^3.25.64"
+  },
+  "devDependencies": {
+    "bun-types": "^1.3.11",
+    "typescript": "^5.8.3"
+  }
+}

@@ -1,0 +1,33 @@
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:24.8
+    ports:
+      - "18123:8123"
+      - "19000:9000"
+    environment:
+      CLICKHOUSE_DB: ${CLICKHOUSE_DATABASE}
+      CLICKHOUSE_USER: ${CLICKHOUSE_USER}
+      CLICKHOUSE_PASSWORD: ${CLICKHOUSE_PASSWORD}
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: "1"
+    volumes:
+      - clickhouse-data:/var/lib/clickhouse
+
+  backend:
+    image: oven/bun:1
+    working_dir: /app
+    command: sh -c "bun install && bun run --cwd backend dev"
+    env_file:
+      - .env
+    ports:
+      - "${BACKEND_PORT:-3000}:3000"
+    volumes:
+      - .:/app
+      - sqlite-data:/app/data/sqlite
+      - minimaps-data:/app/backend/data/minimaps
+    depends_on:
+      - clickhouse
+
+volumes:
+  clickhouse-data:
+  sqlite-data:
+  minimaps-data:

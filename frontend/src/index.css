@@ -1,0 +1,58 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  color: #e5eefb;
+  background:
+    radial-gradient(circle at top left, rgba(77, 208, 225, 0.18), transparent 34%),
+    radial-gradient(circle at top right, rgba(125, 110, 255, 0.12), transparent 32%),
+    linear-gradient(180deg, #0b1220 0%, #101a2e 45%, #0a1220 100%);
+  font-family:
+    "Inter", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-width: 320px;
+  min-height: 100vh;
+  color: #e5eefb;
+}
+
+a {
+  color: inherit;
+  text-decoration: none;
+}
+
+button,
+input,
+select,
+textarea {
+  font: inherit;
+}
+
+@layer components {
+  .glass-panel {
+    @apply rounded-3xl border border-white/10 bg-white/10 shadow-glass backdrop-blur-xl;
+  }
+
+  .input {
+    @apply w-full rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-300/50 focus:outline-none;
+  }
+
+  .button-primary {
+    @apply inline-flex items-center justify-center rounded-2xl border border-cyan-300/30 bg-cyan-300/20 px-4 py-3 text-sm font-semibold text-cyan-50 transition hover:border-cyan-200/50 hover:bg-cyan-300/30;
+  }
+
+  .button-secondary {
+    @apply inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-slate-100 transition hover:bg-white/10;
+  }
+
+  .table-shell {
+    @apply overflow-hidden rounded-3xl border border-white/10 bg-slate-950/20;
+  }
+}

@@ -1,0 +1,17 @@
+node_modules
+.DS_Store
+.idea
+.vscode/*.log
+frontend/dist
+frontend/node_modules
+backend/dist
+backend/node_modules
+shared/node_modules
+data/sqlite/*.db
+data/sqlite/*.sqlite
+data/sqlite/*.sqlite-shm
+data/sqlite/*.sqlite-wal
+clickhouse/data
+.env
+backend/data/sqlite/*
+backend/data/minimaps/*
