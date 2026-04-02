@@ -284,6 +284,26 @@ export function ErrorDetailPage() {
       <section className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
         <div className="min-w-0 space-y-6">
           <div className="glass-panel min-w-0 p-6">
+            <h3 className="text-lg font-semibold text-white">Request</h3>
+            <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
+              <div className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">URL</p>
+                <p className="mt-2 break-all text-sm text-slate-200">{displayValue(request.url)}</p>
+              </div>
+              <div className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
+                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Headers</p>
+                <div className="mt-3 space-y-2">
+                  {Object.keys(requestHeaders).length > 0 ? (
+                    renderKeyValueList(requestHeaders)
+                  ) : (
+                    <p className="text-sm text-slate-300">No request headers available.</p>
+                  )}
+                </div>
+              </div>
+            </div>
+          </div>
+
+          <div className="glass-panel min-w-0 p-6">
             <h3 className="text-lg font-semibold text-white">Exception</h3>
             <div className="mt-4 min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-5">
               <p className="text-sm uppercase tracking-[0.22em] text-slate-400">Type</p>
@@ -342,26 +362,6 @@ export function ErrorDetailPage() {
                   No parsed stack frames available for this event.
                 </div>
               )}
-            </div>
-          </div>
-
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Request</h3>
-            <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <div className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">URL</p>
-                <p className="mt-2 break-all text-sm text-slate-200">{displayValue(request.url)}</p>
-              </div>
-              <div className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Headers</p>
-                <div className="mt-3 space-y-2">
-                  {Object.keys(requestHeaders).length > 0 ? (
-                    renderKeyValueList(requestHeaders)
-                  ) : (
-                    <p className="text-sm text-slate-300">No request headers available.</p>
-                  )}
-                </div>
-              </div>
             </div>
           </div>
 
