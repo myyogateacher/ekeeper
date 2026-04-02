@@ -13,6 +13,15 @@ const INGEST_FLUSH_LOCK_KEY = "ekeeper:ingest-buffer:flush-lock";
 const INGEST_BUFFER_INTERVAL_MS = 5 * 60 * 1000;
 const INGEST_BUFFER_RETENTION_SECONDS = 48 * 60 * 60;
 
+function logIngestBuffer(message: string, details?: Record<string, unknown>) {
+  if (details) {
+    console.log(`[ingest-buffer] ${message}`, details);
+    return;
+  }
+
+  console.log(`[ingest-buffer] ${message}`);
+}
+
 function toClickHouseDateTime(value: string): string {
   return value.replace("T", " ").replace("Z", "");
 }
@@ -44,6 +53,11 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
   if (payloads.length === 0) {
     return;
   }
+
+  logIngestBuffer("writing project batch to ClickHouse", {
+    projectId,
+    eventCount: payloads.length,
+  });
 
   const client = getClickHouseClient();
   const events = payloads.map((payload) => normalizeEvent(projectId, payload));
@@ -89,6 +103,10 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
   );
 
   if (breadcrumbs.length > 0) {
+    logIngestBuffer("writing breadcrumb batch to ClickHouse", {
+      projectId,
+      breadcrumbCount: breadcrumbs.length,
+    });
     await client.insert({
       table: "breadcrumbs",
       values: breadcrumbs,
@@ -106,14 +124,27 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
       [reopenedAt, projectId, groupId],
     );
   }
+
+  logIngestBuffer("finished ClickHouse batch", {
+    projectId,
+    eventCount: events.length,
+    breadcrumbCount: breadcrumbs.length,
+    reopenedGroupCount: affectedGroupIds.length,
+  });
 }
 
 async function flushBucket(redisKey: string) {
   const redis = await connectRedis();
   const items = await redis.lRange(redisKey, 0, -1);
 
+  logIngestBuffer("starting bucket flush", {
+    redisKey,
+    bufferedItemCount: items.length,
+  });
+
   if (items.length === 0) {
     await redis.del(redisKey);
+    logIngestBuffer("deleted empty bucket", { redisKey });
     return;
   }
 
@@ -128,12 +159,21 @@ async function flushBucket(redisKey: string) {
     .filter((entry): entry is BufferedIngestEntry => Boolean(entry?.projectId && entry.payload));
 
   const grouped = groupByProject(entries);
+  logIngestBuffer("grouped buffered items for flush", {
+    redisKey,
+    parsedEntryCount: entries.length,
+    projectCount: grouped.size,
+  });
   for (const [projectId, payloads] of grouped) {
     await insertEvents(projectId, payloads);
   }
 
   await redis.del(redisKey);
-  console.log(`[ingest] flushed ${entries.length} buffered event(s) from ${redisKey}`);
+  logIngestBuffer("completed bucket flush", {
+    redisKey,
+    flushedEntryCount: entries.length,
+    projectCount: grouped.size,
+  });
 }
 
 export async function enqueueBufferedIngest(projectId: string, payloads: Record<string, unknown>[]) {
@@ -155,6 +195,12 @@ export async function enqueueBufferedIngest(projectId: string, payloads: Record<
     .rPush(key, serialized)
     .expire(key, INGEST_BUFFER_RETENTION_SECONDS)
     .exec();
+
+  logIngestBuffer("buffered incoming payloads", {
+    projectId,
+    redisKey: key,
+    payloadCount: payloads.length,
+  });
 }
 
 export async function flushBufferedIngest() {
@@ -165,6 +211,7 @@ export async function flushBufferedIngest() {
   });
 
   if (!lock) {
+    logIngestBuffer("skipping flush because another worker holds the lock");
     return;
   }
 
@@ -173,15 +220,33 @@ export async function flushBufferedIngest() {
     const keys = await redis.keys(`${INGEST_BUFFER_PREFIX}:*`);
     const eligibleKeys = keys.filter((key) => key !== currentKey && key !== INGEST_FLUSH_LOCK_KEY).sort();
 
+    logIngestBuffer("evaluated buffered ingest keys", {
+      currentKey,
+      discoveredKeyCount: keys.length,
+      eligibleKeyCount: eligibleKeys.length,
+      eligibleKeys,
+    });
+
     for (const key of eligibleKeys) {
-      await flushBucket(key);
+      try {
+        await flushBucket(key);
+      } catch (error) {
+        console.error("[ingest-buffer] bucket flush failed", {
+          redisKey: key,
+          error,
+        });
+      }
     }
   } finally {
     await redis.del(INGEST_FLUSH_LOCK_KEY);
+    logIngestBuffer("released flush lock");
   }
 }
 
 export function startBufferedIngestFlusher() {
+  logIngestBuffer("starting periodic ingest flusher", {
+    intervalMs: INGEST_BUFFER_INTERVAL_MS,
+  });
   void flushBufferedIngest();
   return setInterval(() => {
     void flushBufferedIngest();

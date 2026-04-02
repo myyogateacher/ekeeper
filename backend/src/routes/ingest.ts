@@ -31,6 +31,12 @@ export const ingestRouter = new Hono();
 
 async function handleStoreRequest(projectKey: string, sentryProjectId: string | undefined, payload: Record<string, unknown>) {
   const project = resolveProject(projectKey, sentryProjectId);
+  console.log("[ingest] accepted store payload", {
+    projectId: project.projectId,
+    publicKey: project.publicKey,
+    sentryProjectId: project.sentryProjectId,
+    eventId: payload.event_id ?? null,
+  });
   await enqueueBufferedIngest(project.projectId, [payload]);
   return { id: payload.event_id ?? crypto.randomUUID(), status: "success" };
 }
@@ -38,6 +44,12 @@ async function handleStoreRequest(projectKey: string, sentryProjectId: string | 
 async function handleEnvelopeRequest(projectKey: string, sentryProjectId: string | undefined, raw: string) {
   const project = resolveProject(projectKey, sentryProjectId);
   const payloads = parseEnvelope(raw);
+  console.log("[ingest] accepted envelope payload", {
+    projectId: project.projectId,
+    publicKey: project.publicKey,
+    sentryProjectId: project.sentryProjectId,
+    acceptedCount: payloads.length,
+  });
   await enqueueBufferedIngest(project.projectId, payloads);
   return { status: "success", accepted: payloads.length };
 }
