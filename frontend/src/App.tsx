@@ -33,8 +33,9 @@ function ProtectedLayout() {
       user={data.user}
       onLogout={async () => {
         await api.logout();
-        await queryClient.invalidateQueries({ queryKey: ["me"] });
-        navigate("/login");
+        await queryClient.cancelQueries({ queryKey: ["me"] });
+        queryClient.removeQueries({ queryKey: ["me"], exact: true });
+        navigate("/login", { replace: true });
       }}
     >
       <Outlet />
