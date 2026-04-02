@@ -243,12 +243,15 @@ export function ErrorDetailPage() {
           <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-4">
             <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Workflow</p>
             <div className="mt-3 flex flex-wrap gap-2">
-              <button className="button-secondary" onClick={() => workflowMutation.mutate({ state: "reopened" })}>
-                Reopen
-              </button>
-              <button className="button-primary" onClick={() => workflowMutation.mutate({ state: "closed" })}>
-                Close issue
-              </button>
+              {error.state === "closed" ? (
+                <button className="button-secondary" onClick={() => workflowMutation.mutate({ state: "reopened" })}>
+                  Reopen
+                </button>
+              ) : (
+                <button className="button-primary" onClick={() => workflowMutation.mutate({ state: "closed" })}>
+                  Close issue
+                </button>
+              )}
             </div>
             <p className="mt-3 text-sm text-slate-300">
               Assigned to {error.assignedUserName ?? "nobody"} • currently {error.state}.

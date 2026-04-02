@@ -218,10 +218,14 @@ function filterErrors(
   },
 ) {
   return errors.filter((error) => {
-    const state = options.state || "open";
+    const state = options.state || "open_or_reopened";
     const assignment = options.assignment || "any";
 
-    if (state !== "any" && error.state !== state) {
+    if (state === "open_or_reopened" && error.state === "closed") {
+      return false;
+    }
+
+    if (state !== "any" && state !== "open_or_reopened" && error.state !== state) {
       return false;
     }
 
@@ -540,7 +544,7 @@ apiRouter.get("/projects/all/errors", async (ctx) => {
       ? all<{ id: string }>("SELECT id FROM projects").map((project) => project.id)
       : auth.memberships.map((membership) => membership.projectId);
   const errors = filterErrors(await queryErrorGroups(projectIds), {
-    state: ctx.req.query("state") ?? "open",
+    state: ctx.req.query("state") ?? "open_or_reopened",
     assignment: ctx.req.query("assignment") ?? "any",
     assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
   });
@@ -551,7 +555,7 @@ apiRouter.get("/projects/:projectId/errors", async (ctx) => {
   const projectId = ctx.req.param("projectId");
   requireProjectAccess(ctx, projectId, false);
   const errors = filterErrors(await queryErrorGroups([projectId]), {
-    state: ctx.req.query("state") ?? "open",
+    state: ctx.req.query("state") ?? "open_or_reopened",
     assignment: ctx.req.query("assignment") ?? "any",
     assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
   });

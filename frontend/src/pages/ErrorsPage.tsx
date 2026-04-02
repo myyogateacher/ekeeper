@@ -10,7 +10,7 @@ export function ErrorsPage() {
   const [searchParams, setSearchParams] = useSearchParams();
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [assignmentFilter, setAssignmentFilter] = useState("any");
-  const [state, setState] = useState("open");
+  const [state, setState] = useState("open_or_reopened");
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const { data: assignees } = useQuery({
     queryKey: ["error-assignees", projectId || "all"],
@@ -78,6 +78,7 @@ export function ErrorsPage() {
           <div className="min-w-0">
             <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">State</label>
             <select className="input" value={state} onChange={(event) => setState(event.target.value)}>
+              <option value="open_or_reopened">Open + reopened</option>
               <option value="open">Open</option>
               <option value="closed">Closed</option>
               <option value="reopened">Reopened</option>
