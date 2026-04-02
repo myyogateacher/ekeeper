@@ -7,6 +7,7 @@ import { prettyJSON } from "hono/pretty-json";
 import { config } from "./config";
 import { sessionMiddleware } from "./lib/auth";
 import { HttpError } from "./lib/http";
+import { startBufferedIngestFlusher } from "./lib/ingest-buffer";
 import { runMigrations } from "./lib/migrations";
 import { connectRedis } from "./lib/redis";
 import { getServerAuthToken } from "./lib/server-settings";
@@ -74,6 +75,7 @@ if (hasFrontendBuild) {
 
 await runMigrations();
 await connectRedis();
+startBufferedIngestFlusher();
 getServerAuthToken();
 
 export default {
