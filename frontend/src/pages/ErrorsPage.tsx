@@ -1,13 +1,14 @@
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { useNavigate } from "react-router-dom";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "@/lib/api";
 import { DataTable } from "@/components/DataTable";
 import { formatDate, formatNumber } from "@/lib/utils";
 
 export function ErrorsPage() {
   const navigate = useNavigate();
-  const [projectId, setProjectId] = useState("");
+  const [searchParams, setSearchParams] = useSearchParams();
+  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [assignmentFilter, setAssignmentFilter] = useState("any");
   const [state, setState] = useState("open");
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
@@ -34,6 +35,24 @@ export function ErrorsPage() {
   const projectOptions = useMemo(() => projects?.projects ?? [], [projects]);
   const assigneeOptions = useMemo(() => assignees?.users ?? [], [assignees]);
 
+  useEffect(() => {
+    const nextProjectId = searchParams.get("projectId") ?? "";
+    if (nextProjectId !== projectId) {
+      setProjectId(nextProjectId);
+    }
+  }, [projectId, searchParams]);
+
+  function handleProjectChange(nextProjectId: string) {
+    setProjectId(nextProjectId);
+    const nextParams = new URLSearchParams(searchParams);
+    if (nextProjectId) {
+      nextParams.set("projectId", nextProjectId);
+    } else {
+      nextParams.delete("projectId");
+    }
+    setSearchParams(nextParams, { replace: true });
+  }
+
   return (
     <div className="space-y-6">
       <section className="glass-panel flex flex-col gap-4 p-6">
@@ -47,7 +66,7 @@ export function ErrorsPage() {
         <div className="grid gap-4 lg:grid-cols-3">
           <div className="min-w-0">
             <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">Project</label>
-            <select className="input" value={projectId} onChange={(event) => setProjectId(event.target.value)}>
+            <select className="input" value={projectId} onChange={(event) => handleProjectChange(event.target.value)}>
               <option value="">All projects</option>
               {projectOptions.map((project) => (
                 <option key={project.id} value={project.id}>

@@ -1,5 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { DataTable } from "@/components/DataTable";
 
@@ -7,6 +8,7 @@ const emptyProject = { name: "", slug: "", environment: "production", active: tr
 
 export function ProjectsPage() {
   const queryClient = useQueryClient();
+  const navigate = useNavigate();
   const [form, setForm] = useState(emptyProject);
   const { data } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
 
@@ -70,7 +72,18 @@ export function ProjectsPage() {
 
       <DataTable headers={["Project", "Environment", "DSN", "Actions"]}>
         {(data?.projects ?? []).map((project) => (
-          <tr key={project.id} className="text-slate-200">
+          <tr
+            key={project.id}
+            className="cursor-pointer text-slate-200 transition hover:bg-white/[0.03]"
+            tabIndex={0}
+            onClick={() => navigate(`/errors?projectId=${encodeURIComponent(project.id)}`)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                navigate(`/errors?projectId=${encodeURIComponent(project.id)}`);
+              }
+            }}
+          >
             <td className="px-5 py-4">
               <div>
                 <p className="font-medium text-white">{project.name}</p>
@@ -80,7 +93,13 @@ export function ProjectsPage() {
             <td className="px-5 py-4">{project.environment}</td>
             <td className="px-5 py-4 text-xs text-slate-300">{project.key?.dsn ?? "Pending key"}</td>
             <td className="px-5 py-4">
-              <button className="button-secondary" onClick={() => deleteProject.mutate(project.id)}>
+              <button
+                className="button-secondary"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  deleteProject.mutate(project.id);
+                }}
+              >
                 Remove
               </button>
             </td>

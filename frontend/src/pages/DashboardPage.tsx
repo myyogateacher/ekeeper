@@ -1,9 +1,11 @@
 import { useQuery } from "@tanstack/react-query";
+import { useNavigate } from "react-router-dom";
 import { api } from "@/lib/api";
 import { MetricCard } from "@/components/MetricCard";
 import { formatNumber } from "@/lib/utils";
 
 export function DashboardPage() {
+  const navigate = useNavigate();
   const { data } = useQuery({
     queryKey: ["dashboard"],
     queryFn: api.dashboard,
@@ -36,7 +38,18 @@ export function DashboardPage() {
 
       <section className="grid gap-4 xl:grid-cols-2">
         {cards.map((card) => (
-          <div key={card.projectId} className="glass-panel p-6">
+          <div
+            key={card.projectId}
+            className="glass-panel cursor-pointer p-6 transition hover:bg-white/[0.03]"
+            tabIndex={0}
+            onClick={() => navigate(`/errors?projectId=${encodeURIComponent(card.projectId)}`)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter" || event.key === " ") {
+                event.preventDefault();
+                navigate(`/errors?projectId=${encodeURIComponent(card.projectId)}`);
+              }
+            }}
+          >
             <div className="flex items-start justify-between gap-4">
               <div>
                 <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Project</p>

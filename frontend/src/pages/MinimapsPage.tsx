@@ -6,6 +6,7 @@ import { formatDate } from "@/lib/utils";
 
 export function MinimapsPage() {
   const queryClient = useQueryClient();
+  const [isUploadOpen, setIsUploadOpen] = useState(false);
   const [release, setRelease] = useState("");
   const [dist, setDist] = useState("");
   const [artifactName, setArtifactName] = useState("");
@@ -95,6 +96,20 @@ export function MinimapsPage() {
               Upload your generated source maps so eKeeper can translate minified stack frames back into source code
               when engineers inspect errors.
             </p>
+            <label className="mt-5 block max-w-sm text-sm text-slate-300">
+              <span className="mb-2 block text-xs uppercase tracking-[0.2em] text-slate-400">Project</span>
+              <select
+                className="input pr-10"
+                value={selectedProject?.id ?? ""}
+                onChange={(event) => setSelectedProjectId(event.target.value)}
+              >
+                {(projects?.projects ?? []).map((project) => (
+                  <option key={project.id} value={project.id}>
+                    {project.name}
+                  </option>
+                ))}
+              </select>
+            </label>
           </div>
           <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-5 text-sm text-slate-300">
             <p className="font-medium text-white">Retention</p>
@@ -115,59 +130,64 @@ export function MinimapsPage() {
       </section>
 
       <section className="glass-panel p-6">
-        <h3 className="text-lg font-semibold text-white">Upload a minimap</h3>
-        <form
-          className="mt-4 grid gap-3 lg:grid-cols-2"
-          onSubmit={(event) => {
-            event.preventDefault();
-            uploadMutation.mutate();
-          }}
-        >
-          <select
-            className="input"
-            value={selectedProject?.id ?? ""}
-            onChange={(event) => setSelectedProjectId(event.target.value)}
-          >
-            {(projects?.projects ?? []).map((project) => (
-              <option key={project.id} value={project.id}>
-                {project.name}
-              </option>
-            ))}
-          </select>
-          <input
-            className="input"
-            placeholder="Release"
-            value={release}
-            onChange={(event) => setRelease(event.target.value)}
-          />
-          <input
-            className="input"
-            placeholder="Dist (optional)"
-            value={dist}
-            onChange={(event) => setDist(event.target.value)}
-          />
-          <input
-            className="input lg:col-span-2"
-            placeholder="Artifact path, for example ~/assets/index.js.map"
-            value={artifactName}
-            onChange={(event) => setArtifactName(event.target.value)}
-          />
-          <input
-            className="input lg:col-span-2 file:mr-4 file:rounded-2xl file:border-0 file:bg-cyan-300/20 file:px-4 file:py-2 file:text-sm file:text-cyan-100"
-            type="file"
-            accept=".map,application/json"
-            onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-          />
-          <div className="lg:col-span-2 flex items-center gap-3">
-            <button className="button-primary" type="submit" disabled={uploadMutation.isPending}>
-              Upload minimap
-            </button>
-            {uploadMutation.error ? <p className="text-sm text-rose-200">{uploadMutation.error.message}</p> : null}
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h3 className="text-lg font-semibold text-white">Upload a minimap</h3>
+            <p className="mt-1 text-sm text-slate-300">
+              Manual uploads are useful for testing or backfilling a release.
+            </p>
           </div>
-          <p className="lg:col-span-2 text-sm text-slate-300">
-            Plugin project value for this upload: <span className="font-mono text-cyan-100">{selectedProject?.slug ?? "<project-slug>"}</span>
-          </p>
-        </form>
+          <button
+            className="button-secondary"
+            type="button"
+            onClick={() => setIsUploadOpen((open) => !open)}
+          >
+            {isUploadOpen ? "Hide upload form" : "Show upload form"}
+          </button>
+        </div>
+        {isUploadOpen ? (
+          <form
+            className="mt-4 grid gap-3 lg:grid-cols-2"
+            onSubmit={(event) => {
+              event.preventDefault();
+              uploadMutation.mutate();
+            }}
+          >
+            <input
+              className="input"
+              placeholder="Release"
+              value={release}
+              onChange={(event) => setRelease(event.target.value)}
+            />
+            <input
+              className="input"
+              placeholder="Dist (optional)"
+              value={dist}
+              onChange={(event) => setDist(event.target.value)}
+            />
+            <input
+              className="input lg:col-span-2"
+              placeholder="Artifact path, for example ~/assets/index.js.map"
+              value={artifactName}
+              onChange={(event) => setArtifactName(event.target.value)}
+            />
+            <input
+              className="input lg:col-span-2 file:mr-4 file:rounded-2xl file:border-0 file:bg-cyan-300/20 file:px-4 file:py-2 file:text-sm file:text-cyan-100"
+              type="file"
+              accept=".map,application/json"
+              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+            />
+            <div className="lg:col-span-2 flex items-center gap-3">
+              <button className="button-primary" type="submit" disabled={uploadMutation.isPending}>
+                Upload minimap
+              </button>
+              {uploadMutation.error ? <p className="text-sm text-rose-200">{uploadMutation.error.message}</p> : null}
+            </div>
+            <p className="lg:col-span-2 text-sm text-slate-300">
+              Plugin project value for this upload: <span className="font-mono text-cyan-100">{selectedProject?.slug ?? "<project-slug>"}</span>
+            </p>
+          </form>
+        ) : null}
       </section>
 
       <DataTable headers={["Artifact", "Release", "Org / Project", "Uploaded", "Expires"]}>
