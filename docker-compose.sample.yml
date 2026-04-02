@@ -13,19 +13,19 @@ services:
       - clickhouse-data:/var/lib/clickhouse
 
   backend:
-    image: oven/bun:1
-    working_dir: /app
-    command: sh -c "bun install && bun run --cwd backend dev"
+    build:
+      context: .
+      dockerfile: Dockerfile
     env_file:
       - .env
     ports:
       - "${BACKEND_PORT:-3000}:3000"
     volumes:
-      - .:/app
       - sqlite-data:/app/data/sqlite
       - minimaps-data:/app/backend/data/minimaps
     depends_on:
       - clickhouse
+    restart: unless-stopped
 
 volumes:
   clickhouse-data:

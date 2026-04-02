@@ -75,7 +75,7 @@ The backend will:
 For local integration or simple self-hosted deployment:
 
 ```bash
-docker compose up --build
+docker compose -f docker-compose.sample.yml up --build
 ```
 
 The included compose file starts:
@@ -83,6 +83,41 @@ The included compose file starts:
 - `backend`
 
 For teams iterating on the UI, the Vite dev server remains better for local development, but production uses the built SPA only.
+
+## Dockerfile
+
+A production Docker image is included at:
+- [Dockerfile](/Users/apple/Desktop/experiments/ekeeper/Dockerfile)
+
+Build it from the repository root:
+
+```bash
+docker build -t ekeeper:latest .
+```
+
+Run it with your production environment:
+
+```bash
+docker run --env-file .env -p 3000:3000 \
+  -v $(pwd)/data/sqlite:/app/data/sqlite \
+  -v $(pwd)/data/minimaps:/app/backend/data/minimaps \
+  ekeeper:latest
+```
+
+The image includes:
+- compiled backend bundle
+- compiled frontend assets
+- backend SQL migration files required at startup
+
+## Nginx
+
+An example reverse-proxy config is available at:
+- [docs/nginx.conf.md](/Users/apple/Desktop/experiments/ekeeper/docs/nginx.conf.md)
+
+Use Nginx when you want:
+- TLS termination in front of Bun
+- a stable public hostname for OAuth and DSNs
+- larger body-size limits for source map uploads
 
 ## Operational Notes
 

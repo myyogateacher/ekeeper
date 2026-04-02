@@ -43,13 +43,13 @@ Notes:
 Bring up ClickHouse:
 
 ```bash
-docker compose up -d clickhouse
+docker compose -f docker-compose.sample.yml up -d clickhouse
 ```
 
 Optional log tail:
 
 ```bash
-docker compose logs -f clickhouse
+docker compose -f docker-compose.sample.yml logs -f clickhouse
 ```
 
 ## Run the Backend
@@ -107,7 +107,7 @@ bun run migrate
 Usually this means ClickHouse is not reachable. Start it first:
 
 ```bash
-docker compose up -d clickhouse
+docker compose -f docker-compose.sample.yml up -d clickhouse
 ```
 
 ### Browser ingest fails with CORS
