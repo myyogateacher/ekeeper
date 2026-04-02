@@ -12,6 +12,15 @@ type UnknownRecord = Record<string, unknown>;
 
 interface SourceMapLookupArtifact extends MinimapArtifact {}
 
+interface ParsedSourceMapArtifact {
+  artifact: SourceMapLookupArtifact;
+  rawMap: RawSourceMap & {
+    file?: string;
+    debug_id?: string;
+    debugId?: string;
+  };
+}
+
 interface DeobfuscationResult {
   stacktrace: UnknownRecord | null;
   exception: UnknownRecord;
@@ -85,7 +94,10 @@ function safeJsonParse<T>(value: string, fallback: T): T {
 function mapFrame(
   frame: UnknownRecord,
   artifactMap: Map<string, SourceMapLookupArtifact>,
+  debugIdArtifactMap: Map<string, SourceMapLookupArtifact>,
+  debugMetaByCodeFile: Map<string, string>,
   cache: Map<string, SourceMapConsumer>,
+  sourceMapCache: Map<string, ParsedSourceMapArtifact>,
 ): UnknownRecord {
   const filename = typeof frame.filename === "string" ? frame.filename : "";
   const line = typeof frame.lineno === "number" ? frame.lineno : Number(frame.lineno);
@@ -94,9 +106,18 @@ function mapFrame(
     return frame;
   }
 
-  const artifact = listCandidatePaths(filename)
+  let artifact = listCandidatePaths(filename)
     .map((candidate) => artifactMap.get(candidate))
     .find(Boolean);
+
+  if (!artifact) {
+    const debugId = listCandidatePaths(filename)
+      .map((candidate) => debugMetaByCodeFile.get(candidate))
+      .find(Boolean);
+    if (debugId) {
+      artifact = debugIdArtifactMap.get(debugId);
+    }
+  }
 
   if (!artifact) {
     return frame;
@@ -104,13 +125,13 @@ function mapFrame(
 
   let consumer = cache.get(artifact.id);
   if (!consumer) {
-    const mapFile = readFileSync(artifact.filePath, "utf8");
-    consumer = new SourceMapConsumer(safeJsonParse<RawSourceMap>(mapFile, {
+    const parsed = sourceMapCache.get(artifact.id);
+    consumer = new SourceMapConsumer(parsed?.rawMap ?? {
       version: "3",
       sources: [],
       names: [],
       mappings: "",
-    }));
+    });
     cache.set(artifact.id, consumer);
   }
 
@@ -138,11 +159,14 @@ function mapFrame(
 function mapFrames(
   frames: UnknownRecord[],
   artifactMap: Map<string, SourceMapLookupArtifact>,
+  debugIdArtifactMap: Map<string, SourceMapLookupArtifact>,
+  debugMetaByCodeFile: Map<string, string>,
   cache: Map<string, SourceMapConsumer>,
+  sourceMapCache: Map<string, ParsedSourceMapArtifact>,
 ) {
   let applied = false;
   const mapped = frames.map((frame) => {
-    const nextFrame = mapFrame(frame, artifactMap, cache);
+    const nextFrame = mapFrame(frame, artifactMap, debugIdArtifactMap, debugMetaByCodeFile, cache, sourceMapCache);
     if (nextFrame !== frame) {
       applied = true;
     }
@@ -152,16 +176,76 @@ function mapFrames(
   return { frames: mapped, applied };
 }
 
-function buildArtifactLookup(artifacts: SourceMapLookupArtifact[]) {
+function parseSourceMapArtifact(artifact: SourceMapLookupArtifact): ParsedSourceMapArtifact | null {
+  if (!artifact.artifactName.endsWith(".map") && !artifact.filePath.endsWith(".map")) {
+    return null;
+  }
+
+  const mapFile = readFileSync(artifact.filePath, "utf8");
+  return {
+    artifact,
+    rawMap: safeJsonParse<ParsedSourceMapArtifact["rawMap"]>(mapFile, {
+      version: "3",
+      sources: [],
+      names: [],
+      mappings: "",
+    }),
+  };
+}
+
+function buildArtifactLookup(parsedArtifacts: ParsedSourceMapArtifact[]) {
   const lookup = new Map<string, SourceMapLookupArtifact>();
-  for (const artifact of artifacts) {
+  const debugIdLookup = new Map<string, SourceMapLookupArtifact>();
+  for (const parsedArtifact of parsedArtifacts) {
+    const artifact = parsedArtifact.artifact;
     const artifactName = normalizeArtifactName(artifact.artifactName);
     for (const candidate of listCandidatePaths(artifactName)) {
       if (!lookup.has(candidate)) {
         lookup.set(candidate, artifact);
       }
     }
+
+    if (typeof parsedArtifact.rawMap.file === "string" && parsedArtifact.rawMap.file.trim()) {
+      for (const candidate of listCandidatePaths(parsedArtifact.rawMap.file)) {
+        if (!lookup.has(candidate)) {
+          lookup.set(candidate, artifact);
+        }
+      }
+    }
+
+    const debugId = parsedArtifact.rawMap.debug_id ?? parsedArtifact.rawMap.debugId;
+    if (typeof debugId === "string" && debugId.trim() && !debugIdLookup.has(debugId)) {
+      debugIdLookup.set(debugId, artifact);
+    }
   }
+  return { lookup, debugIdLookup };
+}
+
+function buildDebugMetaLookup(rawPayload: UnknownRecord) {
+  const lookup = new Map<string, string>();
+  const debugMeta = rawPayload.debug_meta;
+  if (!debugMeta || typeof debugMeta !== "object" || !Array.isArray((debugMeta as UnknownRecord).images)) {
+    return lookup;
+  }
+
+  for (const image of (debugMeta as UnknownRecord).images as UnknownRecord[]) {
+    const codeFile = typeof image.code_file === "string" ? image.code_file : null;
+    const debugId = typeof image.debug_id === "string"
+      ? image.debug_id
+      : typeof image.debugId === "string"
+        ? image.debugId
+        : null;
+    if (!codeFile || !debugId) {
+      continue;
+    }
+
+    for (const candidate of listCandidatePaths(codeFile)) {
+      if (!lookup.has(candidate)) {
+        lookup.set(candidate, debugId);
+      }
+    }
+  }
+
   return lookup;
 }
 
@@ -357,19 +441,30 @@ export function deobfuscateEvent(input: {
     return { stacktrace, exception, applied: false, release };
   }
 
-  const artifacts = getReleaseArtifacts(project.id, release);
-  if (artifacts.length === 0) {
+  const parsedArtifacts = getReleaseArtifacts(project.id, release)
+    .map(parseSourceMapArtifact)
+    .filter((artifact): artifact is ParsedSourceMapArtifact => Boolean(artifact));
+  if (parsedArtifacts.length === 0) {
     return { stacktrace, exception, applied: false, release };
   }
 
-  const artifactMap = buildArtifactLookup(artifacts);
+  const { lookup: artifactMap, debugIdLookup: debugIdArtifactMap } = buildArtifactLookup(parsedArtifacts);
+  const sourceMapCache = new Map(parsedArtifacts.map((artifact) => [artifact.artifact.id, artifact]));
+  const debugMetaByCodeFile = buildDebugMetaLookup(rawPayload);
   const cache = new Map<string, SourceMapConsumer>();
   let applied = false;
 
   const nextStacktrace =
     stacktrace && Array.isArray(stacktrace.frames)
       ? (() => {
-          const result = mapFrames(stacktrace.frames as UnknownRecord[], artifactMap, cache);
+          const result = mapFrames(
+            stacktrace.frames as UnknownRecord[],
+            artifactMap,
+            debugIdArtifactMap,
+            debugMetaByCodeFile,
+            cache,
+            sourceMapCache,
+          );
           applied = applied || result.applied;
           return { ...stacktrace, frames: result.frames };
         })()
@@ -382,7 +477,14 @@ export function deobfuscateEvent(input: {
         return value;
       }
 
-      const result = mapFrames((value.stacktrace as UnknownRecord).frames as UnknownRecord[], artifactMap, cache);
+      const result = mapFrames(
+        (value.stacktrace as UnknownRecord).frames as UnknownRecord[],
+        artifactMap,
+        debugIdArtifactMap,
+        debugMetaByCodeFile,
+        cache,
+        sourceMapCache,
+      );
       applied = applied || result.applied;
       return {
         ...value,
