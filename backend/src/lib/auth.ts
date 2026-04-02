@@ -7,6 +7,7 @@ import { HttpError } from "./http";
 import { createId, randomToken } from "./ids";
 import type { ProjectMembership, User } from "@ekeeper/shared";
 import type { AuthedContext } from "../types/api";
+import { connectRedis } from "./redis";
 
 const googleJwks = createRemoteJWKSet(new URL("https://www.googleapis.com/oauth2/v3/certs"));
 const GOOGLE_TOKEN_URL = "https://oauth2.googleapis.com/token";
@@ -17,6 +18,9 @@ interface SessionLookup {
   expiresAt: string;
   createdAt: string;
 }
+
+const sessionKey = (sessionId: string) => `ekeeper:session:${sessionId}`;
+const userSessionsKey = (userId: string) => `ekeeper:user-sessions:${userId}`;
 
 export async function createGoogleAuthUrl(ctx: Context) {
   const state = randomToken(18);
@@ -111,13 +115,28 @@ export async function handleGoogleCallback(code: string, state: string) {
 }
 
 export function createSession(ctx: Context, userId: string) {
+  return createSessionInRedis(ctx, userId);
+}
+
+async function createSessionInRedis(ctx: Context, userId: string) {
   const sessionId = randomToken(32);
+  const createdAt = new Date().toISOString();
   const expiresAt = new Date(Date.now() + config.SESSION_TTL_HOURS * 60 * 60 * 1000).toISOString();
-  run(
-    `INSERT INTO sessions (id, user_id, expires_at, created_at)
-     VALUES (?, ?, ?, ?)`,
-    [sessionId, userId, expiresAt, new Date().toISOString()],
-  );
+  const redis = await connectRedis();
+  await redis
+    .multi()
+    .set(
+      sessionKey(sessionId),
+      JSON.stringify({
+        sessionId,
+        userId,
+        expiresAt,
+        createdAt,
+      } satisfies SessionLookup),
+      { EX: config.SESSION_TTL_HOURS * 60 * 60 },
+    )
+    .sAdd(userSessionsKey(userId), sessionId)
+    .exec();
 
   setCookie(ctx, config.SESSION_COOKIE_NAME, sessionId, {
     httpOnly: true,
@@ -129,9 +148,13 @@ export function createSession(ctx: Context, userId: string) {
 }
 
 export function clearSession(ctx: Context) {
+  return clearSessionInRedis(ctx);
+}
+
+async function clearSessionInRedis(ctx: Context) {
   const token = getCookie(ctx, config.SESSION_COOKIE_NAME);
   if (token) {
-    run("DELETE FROM sessions WHERE id = ?", [token]);
+    await deleteSessionById(token);
   }
   deleteCookie(ctx, config.SESSION_COOKIE_NAME, { path: "/" });
 }
@@ -142,14 +165,10 @@ export async function loadSession(ctx: Context): Promise<AuthedContext | null> {
     return null;
   }
 
-  const session = one<SessionLookup>(
-    `SELECT id as sessionId, user_id as userId, expires_at as expiresAt, created_at as createdAt
-     FROM sessions WHERE id = ?`,
-    [token],
-  );
+  const session = await getSessionById(token);
 
   if (!session || new Date(session.expiresAt).getTime() < Date.now()) {
-    run("DELETE FROM sessions WHERE id = ?", [token]);
+    await deleteSessionById(token);
     return null;
   }
 
@@ -160,7 +179,7 @@ export async function loadSession(ctx: Context): Promise<AuthedContext | null> {
   );
 
   if (!user || user.status !== "active") {
-    run("DELETE FROM sessions WHERE id = ?", [token]);
+    await deleteSessionById(token);
     return null;
   }
 
@@ -180,6 +199,46 @@ export async function loadSession(ctx: Context): Promise<AuthedContext | null> {
       createdAt: session.createdAt,
     },
   };
+}
+
+async function getSessionById(sessionId: string): Promise<SessionLookup | null> {
+  const redis = await connectRedis();
+  const raw = await redis.get(sessionKey(sessionId));
+  if (!raw) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(raw) as SessionLookup;
+  } catch {
+    await redis.del(sessionKey(sessionId));
+    return null;
+  }
+}
+
+async function deleteSessionById(sessionId: string) {
+  const redis = await connectRedis();
+  const session = await getSessionById(sessionId);
+  const multi = redis.multi().del(sessionKey(sessionId));
+
+  if (session) {
+    multi.sRem(userSessionsKey(session.userId), sessionId);
+  }
+
+  await multi.exec();
+}
+
+export async function clearUserSessions(userId: string) {
+  const redis = await connectRedis();
+  const sessionIds = await redis.sMembers(userSessionsKey(userId));
+  const multi = redis.multi();
+
+  for (const sessionId of sessionIds) {
+    multi.del(sessionKey(sessionId));
+  }
+
+  multi.del(userSessionsKey(userId));
+  await multi.exec();
 }
 
 export const sessionMiddleware: MiddlewareHandler = async (ctx, next) => {

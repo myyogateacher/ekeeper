@@ -3,7 +3,7 @@ import { z } from "zod";
 import { config } from "../config";
 import { getClickHouseClient } from "../db/clickhouse";
 import { all, one, run } from "../db/sqlite";
-import { requireAuth, requireProjectAccess, requireWorkspaceRole } from "../lib/auth";
+import { clearUserSessions, requireAuth, requireProjectAccess, requireWorkspaceRole } from "../lib/auth";
 import { HttpError } from "../lib/http";
 import { createId, randomToken } from "../lib/ids";
 import { cleanupExpiredMinimaps, deobfuscateEvent, listMinimapArtifacts, saveMinimapArtifact } from "../lib/minimaps";
@@ -336,10 +336,10 @@ apiRouter.patch("/users/:userId", async (ctx) => {
   return ctx.json({ user: updated });
 });
 
-apiRouter.delete("/users/:userId", (ctx) => {
+apiRouter.delete("/users/:userId", async (ctx) => {
   requireWorkspaceRole(ctx, ["admin"]);
+  await clearUserSessions(ctx.req.param("userId"));
   run("DELETE FROM project_memberships WHERE user_id = ?", [ctx.req.param("userId")]);
-  run("DELETE FROM sessions WHERE user_id = ?", [ctx.req.param("userId")]);
   run("DELETE FROM users WHERE id = ?", [ctx.req.param("userId")]);
   return ctx.json({ success: true });
 });

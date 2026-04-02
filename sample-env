@@ -11,6 +11,10 @@ GOOGLE_ALLOWED_DOMAINS=example.com
 SESSION_COOKIE_NAME=ekeeper_session
 SESSION_SECRET=stub-super-secret-session-key
 SESSION_TTL_HOURS=168
+REDIS_HOST=localhost
+REDIS_PORT=16379
+REDIS_PASSWORD=
+REDIS_DB=0
 
 SQLITE_PATH=./backend/data/sqlite/ekeeper.sqlite
 

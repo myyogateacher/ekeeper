@@ -21,12 +21,12 @@ authRouter.get("/google/callback", async (ctx) => {
   }
 
   const user = await handleGoogleCallback(code, state);
-  createSession(ctx, user.id);
+  await createSession(ctx, user.id);
   return ctx.redirect(`${config.FRONTEND_URL}/dashboard`);
 });
 
-authRouter.post("/logout", (ctx) => {
+authRouter.post("/logout", async (ctx) => {
   requireAuth(ctx);
-  clearSession(ctx);
+  await clearSession(ctx);
   return ctx.json({ success: true });
 });

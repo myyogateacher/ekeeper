@@ -5,6 +5,7 @@
 eKeeper is designed for a simple production topology:
 - Bun backend as the single app server
 - ClickHouse for event and analytics storage
+- Redis for session storage
 - SQLite for relational state and server settings
 - built frontend served directly from the backend
 
@@ -25,6 +26,7 @@ This produces:
 
 At minimum, production needs:
 - a reachable ClickHouse instance
+- a reachable Redis instance
 - persistent storage for SQLite
 - persistent storage for uploaded minimaps/source maps
 
@@ -42,6 +44,10 @@ Review these before starting production:
 - `GOOGLE_CALLBACK_URL`
 - `GOOGLE_ALLOWED_DOMAINS`
 - `SESSION_SECRET`
+- `REDIS_HOST`
+- `REDIS_PORT`
+- `REDIS_PASSWORD`
+- `REDIS_DB`
 - `SQLITE_PATH`
 - `CLICKHOUSE_URL`
 - `CLICKHOUSE_USER`
@@ -80,6 +86,7 @@ docker compose -f docker-compose.sample.yml up --build
 
 The included compose file starts:
 - `clickhouse`
+- `redis`
 - `backend`
 
 For teams iterating on the UI, the Vite dev server remains better for local development, but production uses the built SPA only.
@@ -139,4 +146,4 @@ Admins can regenerate the upload token in `/settings`. This invalidates the prev
 
 ### Auth
 
-Google SSO remains the production login path. The configured callback URL must match the deployed backend URL.
+Google SSO remains the production login path. The configured callback URL must match the deployed backend URL, and browser sessions are stored in Redis.

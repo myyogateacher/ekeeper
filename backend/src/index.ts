@@ -8,6 +8,7 @@ import { config } from "./config";
 import { sessionMiddleware } from "./lib/auth";
 import { HttpError } from "./lib/http";
 import { runMigrations } from "./lib/migrations";
+import { connectRedis } from "./lib/redis";
 import { getServerAuthToken } from "./lib/server-settings";
 import { apiRouter } from "./routes/api";
 import { authRouter } from "./routes/auth";
@@ -72,6 +73,7 @@ if (hasFrontendBuild) {
 }
 
 await runMigrations();
+await connectRedis();
 getServerAuthToken();
 
 export default {

@@ -23,6 +23,10 @@ Important values to review:
 - `GOOGLE_CLIENT_SECRET`
 - `GOOGLE_CALLBACK_URL`
 - `GOOGLE_ALLOWED_DOMAINS`
+- `REDIS_HOST`
+- `REDIS_PORT`
+- `REDIS_PASSWORD`
+- `REDIS_DB`
 - `SQLITE_PATH`
 - `CLICKHOUSE_URL`
 - `CLICKHOUSE_USER`
@@ -40,10 +44,10 @@ Notes:
 
 ## Start Local Infrastructure
 
-Bring up ClickHouse:
+Bring up ClickHouse and Redis:
 
 ```bash
-docker compose -f docker-compose.sample.yml up -d clickhouse
+docker compose -f docker-compose.sample.yml up -d clickhouse redis
 ```
 
 Optional log tail:
@@ -107,7 +111,7 @@ bun run migrate
 Usually this means ClickHouse is not reachable. Start it first:
 
 ```bash
-docker compose -f docker-compose.sample.yml up -d clickhouse
+docker compose -f docker-compose.sample.yml up -d clickhouse redis
 ```
 
 ### Browser ingest fails with CORS
