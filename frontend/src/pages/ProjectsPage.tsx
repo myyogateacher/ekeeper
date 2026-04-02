@@ -1,6 +1,8 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { useNavigate } from "react-router-dom";
+import { Copy } from "lucide-react";
+import { toast } from "react-toastify";
 import { api } from "@/lib/api";
 import { DataTable } from "@/components/DataTable";
 
@@ -91,7 +93,25 @@ export function ProjectsPage() {
               </div>
             </td>
             <td className="px-5 py-4">{project.environment}</td>
-            <td className="px-5 py-4 text-xs text-slate-300">{project.key?.dsn ?? "Pending key"}</td>
+            <td className="px-5 py-4 text-xs text-slate-300">
+              <div className="flex items-center gap-2">
+                <span className="min-w-0 break-all">{project.key?.dsn ?? "Pending key"}</span>
+                {project.key?.dsn ? (
+                  <button
+                    className="button-secondary h-8 w-8 shrink-0 !p-0"
+                    type="button"
+                    onClick={async (event) => {
+                      event.stopPropagation();
+                      await navigator.clipboard.writeText(project.key?.dsn ?? "");
+                      toast.info("Copied to clipboard");
+                    }}
+                    aria-label="Copy DSN"
+                  >
+                    <Copy className="mx-auto h-4 w-4" />
+                  </button>
+                ) : null}
+              </div>
+            </td>
             <td className="px-5 py-4">
               <button
                 className="button-secondary"

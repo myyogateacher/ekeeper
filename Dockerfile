@@ -18,7 +18,6 @@ FROM oven/bun:1 AS runner
 WORKDIR /app
 
 ENV NODE_ENV=production
-ENV BACKEND_PORT=3000
 
 COPY --from=builder /app/backend/dist ./backend/dist
 COPY --from=builder /app/backend/src/migrations ./backend/migrations

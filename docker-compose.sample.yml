@@ -18,6 +18,10 @@ services:
       dockerfile: Dockerfile
     env_file:
       - .env
+    environment:
+      CLICKHOUSE_URL: http://clickhouse:8123
+      CLICKHOUSE_HOST: clickhouse
+      CLICKHOUSE_PORT: 8123
     ports:
       - "${BACKEND_PORT:-3000}:3000"
     volumes:
