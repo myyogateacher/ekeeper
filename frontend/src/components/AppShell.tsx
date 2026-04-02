@@ -2,6 +2,7 @@ import { useState, type PropsWithChildren } from "react";
 import { Link, NavLink } from "react-router-dom";
 import { Activity, FileCode2, FolderKanban, LogOut, Settings, ShieldCheck, TriangleAlert } from "lucide-react";
 import { HiOutlineBars3 } from "react-icons/hi2";
+import { Tooltip } from "react-tooltip";
 import type { User } from "@ekeeper/shared";
 
 interface AppShellProps extends PropsWithChildren {
@@ -22,6 +23,17 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
 
   return (
     <div className="min-h-screen py-6 pr-4 sm:pr-6 lg:pr-8">
+      <Tooltip
+        id="sidebar-tooltip"
+        place="right"
+        offset={12}
+        opacity={1}
+        className="!z-[9999] !rounded-2xl !border !border-white/15 !bg-white/10 !px-3.5 !py-2.5 !text-xs !font-medium !text-slate-100 !backdrop-blur-xl"
+        style={{
+          background: "rgba(15, 23, 42, 0.82)",
+          boxShadow: "0 20px 50px rgba(2, 8, 23, 0.45)",
+        }}
+      />
       <div className="flex max-w-[1440px] gap-6 lg:gap-8">
         <aside
           className={`glass-panel sticky top-6 hidden h-[calc(100vh-3rem)] shrink-0 flex-col border-l-0 rounded-l-none p-4 transition-all duration-300 lg:flex ${
@@ -56,7 +68,8 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
               <NavLink
                 key={to}
                 to={to}
-                title={isCollapsed ? label : undefined}
+                data-tooltip-id={isCollapsed ? "sidebar-tooltip" : undefined}
+                data-tooltip-content={isCollapsed ? label : undefined}
                 className={({ isActive }) =>
                   `flex items-center rounded-2xl px-4 py-3 text-sm transition ${
                     isCollapsed ? "justify-center" : "gap-3"
@@ -89,13 +102,15 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
                 <Link
                   to="/dashboard"
                   className="flex h-11 w-11 items-center justify-center rounded-2xl bg-cyan-300/20 text-base font-semibold text-cyan-100"
-                  title="Dashboard"
+                  data-tooltip-id="sidebar-tooltip"
+                  data-tooltip-content="Dashboard"
                 >
                   eK
                 </Link>
                 <button
                   className="button-secondary h-11 w-11 !p-0"
-                  title="Logout"
+                  data-tooltip-id="sidebar-tooltip"
+                  data-tooltip-content="Logout"
                   onClick={() => void onLogout()}
                 >
                   <LogOut className="mx-auto h-4 w-4" />
