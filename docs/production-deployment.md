@@ -99,7 +99,7 @@ Run it with your production environment:
 
 ```bash
 docker run --env-file .env -p 3000:3000 \
-  -v $(pwd)/data/sqlite:/app/data/sqlite \
+  -v $(pwd)/data/sqlite:/app/backend/data/sqlite \
   -v $(pwd)/data/minimaps:/app/backend/data/minimaps \
   ekeeper:latest
 ```

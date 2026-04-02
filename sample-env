@@ -12,7 +12,7 @@ SESSION_COOKIE_NAME=ekeeper_session
 SESSION_SECRET=stub-super-secret-session-key
 SESSION_TTL_HOURS=168
 
-SQLITE_PATH=./data/sqlite/ekeeper.sqlite
+SQLITE_PATH=./backend/data/sqlite/ekeeper.sqlite
 
 CLICKHOUSE_URL=http://localhost:18123
 CLICKHOUSE_HOST=localhost

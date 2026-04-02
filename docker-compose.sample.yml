@@ -21,7 +21,7 @@ services:
     ports:
       - "${BACKEND_PORT:-3000}:3000"
     volumes:
-      - sqlite-data:/app/data/sqlite
+      - sqlite-data:/app/backend/data/sqlite
       - minimaps-data:/app/backend/data/minimaps
     depends_on:
       - clickhouse

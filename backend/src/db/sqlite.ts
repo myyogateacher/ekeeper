@@ -1,11 +1,15 @@
 import { Database, type SQLQueryBindings } from "bun:sqlite";
 import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import path, { dirname } from "node:path";
 import { config } from "../config";
 
-mkdirSync(dirname(config.SQLITE_PATH), { recursive: true });
+const sqlitePath = path.isAbsolute(config.SQLITE_PATH)
+  ? config.SQLITE_PATH
+  : path.resolve(import.meta.dir, "../../..", config.SQLITE_PATH);
 
-export const sqlite = new Database(config.SQLITE_PATH, { create: true, strict: true });
+mkdirSync(dirname(sqlitePath), { recursive: true });
+
+export const sqlite = new Database(sqlitePath, { create: true, strict: true });
 sqlite.exec("PRAGMA foreign_keys = ON;");
 sqlite.exec("PRAGMA journal_mode = WAL;");
 
