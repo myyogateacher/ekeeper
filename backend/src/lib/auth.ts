@@ -268,7 +268,7 @@ export function requireWorkspaceRole(ctx: Context, roles: User["role"][]) {
 
 export function requireProjectAccess(ctx: Context, projectId: string, requireWrite = false) {
   const auth = requireAuth(ctx);
-  if (auth.user.role === "admin") {
+  if (auth.user.role === "admin" || (!requireWrite && auth.user.role === "viewer")) {
     return auth;
   }
 

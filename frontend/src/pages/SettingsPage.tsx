@@ -9,12 +9,10 @@ export function SettingsPage() {
   const { data } = useQuery({
     queryKey: ["server-settings"],
     queryFn: api.serverSettings,
-    enabled: me?.user.role === "admin",
   });
   const { data: projects } = useQuery({
     queryKey: ["projects"],
     queryFn: api.projects,
-    enabled: me?.user.role === "admin",
   });
   const regenerateToken = useMutation({
     mutationFn: api.regenerateServerToken,
@@ -33,17 +31,7 @@ export function SettingsPage() {
     return <section className="glass-panel p-6 text-slate-300">Loading server settings...</section>;
   }
 
-  if (me?.user.role !== "admin") {
-    return (
-      <section className="glass-panel p-6">
-        <h2 className="text-2xl font-semibold text-white">Server settings are admin-only</h2>
-        <p className="mt-3 text-sm text-slate-300">
-          This page exposes plugin configuration values, so it is limited to workspace admins.
-        </p>
-      </section>
-    );
-  }
-
+  const isAdmin = me?.user.role === "admin";
   const settings = data?.settings;
   const selectedProject = projects?.projects.find((project) => project.id === selectedProjectId) ?? projects?.projects[0];
   const viteSnippet = settings
@@ -106,18 +94,20 @@ export function SettingsPage() {
           <p className="mt-2 text-sm leading-6 text-slate-300">
             Regenerating the upload token invalidates the previous token for all future plugin uploads.
           </p>
-          <button
-            className="button-secondary mt-4"
-            type="button"
-            onClick={() => {
-              if (window.confirm("Regenerate the upload token? Existing plugin uploads will stop working until updated.")) {
-                regenerateToken.mutate();
-              }
-            }}
-            disabled={regenerateToken.isPending}
-          >
-            Regenerate token
-          </button>
+          {isAdmin ? (
+            <button
+              className="button-secondary mt-4"
+              type="button"
+              onClick={() => {
+                if (window.confirm("Regenerate the upload token? Existing plugin uploads will stop working until updated.")) {
+                  regenerateToken.mutate();
+                }
+              }}
+              disabled={regenerateToken.isPending}
+            >
+              Regenerate token
+            </button>
+          ) : null}
         </div>
       </section>
 

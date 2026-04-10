@@ -5,6 +5,7 @@ import type {
   IssueState,
   MeResponse,
   MinimapArtifact,
+  OccurrenceSummary,
   Project,
   ProjectMembership,
   ProjectKey,
@@ -92,9 +93,9 @@ export const api = {
       projectId ? `/api/projects/${projectId}/errors${suffix}` : `/api/projects/all/errors${suffix}`,
     );
   },
-  errorDetail: (projectId: string, groupId: string) =>
-    request<{ error: ErrorEventDetail | null; occurrences: ErrorGroupSummary[] }>(
-      `/api/projects/${projectId}/errors/${groupId}`,
+  errorDetail: (projectId: string, groupId: string, eventId?: string) =>
+    request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[] }>(
+      `/api/projects/${projectId}/errors/${groupId}${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ""}`,
     ),
   updateIssueWorkflow: (projectId: string, groupId: string, payload: { state?: IssueState; assignedUserId?: string | null }) =>
     request<{ issue: ErrorGroupSummary | undefined }>(`/api/projects/${projectId}/errors/${groupId}/workflow`, {

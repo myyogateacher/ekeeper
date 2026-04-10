@@ -120,6 +120,11 @@ export interface ErrorEventDetail {
   sourceMapRelease: string | null;
 }
 
+export interface OccurrenceSummary {
+  eventId: string;
+  timestamp: string;
+}
+
 export interface MigrationRecord {
   version: string;
   name: string;

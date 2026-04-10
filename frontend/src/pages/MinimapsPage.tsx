@@ -16,17 +16,15 @@ export function MinimapsPage() {
   const { data: projects } = useQuery({
     queryKey: ["projects"],
     queryFn: api.projects,
-    enabled: me?.user.role === "admin",
   });
   const { data } = useQuery({
     queryKey: ["minimaps", selectedProjectId],
     queryFn: () => api.minimaps(selectedProjectId || undefined),
-    enabled: me?.user.role === "admin" && Boolean(selectedProjectId),
+    enabled: Boolean(selectedProjectId),
   });
   const { data: settings } = useQuery({
     queryKey: ["server-settings"],
     queryFn: api.serverSettings,
-    enabled: me?.user.role === "admin",
   });
 
   useEffect(() => {
@@ -72,16 +70,7 @@ export function MinimapsPage() {
     return <section className="glass-panel p-6 text-slate-300">Loading minimaps...</section>;
   }
 
-  if (me?.user.role !== "admin") {
-    return (
-      <section className="glass-panel p-6">
-        <h2 className="text-2xl font-semibold text-white">Minimaps are admin-only</h2>
-        <p className="mt-3 text-sm text-slate-300">
-          Source map uploads affect server-wide decoding, so only admins can manage them.
-        </p>
-      </section>
-    );
-  }
+  const isAdmin = me?.user.role === "admin";
 
   const selectedProject = projects?.projects.find((project) => project.id === selectedProjectId) ?? projects?.projects[0];
 
@@ -117,78 +106,82 @@ export function MinimapsPage() {
               Artifacts older than 30 days can be removed in one action. Right now {data?.olderThanThirtyDays ?? 0}{" "}
               uploaded minimaps are eligible.
             </p>
-            <button
-              className="button-secondary mt-4"
-              type="button"
-              onClick={() => cleanupMutation.mutate()}
-              disabled={cleanupMutation.isPending}
-            >
-              Remove minimaps older than 30 days
-            </button>
+            {isAdmin ? (
+              <button
+                className="button-secondary mt-4"
+                type="button"
+                onClick={() => cleanupMutation.mutate()}
+                disabled={cleanupMutation.isPending}
+              >
+                Remove minimaps older than 30 days
+              </button>
+            ) : null}
           </div>
         </div>
       </section>
 
-      <section className="glass-panel p-6">
-        <div className="flex items-center justify-between gap-4">
-          <div>
-            <h3 className="text-lg font-semibold text-white">Upload a minimap</h3>
-            <p className="mt-1 text-sm text-slate-300">
-              Manual uploads are useful for testing or backfilling a release.
-            </p>
-          </div>
-          <button
-            className="button-secondary"
-            type="button"
-            onClick={() => setIsUploadOpen((open) => !open)}
-          >
-            {isUploadOpen ? "Hide upload form" : "Show upload form"}
-          </button>
-        </div>
-        {isUploadOpen ? (
-          <form
-            className="mt-4 grid gap-3 lg:grid-cols-2"
-            onSubmit={(event) => {
-              event.preventDefault();
-              uploadMutation.mutate();
-            }}
-          >
-            <input
-              className="input"
-              placeholder="Release"
-              value={release}
-              onChange={(event) => setRelease(event.target.value)}
-            />
-            <input
-              className="input"
-              placeholder="Dist (optional)"
-              value={dist}
-              onChange={(event) => setDist(event.target.value)}
-            />
-            <input
-              className="input lg:col-span-2"
-              placeholder="Artifact path, for example ~/assets/index.js.map"
-              value={artifactName}
-              onChange={(event) => setArtifactName(event.target.value)}
-            />
-            <input
-              className="input lg:col-span-2 file:mr-4 file:rounded-2xl file:border-0 file:bg-cyan-300/20 file:px-4 file:py-2 file:text-sm file:text-cyan-100"
-              type="file"
-              accept=".map,application/json"
-              onChange={(event) => setFile(event.target.files?.[0] ?? null)}
-            />
-            <div className="lg:col-span-2 flex items-center gap-3">
-              <button className="button-primary" type="submit" disabled={uploadMutation.isPending}>
-                Upload minimap
-              </button>
-              {uploadMutation.error ? <p className="text-sm text-rose-200">{uploadMutation.error.message}</p> : null}
+      {isAdmin ? (
+        <section className="glass-panel p-6">
+          <div className="flex items-center justify-between gap-4">
+            <div>
+              <h3 className="text-lg font-semibold text-white">Upload a minimap</h3>
+              <p className="mt-1 text-sm text-slate-300">
+                Manual uploads are useful for testing or backfilling a release.
+              </p>
             </div>
-            <p className="lg:col-span-2 text-sm text-slate-300">
-              Plugin project value for this upload: <span className="font-mono text-cyan-100">{selectedProject?.slug ?? "<project-slug>"}</span>
-            </p>
-          </form>
-        ) : null}
-      </section>
+            <button
+              className="button-secondary"
+              type="button"
+              onClick={() => setIsUploadOpen((open) => !open)}
+            >
+              {isUploadOpen ? "Hide upload form" : "Show upload form"}
+            </button>
+          </div>
+          {isUploadOpen ? (
+            <form
+              className="mt-4 grid gap-3 lg:grid-cols-2"
+              onSubmit={(event) => {
+                event.preventDefault();
+                uploadMutation.mutate();
+              }}
+            >
+              <input
+                className="input"
+                placeholder="Release"
+                value={release}
+                onChange={(event) => setRelease(event.target.value)}
+              />
+              <input
+                className="input"
+                placeholder="Dist (optional)"
+                value={dist}
+                onChange={(event) => setDist(event.target.value)}
+              />
+              <input
+                className="input lg:col-span-2"
+                placeholder="Artifact path, for example ~/assets/index.js.map"
+                value={artifactName}
+                onChange={(event) => setArtifactName(event.target.value)}
+              />
+              <input
+                className="input lg:col-span-2 file:mr-4 file:rounded-2xl file:border-0 file:bg-cyan-300/20 file:px-4 file:py-2 file:text-sm file:text-cyan-100"
+                type="file"
+                accept=".map,application/json"
+                onChange={(event) => setFile(event.target.files?.[0] ?? null)}
+              />
+              <div className="lg:col-span-2 flex items-center gap-3">
+                <button className="button-primary" type="submit" disabled={uploadMutation.isPending}>
+                  Upload minimap
+                </button>
+                {uploadMutation.error ? <p className="text-sm text-rose-200">{uploadMutation.error.message}</p> : null}
+              </div>
+              <p className="lg:col-span-2 text-sm text-slate-300">
+                Plugin project value for this upload: <span className="font-mono text-cyan-100">{selectedProject?.slug ?? "<project-slug>"}</span>
+              </p>
+            </form>
+          ) : null}
+        </section>
+      ) : null}
 
       <DataTable headers={["Artifact", "Release", "Org / Project", "Uploaded", "Expires"]}>
         {(data?.artifacts ?? []).map((artifact) => (

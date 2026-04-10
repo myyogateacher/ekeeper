@@ -17,8 +17,8 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
     { to: "/projects", label: "Projects", icon: FolderKanban, adminOnly: false },
     { to: "/users", label: "Users", icon: ShieldCheck, adminOnly: false },
     { to: "/errors", label: "Errors", icon: TriangleAlert, adminOnly: false },
-    { to: "/minimaps", label: "Minimaps", icon: FileCode2, adminOnly: true },
-    { to: "/settings", label: "Settings", icon: Settings, adminOnly: true },
+    { to: "/minimaps", label: "Minimaps", icon: FileCode2, adminOnly: false },
+    { to: "/settings", label: "Settings", icon: Settings, adminOnly: false },
   ].filter((item) => !item.adminOnly || user.role === "admin");
 
   return (

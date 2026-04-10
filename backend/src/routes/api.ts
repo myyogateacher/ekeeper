@@ -285,7 +285,7 @@ apiRouter.get("/me", (ctx) => {
 });
 
 apiRouter.get("/users", (ctx) => {
-  requireWorkspaceRole(ctx, ["admin"]);
+  requireWorkspaceRole(ctx, ["admin", "viewer"]);
   const users = all<User>(
     `SELECT id, email, name, avatar_url as avatarUrl, role, status, created_at as createdAt, updated_at as updatedAt
      FROM users ORDER BY created_at DESC`,
@@ -346,7 +346,8 @@ apiRouter.delete("/users/:userId", async (ctx) => {
 
 apiRouter.get("/projects", (ctx) => {
   const auth = requireAuth(ctx);
-  return ctx.json({ projects: mapProjectRows(auth.user.id, auth.user.role === "admin") });
+  const seeAll = auth.user.role === "admin" || auth.user.role === "viewer";
+  return ctx.json({ projects: mapProjectRows(auth.user.id, seeAll) });
 });
 
 apiRouter.post("/projects", async (ctx) => {
@@ -457,7 +458,8 @@ apiRouter.delete("/projects/:projectId/members/:userId", (ctx) => {
 
 apiRouter.get("/dashboard/summary", async (ctx) => {
   const auth = requireAuth(ctx);
-  const projects = mapProjectRows(auth.user.id, auth.user.role === "admin").map((project) => ({
+  const seeAll = auth.user.role === "admin" || auth.user.role === "viewer";
+  const projects = mapProjectRows(auth.user.id, seeAll).map((project) => ({
     id: project.id,
     name: project.name,
     slug: project.slug,
@@ -474,7 +476,7 @@ apiRouter.get("/dashboard/summary", async (ctx) => {
 });
 
 apiRouter.get("/settings/server", (ctx) => {
-  requireWorkspaceRole(ctx, ["admin"]);
+  requireWorkspaceRole(ctx, ["admin", "viewer"]);
   const settings: ServerSettings = getServerSettings();
   return ctx.json({ settings });
 });
@@ -489,7 +491,7 @@ apiRouter.post("/settings/server/regenerate-token", (ctx) => {
 });
 
 apiRouter.get("/minimaps", (ctx) => {
-  requireWorkspaceRole(ctx, ["admin"]);
+  requireWorkspaceRole(ctx, ["admin", "viewer"]);
   const projectId = ctx.req.query("projectId") ?? undefined;
   const artifacts = listMinimapArtifacts(projectId);
   const olderThanThirtyDays = artifacts.filter(
@@ -539,10 +541,10 @@ apiRouter.post("/minimaps/cleanup-old", (ctx) => {
 
 apiRouter.get("/projects/all/errors", async (ctx) => {
   const auth = requireAuth(ctx);
-  const projectIds =
-    auth.user.role === "admin"
-      ? all<{ id: string }>("SELECT id FROM projects").map((project) => project.id)
-      : auth.memberships.map((membership) => membership.projectId);
+  const seeAllProjects = auth.user.role === "admin" || auth.user.role === "viewer";
+  const projectIds = seeAllProjects
+    ? all<{ id: string }>("SELECT id FROM projects").map((project) => project.id)
+    : auth.memberships.map((membership) => membership.projectId);
   const errors = filterErrors(await queryErrorGroups(projectIds), {
     state: ctx.req.query("state") ?? "open_or_reopened",
     assignment: ctx.req.query("assignment") ?? "any",
@@ -568,7 +570,7 @@ apiRouter.get("/error-assignees", (ctx) => {
   const visibleProjectIds =
     requestedProjectId
       ? [requestedProjectId]
-      : auth.user.role === "admin"
+      : (auth.user.role === "admin" || auth.user.role === "viewer")
         ? all<{ id: string }>("SELECT id FROM projects").map((project) => project.id)
         : auth.memberships.map((membership) => membership.projectId);
 
@@ -599,41 +601,58 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
   const groupId = ctx.req.param("groupId");
   requireProjectAccess(ctx, projectId, false);
   const client = getClickHouseClient();
-  const eventResult = await client.query({
+  const eventIdParam = ctx.req.query("eventId");
+
+  // Fetch all occurrence summaries (eventId + timestamp) for navigation
+  const occurrenceResult = await client.query({
     query: `
-      SELECT
-        event_id AS eventId,
-        group_id AS groupId,
-        message,
-        exception,
-        stacktrace,
-        browser,
-        device,
-        os,
-        runtime,
-        tags,
-        contexts,
-        raw_payload AS rawPayload,
-        timestamp
+      SELECT event_id AS eventId, timestamp
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String}
       ORDER BY timestamp DESC
-      LIMIT 1
     `,
     query_params: { projectId, groupId },
     format: "JSONEachRow",
   });
+  const occurrences = (await occurrenceResult.json()) as Array<{ eventId: string; timestamp: string }>;
+
+  // Fetch the requested event (by eventId) or the latest one
+  const eventQuery = eventIdParam
+    ? `
+      SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
+        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
+      FROM events
+      WHERE project_id = {projectId:String} AND group_id = {groupId:String} AND event_id = {eventId:String}
+      LIMIT 1
+    `
+    : `
+      SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
+        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
+      FROM events
+      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+      ORDER BY timestamp DESC
+      LIMIT 1
+    `;
+  const eventResult = await client.query({
+    query: eventQuery,
+    query_params: { projectId, groupId, eventId: eventIdParam ?? "" },
+    format: "JSONEachRow",
+  });
   const events = (await eventResult.json()) as Array<Omit<ErrorEventDetail, "breadcrumbs">>;
 
+  const latestEvent = events[0];
+
+  // Fetch breadcrumbs scoped to the specific event
   const breadcrumbResult = await client.query({
     query: `
       SELECT timestamp, category, level, message, type, data
       FROM breadcrumbs
       WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+        AND event_id = {eventId:String}
       ORDER BY timestamp DESC
       LIMIT 100
     `,
-    query_params: { projectId, groupId },
+    query_params: { projectId, groupId, eventId: latestEvent?.eventId ?? "" },
     format: "JSONEachRow",
   });
 
@@ -651,7 +670,6 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
     `,
     [projectId, groupId],
   );
-  const latestEvent = events[0];
   const deobfuscated = latestEvent
     ? deobfuscateEvent({
         projectId,
@@ -674,7 +692,7 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         sourceMapRelease: deobfuscated?.release ?? null,
       }
     : null;
-  return ctx.json({ error, occurrences: [] });
+  return ctx.json({ error, occurrences });
 });
 
 apiRouter.patch("/projects/:projectId/errors/:groupId/workflow", async (ctx) => {

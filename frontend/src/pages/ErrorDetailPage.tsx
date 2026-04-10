@@ -1,6 +1,7 @@
+import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { useParams } from "react-router-dom";
-import { HiArrowDownTray } from "react-icons/hi2";
+import { HiArrowDownTray, HiChevronLeft, HiChevronRight } from "react-icons/hi2";
 import { api } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import type { IssueState } from "@ekeeper/shared";
@@ -131,9 +132,10 @@ function getFrames(stacktraceInput: unknown, exceptionInput: unknown) {
 export function ErrorDetailPage() {
   const { projectId = "", groupId = "" } = useParams();
   const queryClient = useQueryClient();
+  const [selectedEventId, setSelectedEventId] = useState<string | undefined>(undefined);
   const { data } = useQuery({
-    queryKey: ["error-detail", projectId, groupId],
-    queryFn: () => api.errorDetail(projectId, groupId),
+    queryKey: ["error-detail", projectId, groupId, selectedEventId],
+    queryFn: () => api.errorDetail(projectId, groupId, selectedEventId),
     enabled: Boolean(projectId && groupId),
   });
   const { data: assignees } = useQuery({
@@ -154,6 +156,18 @@ export function ErrorDetailPage() {
   });
 
   const error = data?.error;
+  const occurrences = data?.occurrences ?? [];
+  const totalOccurrences = occurrences.length;
+  const currentIndex = error
+    ? occurrences.findIndex((o) => o.eventId === error.eventId)
+    : 0;
+
+  function goToOccurrence(index: number) {
+    const target = occurrences[index];
+    if (target) {
+      setSelectedEventId(target.eventId);
+    }
+  }
 
   if (!error) {
     return (
@@ -201,11 +215,39 @@ export function ErrorDetailPage() {
           <div>
             <h2 className="text-3xl font-semibold text-white">{error.message}</h2>
             <p className="mt-2 text-sm text-slate-300">
-              {type} • Last event captured {formatDate(error.timestamp)}
+              {type} • Event captured {formatDate(error.timestamp)}
+              {totalOccurrences > 0 ? ` • ${totalOccurrences} occurrence${totalOccurrences === 1 ? "" : "s"} total` : ""}
             </p>
           </div>
-          <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200">
-            Group <span className="font-mono text-xs">{error.groupId}</span>
+          <div className="flex items-center gap-3">
+            {totalOccurrences > 1 ? (
+              <div className="flex items-center gap-1">
+                <button
+                  type="button"
+                  className="button-secondary h-9 w-9 !p-0 disabled:opacity-30"
+                  disabled={currentIndex <= 0}
+                  onClick={() => goToOccurrence(currentIndex - 1)}
+                  aria-label="Newer occurrence"
+                >
+                  <HiChevronLeft className="mx-auto h-4 w-4" />
+                </button>
+                <span className="min-w-[5rem] text-center text-sm text-slate-300">
+                  {currentIndex + 1} / {totalOccurrences}
+                </span>
+                <button
+                  type="button"
+                  className="button-secondary h-9 w-9 !p-0 disabled:opacity-30"
+                  disabled={currentIndex >= totalOccurrences - 1}
+                  onClick={() => goToOccurrence(currentIndex + 1)}
+                  aria-label="Older occurrence"
+                >
+                  <HiChevronRight className="mx-auto h-4 w-4" />
+                </button>
+              </div>
+            ) : null}
+            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200">
+              Group <span className="font-mono text-xs">{error.groupId}</span>
+            </div>
           </div>
         </div>
         <div className="mt-6 grid gap-4 lg:grid-cols-3">

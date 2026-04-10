@@ -12,6 +12,8 @@ export function ProjectsPage() {
   const queryClient = useQueryClient();
   const navigate = useNavigate();
   const [form, setForm] = useState(emptyProject);
+  const { data: me } = useQuery({ queryKey: ["me"], queryFn: api.me });
+  const isAdmin = me?.user.role === "admin";
   const { data } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
 
   const createProject = useMutation({
@@ -40,35 +42,37 @@ export function ProjectsPage() {
               Create projects, define environment defaults, and manage the DSN details SDKs use to send errors.
             </p>
           </div>
-          <form
-            className="grid gap-3 rounded-3xl border border-white/10 bg-slate-950/20 p-4"
-            onSubmit={(event) => {
-              event.preventDefault();
-              createProject.mutate(form);
-            }}
-          >
-            <input
-              className="input"
-              placeholder="Project name"
-              value={form.name}
-              onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-            />
-            <input
-              className="input"
-              placeholder="Slug"
-              value={form.slug}
-              onChange={(event) => setForm((current) => ({ ...current, slug: event.target.value }))}
-            />
-            <input
-              className="input"
-              placeholder="Environment"
-              value={form.environment}
-              onChange={(event) => setForm((current) => ({ ...current, environment: event.target.value }))}
-            />
-            <button className="button-primary" type="submit">
-              Add project
-            </button>
-          </form>
+          {isAdmin ? (
+            <form
+              className="grid gap-3 rounded-3xl border border-white/10 bg-slate-950/20 p-4"
+              onSubmit={(event) => {
+                event.preventDefault();
+                createProject.mutate(form);
+              }}
+            >
+              <input
+                className="input"
+                placeholder="Project name"
+                value={form.name}
+                onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+              />
+              <input
+                className="input"
+                placeholder="Slug"
+                value={form.slug}
+                onChange={(event) => setForm((current) => ({ ...current, slug: event.target.value }))}
+              />
+              <input
+                className="input"
+                placeholder="Environment"
+                value={form.environment}
+                onChange={(event) => setForm((current) => ({ ...current, environment: event.target.value }))}
+              />
+              <button className="button-primary" type="submit">
+                Add project
+              </button>
+            </form>
+          ) : null}
         </div>
       </section>
 
@@ -112,17 +116,21 @@ export function ProjectsPage() {
                 ) : null}
               </div>
             </td>
-            <td className="px-5 py-4">
-              <button
-                className="button-secondary"
-                onClick={(event) => {
-                  event.stopPropagation();
-                  deleteProject.mutate(project.id);
-                }}
-              >
-                Remove
-              </button>
-            </td>
+            {isAdmin ? (
+              <td className="px-5 py-4">
+                <button
+                  className="button-secondary"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    deleteProject.mutate(project.id);
+                  }}
+                >
+                  Remove
+                </button>
+              </td>
+            ) : (
+              <td className="px-5 py-4" />
+            )}
           </tr>
         ))}
       </DataTable>

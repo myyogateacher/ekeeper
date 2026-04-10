@@ -17,6 +17,8 @@ export function UsersPage() {
   const queryClient = useQueryClient();
   const [selectedUserId, setSelectedUserId] = useState<string | null>(null);
   const [form, setForm] = useState(emptyUser);
+  const { data: me } = useQuery({ queryKey: ["me"], queryFn: api.me });
+  const isAdmin = me?.user.role === "admin";
   const { data } = useQuery({ queryKey: ["users"], queryFn: api.users });
 
   const users = useMemo(() => data?.users ?? [], [data]);
@@ -82,16 +84,20 @@ export function UsersPage() {
         </div>
       </section>
 
-      <section className="grid gap-6 xl:grid-cols-[1.1fr,0.9fr]">
+      <section className={`grid gap-6 ${isAdmin ? "xl:grid-cols-[1.1fr,0.9fr]" : ""}`}>
         <div className="glass-panel p-6">
           <div className="flex items-center justify-between gap-4">
             <div>
               <h3 className="text-lg font-semibold text-white">Users</h3>
-              <p className="mt-1 text-sm text-slate-300">Select a user to edit their profile and workspace access.</p>
+              <p className="mt-1 text-sm text-slate-300">
+                {isAdmin ? "Select a user to edit their profile and workspace access." : "All workspace users and their roles."}
+              </p>
             </div>
-            <button className="button-secondary" type="button" onClick={resetForm}>
-              Add new user
-            </button>
+            {isAdmin ? (
+              <button className="button-secondary" type="button" onClick={resetForm}>
+                Add new user
+              </button>
+            ) : null}
           </div>
 
           <div className="mt-5 space-y-3">
@@ -100,19 +106,21 @@ export function UsersPage() {
               return (
                 <div
                   key={user.id}
-                  className={`cursor-pointer rounded-3xl border p-4 transition ${
+                  className={`rounded-3xl border p-4 transition ${
+                    isAdmin ? "cursor-pointer" : ""
+                  } ${
                     isActive
                       ? "border-cyan-300/30 bg-cyan-300/10"
                       : "border-white/10 bg-slate-950/20 hover:bg-white/5"
                   }`}
-                  tabIndex={0}
-                  onClick={() => selectUser(user.id)}
-                  onKeyDown={(event) => {
+                  tabIndex={isAdmin ? 0 : undefined}
+                  onClick={isAdmin ? () => selectUser(user.id) : undefined}
+                  onKeyDown={isAdmin ? (event) => {
                     if (event.key === "Enter" || event.key === " ") {
                       event.preventDefault();
                       selectUser(user.id);
                     }
-                  }}
+                  } : undefined}
                 >
                   <div className="flex items-start justify-between gap-4">
                     <div className="flex min-w-0 items-start gap-3">
@@ -148,110 +156,112 @@ export function UsersPage() {
           </div>
         </div>
 
-        <div className="glass-panel p-6">
-          <div className="flex items-start justify-between gap-4">
-            <div>
-              <h3 className="text-lg font-semibold text-white">
-                {selectedUser ? "Edit user" : "Add user"}
-              </h3>
-              <p className="mt-1 text-sm text-slate-300">
-                {selectedUser
-                  ? "Update the selected user’s role, status, or profile details."
-                  : "Create a new user who can later be assigned to projects."}
-              </p>
-            </div>
-            {selectedUser ? (
-              <button className="button-secondary" type="button" onClick={resetForm}>
-                Cancel edit
-              </button>
-            ) : null}
-          </div>
-
-          <form
-            className="mt-5 grid gap-3"
-            onSubmit={(event) => {
-              event.preventDefault();
-              if (selectedUser) {
-                updateUser.mutate({
-                  userId: selectedUser.id,
-                  payload: {
-                    name: form.name,
-                    avatarUrl: form.avatarUrl,
-                    role: form.role,
-                    status: form.status,
-                  },
-                });
-                return;
-              }
-
-              createUser.mutate(form);
-            }}
-          >
-            <input
-              className="input"
-              placeholder="Name"
-              value={form.name}
-              onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
-            />
-            <input
-              className="input"
-              placeholder="Email"
-              value={form.email}
-              disabled={Boolean(selectedUser)}
-              onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
-            />
-            <input
-              className="input"
-              placeholder="Avatar URL"
-              value={form.avatarUrl}
-              onChange={(event) => setForm((current) => ({ ...current, avatarUrl: event.target.value }))}
-            />
-            <select
-              className="input"
-              value={form.role}
-              onChange={(event) => setForm((current) => ({ ...current, role: event.target.value as typeof form.role }))}
-            >
-              {roleOptions.map((role) => (
-                <option key={role} value={role}>
-                  {role}
-                </option>
-              ))}
-            </select>
-            <select
-              className="input"
-              value={form.status}
-              onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as typeof form.status }))}
-            >
-              <option value="active">active</option>
-              <option value="disabled">disabled</option>
-            </select>
-
-            <div className="flex flex-wrap gap-3 pt-2">
-              <button className="button-primary" type="submit" disabled={createUser.isPending || updateUser.isPending}>
-                {selectedUser ? "Save changes" : "Add user"}
-              </button>
+        {isAdmin ? (
+          <div className="glass-panel p-6">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <h3 className="text-lg font-semibold text-white">
+                  {selectedUser ? "Edit user" : "Add user"}
+                </h3>
+                <p className="mt-1 text-sm text-slate-300">
+                  {selectedUser
+                    ? "Update the selected user’s role, status, or profile details."
+                    : "Create a new user who can later be assigned to projects."}
+                </p>
+              </div>
               {selectedUser ? (
-                <button
-                  className="button-secondary"
-                  type="button"
-                  onClick={() => deleteUser.mutate(selectedUser.id)}
-                  disabled={deleteUser.isPending}
-                >
-                  Remove user
+                <button className="button-secondary" type="button" onClick={resetForm}>
+                  Cancel edit
                 </button>
               ) : null}
             </div>
 
-            {selectedUser ? (
-              <p className="text-sm text-slate-300">
-                Email stays locked during edit so identity remains stable.
-              </p>
-            ) : null}
-            {createUser.error ? <p className="text-sm text-rose-200">{createUser.error.message}</p> : null}
-            {updateUser.error ? <p className="text-sm text-rose-200">{updateUser.error.message}</p> : null}
-            {deleteUser.error ? <p className="text-sm text-rose-200">{deleteUser.error.message}</p> : null}
-          </form>
-        </div>
+            <form
+              className="mt-5 grid gap-3"
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (selectedUser) {
+                  updateUser.mutate({
+                    userId: selectedUser.id,
+                    payload: {
+                      name: form.name,
+                      avatarUrl: form.avatarUrl,
+                      role: form.role,
+                      status: form.status,
+                    },
+                  });
+                  return;
+                }
+
+                createUser.mutate(form);
+              }}
+            >
+              <input
+                className="input"
+                placeholder="Name"
+                value={form.name}
+                onChange={(event) => setForm((current) => ({ ...current, name: event.target.value }))}
+              />
+              <input
+                className="input"
+                placeholder="Email"
+                value={form.email}
+                disabled={Boolean(selectedUser)}
+                onChange={(event) => setForm((current) => ({ ...current, email: event.target.value }))}
+              />
+              <input
+                className="input"
+                placeholder="Avatar URL"
+                value={form.avatarUrl}
+                onChange={(event) => setForm((current) => ({ ...current, avatarUrl: event.target.value }))}
+              />
+              <select
+                className="input"
+                value={form.role}
+                onChange={(event) => setForm((current) => ({ ...current, role: event.target.value as typeof form.role }))}
+              >
+                {roleOptions.map((role) => (
+                  <option key={role} value={role}>
+                    {role}
+                  </option>
+                ))}
+              </select>
+              <select
+                className="input"
+                value={form.status}
+                onChange={(event) => setForm((current) => ({ ...current, status: event.target.value as typeof form.status }))}
+              >
+                <option value="active">active</option>
+                <option value="disabled">disabled</option>
+              </select>
+
+              <div className="flex flex-wrap gap-3 pt-2">
+                <button className="button-primary" type="submit" disabled={createUser.isPending || updateUser.isPending}>
+                  {selectedUser ? "Save changes" : "Add user"}
+                </button>
+                {selectedUser ? (
+                  <button
+                    className="button-secondary"
+                    type="button"
+                    onClick={() => deleteUser.mutate(selectedUser.id)}
+                    disabled={deleteUser.isPending}
+                  >
+                    Remove user
+                  </button>
+                ) : null}
+              </div>
+
+              {selectedUser ? (
+                <p className="text-sm text-slate-300">
+                  Email stays locked during edit so identity remains stable.
+                </p>
+              ) : null}
+              {createUser.error ? <p className="text-sm text-rose-200">{createUser.error.message}</p> : null}
+              {updateUser.error ? <p className="text-sm text-rose-200">{updateUser.error.message}</p> : null}
+              {deleteUser.error ? <p className="text-sm text-rose-200">{deleteUser.error.message}</p> : null}
+            </form>
+          </div>
+        ) : null}
       </section>
     </div>
   );
