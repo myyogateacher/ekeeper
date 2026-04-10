@@ -133,10 +133,11 @@ export function ErrorDetailPage() {
   const { projectId = "", groupId = "" } = useParams();
   const queryClient = useQueryClient();
   const [selectedEventId, setSelectedEventId] = useState<string | undefined>(undefined);
-  const { data } = useQuery({
+  const { data, isFetching } = useQuery({
     queryKey: ["error-detail", projectId, groupId, selectedEventId],
     queryFn: () => api.errorDetail(projectId, groupId, selectedEventId),
     enabled: Boolean(projectId && groupId),
+    placeholderData: (previousData) => previousData,
   });
   const { data: assignees } = useQuery({
     queryKey: ["error-assignees", projectId],
@@ -231,7 +232,7 @@ export function ErrorDetailPage() {
                 >
                   <HiChevronLeft className="mx-auto h-4 w-4" />
                 </button>
-                <span className="min-w-[5rem] text-center text-sm text-slate-300">
+                <span className={`min-w-[5rem] text-center text-sm text-slate-300 ${isFetching ? "animate-pulse" : ""}`}>
                   {currentIndex + 1} / {totalOccurrences}
                 </span>
                 <button
