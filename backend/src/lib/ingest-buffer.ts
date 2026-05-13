@@ -1,5 +1,6 @@
 import { getClickHouseClient } from "../db/clickhouse";
-import { run } from "../db/sqlite";
+import { all, one, run } from "../db/sqlite";
+import { ensureGithubIssueForGroup, getGithubIntegration } from "./issue-sync";
 import { normalizeEvent } from "./ingest";
 import { connectRedis } from "./redis";
 
@@ -75,6 +76,8 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
       release: event.release ?? "",
       environment: event.environment ?? "",
       user_id: event.userId ?? "",
+      user_email: event.userEmail ?? "",
+      user_username: event.userUsername ?? "",
       browser: event.browser ?? "",
       device: event.device ?? "",
       os: event.os ?? "",
@@ -125,12 +128,70 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
     );
   }
 
+  await maybeCreateGithubIssues({ projectId, events, affectedGroupIds });
+
   logIngestBuffer("finished ClickHouse batch", {
     projectId,
     eventCount: events.length,
     breadcrumbCount: breadcrumbs.length,
     reopenedGroupCount: affectedGroupIds.length,
   });
+}
+
+async function maybeCreateGithubIssues(input: {
+  projectId: string;
+  events: ReturnType<typeof normalizeEvent>[];
+  affectedGroupIds: string[];
+}): Promise<void> {
+  if (input.affectedGroupIds.length === 0) {
+    return;
+  }
+  const integration = getGithubIntegration(input.projectId);
+  if (!integration) {
+    return;
+  }
+
+  const project = one<{ name: string }>("SELECT name FROM projects WHERE id = ?", [
+    input.projectId,
+  ]);
+  if (!project) {
+    return;
+  }
+
+  const placeholders = input.affectedGroupIds.map(() => "?").join(", ");
+  const existingLinks = all<{ groupId: string }>(
+    `SELECT group_id as groupId FROM error_group_github_issues
+     WHERE project_id = ? AND group_id IN (${placeholders})`,
+    [input.projectId, ...input.affectedGroupIds],
+  );
+  const linkedGroups = new Set(existingLinks.map((row) => row.groupId));
+  const unlinkedGroups = input.affectedGroupIds.filter((groupId) => !linkedGroups.has(groupId));
+  if (unlinkedGroups.length === 0) {
+    return;
+  }
+
+  const firstEventByGroup = new Map<string, ReturnType<typeof normalizeEvent>>();
+  for (const event of input.events) {
+    if (!firstEventByGroup.has(event.groupId)) {
+      firstEventByGroup.set(event.groupId, event);
+    }
+  }
+
+  for (const groupId of unlinkedGroups) {
+    const event = firstEventByGroup.get(groupId);
+    if (!event) {
+      continue;
+    }
+    await ensureGithubIssueForGroup({
+      projectId: input.projectId,
+      projectName: project.name,
+      groupId,
+      title: event.title,
+      fingerprint: event.fingerprint,
+      firstSeen: event.timestamp,
+      message: event.message,
+    });
+  }
 }
 
 async function flushBucket(redisKey: string) {
