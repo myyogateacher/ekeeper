@@ -29,6 +29,8 @@ const envSchema = z.object({
   INGEST_SECRET_SEED: z.string().min(1),
   EKEEPER_ORG: z.string().min(1).default("ekeeper"),
   MINIMAPS_STORAGE_PATH: z.string().min(1).default("./backend/data/minimaps"),
+  GITHUB_TOKEN: z.string().default(""),
+  GITHUB_API_URL: z.string().url().default("https://api.github.com"),
 });
 
 const parsed = envSchema.parse(process.env);

@@ -7,6 +7,7 @@ import type {
   MinimapArtifact,
   OccurrenceSummary,
   Project,
+  ProjectGithubIntegration,
   ProjectMembership,
   ProjectKey,
   ServerSettings,
@@ -83,16 +84,44 @@ export const api = {
     request<{ deleted: number; artifacts: MinimapArtifact[] }>("/api/minimaps/cleanup-old", {
       method: "POST",
     }),
-  errors: (projectId?: string, filters?: { state?: string; assignment?: string; assignedUserId?: string }) => {
+  errors: (
+    projectId?: string,
+    filters?: { state?: string; assignment?: string; assignedUserId?: string; user?: string },
+  ) => {
     const search = new URLSearchParams();
     if (filters?.state) search.set("state", filters.state);
     if (filters?.assignment) search.set("assignment", filters.assignment);
     if (filters?.assignedUserId) search.set("assignedUserId", filters.assignedUserId);
+    if (filters?.user) search.set("user", filters.user);
     const suffix = search.toString() ? `?${search.toString()}` : "";
     return request<{ errors: ErrorGroupSummary[] }>(
       projectId ? `/api/projects/${projectId}/errors${suffix}` : `/api/projects/all/errors${suffix}`,
     );
   },
+  githubIntegration: (projectId: string) =>
+    request<{ integration: ProjectGithubIntegration | null }>(
+      `/api/projects/${projectId}/github-integration`,
+    ),
+  saveGithubIntegration: (
+    projectId: string,
+    payload: { owner: string; repo: string; defaultLabels: string[]; webhookSecret: string | null },
+  ) =>
+    request<{ integration: ProjectGithubIntegration | null }>(
+      `/api/projects/${projectId}/github-integration`,
+      { method: "PUT", body: JSON.stringify(payload) },
+    ),
+  deleteGithubIntegration: (projectId: string) =>
+    request<{ success: boolean }>(`/api/projects/${projectId}/github-integration`, {
+      method: "DELETE",
+    }),
+  backfillGithubIntegration: (projectId: string) =>
+    request<{
+      totalGroups: number;
+      alreadyLinked: number;
+      candidatesProcessed: number;
+      created: number;
+      failed: number;
+    }>(`/api/projects/${projectId}/github-integration/backfill`, { method: "POST" }),
   errorDetail: (projectId: string, groupId: string, eventId?: string) =>
     request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[] }>(
       `/api/projects/${projectId}/errors/${groupId}${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ""}`,

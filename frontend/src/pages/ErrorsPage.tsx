@@ -11,13 +11,15 @@ export function ErrorsPage() {
   const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
   const [assignmentFilter, setAssignmentFilter] = useState("any");
   const [state, setState] = useState("open_or_reopened");
+  const [userInput, setUserInput] = useState(() => searchParams.get("user") ?? "");
+  const [userFilter, setUserFilter] = useState(() => searchParams.get("user") ?? "");
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const { data: assignees } = useQuery({
     queryKey: ["error-assignees", projectId || "all"],
     queryFn: () => api.errorAssignees(projectId || undefined),
   });
   const { data } = useQuery({
-    queryKey: ["errors", projectId || "all", assignmentFilter, state],
+    queryKey: ["errors", projectId || "all", assignmentFilter, state, userFilter],
     queryFn: () =>
       api.errors(projectId || undefined, {
         state,
@@ -29,6 +31,7 @@ export function ErrorsPage() {
           assignmentFilter !== "any" && assignmentFilter !== "assigned" && assignmentFilter !== "unassigned"
             ? assignmentFilter
             : undefined,
+        user: userFilter || undefined,
       }),
   });
 
@@ -63,7 +66,7 @@ export function ErrorsPage() {
             Track recurrence, first and last seen windows, and drill into stack traces with runtime context.
           </p>
         </div>
-        <div className="grid gap-4 lg:grid-cols-3">
+        <div className="grid gap-4 lg:grid-cols-4">
           <div className="min-w-0">
             <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">Project</label>
             <select className="input" value={projectId} onChange={(event) => handleProjectChange(event.target.value)}>
@@ -97,6 +100,45 @@ export function ErrorsPage() {
                 </option>
               ))}
             </select>
+          </div>
+          <div className="min-w-0">
+            <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">User</label>
+            <input
+              className="input"
+              placeholder="User ID, email, or username — press Enter"
+              value={userInput}
+              onChange={(event) => setUserInput(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key !== "Enter") {
+                  return;
+                }
+                event.preventDefault();
+                const trimmed = userInput.trim();
+                setUserFilter(trimmed);
+                const nextParams = new URLSearchParams(searchParams);
+                if (trimmed) {
+                  nextParams.set("user", trimmed);
+                } else {
+                  nextParams.delete("user");
+                }
+                setSearchParams(nextParams, { replace: true });
+              }}
+            />
+            {userFilter ? (
+              <button
+                type="button"
+                className="mt-2 text-xs text-slate-400 underline-offset-2 hover:underline"
+                onClick={() => {
+                  setUserInput("");
+                  setUserFilter("");
+                  const nextParams = new URLSearchParams(searchParams);
+                  nextParams.delete("user");
+                  setSearchParams(nextParams, { replace: true });
+                }}
+              >
+                Clear filter
+              </button>
+            ) : null}
           </div>
         </div>
       </section>

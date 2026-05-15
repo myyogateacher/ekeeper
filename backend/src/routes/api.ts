@@ -8,6 +8,15 @@ import { HttpError } from "../lib/http";
 import { createId, randomToken } from "../lib/ids";
 import { cleanupExpiredMinimaps, deobfuscateEvent, listMinimapArtifacts, saveMinimapArtifact } from "../lib/minimaps";
 import { getServerSettings, regenerateServerAuthToken } from "../lib/server-settings";
+import {
+  ensureGithubIssueForGroup,
+  getGithubIntegration,
+  getGithubLink,
+  getGithubLinksForProjects,
+  parseLabels,
+  syncGithubIssueState,
+} from "../lib/issue-sync";
+import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
   DashboardProjectCard,
   ErrorEventDetail,
@@ -15,6 +24,7 @@ import type {
   IssueState,
   MinimapArtifact,
   Project,
+  ProjectGithubIntegration,
   ProjectKey,
   ProjectMembership,
   ServerSettings,
@@ -43,6 +53,13 @@ const membershipSchema = z.object({
 const workflowSchema = z.object({
   state: z.enum(["open", "closed", "reopened"]).optional(),
   assignedUserId: z.string().nullable().optional(),
+});
+
+const githubIntegrationSchema = z.object({
+  owner: z.string().min(1).max(120),
+  repo: z.string().min(1).max(120),
+  defaultLabels: z.array(z.string().min(1).max(60)).max(20).default([]),
+  webhookSecret: z.string().min(1).max(200).nullable().optional(),
 });
 
 const minimapUploadSchema = z.object({
@@ -146,13 +163,21 @@ async function dashboardCards(projectIds: string[], projects: Project[]): Promis
   });
 }
 
-async function queryErrorGroups(projectIds: string[]): Promise<ErrorGroupSummary[]> {
+async function queryErrorGroups(
+  projectIds: string[],
+  options: { user?: string } = {},
+): Promise<ErrorGroupSummary[]> {
   if (projectIds.length === 0) {
     return [];
   }
 
   const client = getClickHouseClient();
   const filter = projectIds.map((id) => `'${id}'`).join(", ");
+  const userTerm = options.user?.trim();
+  const userFilter = userTerm
+    ? `HAVING countIf(user_id = {userTerm:String} OR user_email = {userTerm:String} OR user_username = {userTerm:String}) > 0`
+    : "";
+
   const result = await client.query({
     query: `
       SELECT
@@ -169,12 +194,16 @@ async function queryErrorGroups(projectIds: string[]): Promise<ErrorGroupSummary
       FROM events
       WHERE project_id IN (${filter})
       GROUP BY project_id, group_id
+      ${userFilter}
       ORDER BY count7d DESC, lastSeen DESC
     `,
+    query_params: userTerm ? { userTerm } : undefined,
     format: "JSONEachRow",
   });
 
-  const rows = (await result.json()) as Array<Omit<ErrorGroupSummary, "state" | "assignedUserId" | "assignedUserName">>;
+  const rows = (await result.json()) as Array<
+    Omit<ErrorGroupSummary, "state" | "assignedUserId" | "assignedUserName" | "githubIssueNumber" | "githubIssueUrl">
+  >;
   const workflowRows = all<{
     projectId: string;
     groupId: string;
@@ -195,8 +224,15 @@ async function queryErrorGroups(projectIds: string[]): Promise<ErrorGroupSummary
     workflowRows.map((row) => [`${row.projectId}:${row.groupId}`, row]),
   );
 
+  const githubLinks = getGithubLinksForProjects(projectIds);
+  const githubByKey = new Map(
+    githubLinks.map((row) => [`${row.projectId}:${row.groupId}`, row]),
+  );
+
   return rows.map((row) => {
-    const workflow = workflowByKey.get(`${row.projectId}:${row.groupId}`);
+    const key = `${row.projectId}:${row.groupId}`;
+    const workflow = workflowByKey.get(key);
+    const link = githubByKey.get(key);
     return {
     ...row,
     count7d: Number(row.count7d),
@@ -205,6 +241,8 @@ async function queryErrorGroups(projectIds: string[]): Promise<ErrorGroupSummary
       state: workflow?.state ?? "open",
       assignedUserId: workflow?.assignedUserId ?? null,
       assignedUserName: workflow?.assignedUserName ?? null,
+      githubIssueNumber: link?.githubIssueNumber ?? null,
+      githubIssueUrl: link?.githubIssueUrl ?? null,
     };
   });
 }
@@ -243,35 +281,6 @@ function filterErrors(
 
     return true;
   });
-}
-
-function upsertIssueWorkflow(projectId: string, groupId: string, input: { state?: IssueState; assignedUserId?: string | null }) {
-  const now = new Date().toISOString();
-  const existing = one<{
-    state: IssueState;
-    assignedUserId: string | null;
-    createdAt: string;
-  }>(
-    `SELECT state, assigned_user_id as assignedUserId, created_at as createdAt
-     FROM issue_workflows WHERE project_id = ? AND group_id = ?`,
-    [projectId, groupId],
-  );
-
-  const state = input.state ?? existing?.state ?? "open";
-  const assignedUserId = input.assignedUserId === undefined ? (existing?.assignedUserId ?? null) : input.assignedUserId;
-  const createdAt = existing?.createdAt ?? now;
-  const closedAt = state === "closed" ? now : null;
-
-  run(
-    `INSERT INTO issue_workflows (project_id, group_id, state, assigned_user_id, created_at, updated_at, closed_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
-     ON CONFLICT(project_id, group_id) DO UPDATE SET
-       state = excluded.state,
-       assigned_user_id = excluded.assigned_user_id,
-       updated_at = excluded.updated_at,
-       closed_at = excluded.closed_at`,
-    [projectId, groupId, state, assignedUserId, createdAt, now, closedAt],
-  );
 }
 
 export const apiRouter = new Hono();
@@ -545,22 +554,28 @@ apiRouter.get("/projects/all/errors", async (ctx) => {
   const projectIds = seeAllProjects
     ? all<{ id: string }>("SELECT id FROM projects").map((project) => project.id)
     : auth.memberships.map((membership) => membership.projectId);
-  const errors = filterErrors(await queryErrorGroups(projectIds), {
-    state: ctx.req.query("state") ?? "open_or_reopened",
-    assignment: ctx.req.query("assignment") ?? "any",
-    assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
-  });
+  const errors = filterErrors(
+    await queryErrorGroups(projectIds, { user: ctx.req.query("user") ?? undefined }),
+    {
+      state: ctx.req.query("state") ?? "open_or_reopened",
+      assignment: ctx.req.query("assignment") ?? "any",
+      assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
+    },
+  );
   return ctx.json({ errors });
 });
 
 apiRouter.get("/projects/:projectId/errors", async (ctx) => {
   const projectId = ctx.req.param("projectId");
   requireProjectAccess(ctx, projectId, false);
-  const errors = filterErrors(await queryErrorGroups([projectId]), {
-    state: ctx.req.query("state") ?? "open_or_reopened",
-    assignment: ctx.req.query("assignment") ?? "any",
-    assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
-  });
+  const errors = filterErrors(
+    await queryErrorGroups([projectId], { user: ctx.req.query("user") ?? undefined }),
+    {
+      state: ctx.req.query("state") ?? "open_or_reopened",
+      assignment: ctx.req.query("assignment") ?? "any",
+      assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
+    },
+  );
   return ctx.json({ errors });
 });
 
@@ -678,6 +693,7 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         exception: latestEvent.exception,
       })
     : null;
+  const githubLink = getGithubLink(projectId, groupId);
   const error = latestEvent
     ? {
         ...latestEvent,
@@ -690,6 +706,8 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         assignedUserName: workflow?.assignedUserName ?? null,
         sourceMapApplied: deobfuscated?.applied ?? false,
         sourceMapRelease: deobfuscated?.release ?? null,
+        githubIssueNumber: githubLink?.githubIssueNumber ?? null,
+        githubIssueUrl: githubLink?.githubIssueUrl ?? null,
       }
     : null;
   return ctx.json({ error, occurrences });
@@ -716,7 +734,189 @@ apiRouter.patch("/projects/:projectId/errors/:groupId/workflow", async (ctx) => 
     assignedUserId: payload.assignedUserId,
   });
 
+  if (payload.state) {
+    await syncGithubIssueState({ projectId, groupId, ekeeperState: payload.state });
+  }
+
   const errors = await queryErrorGroups([projectId]);
   const issue = errors.find((entry) => entry.groupId === groupId);
   return ctx.json({ issue });
+});
+
+function mapIntegrationRow(
+  row: {
+    projectId: string;
+    owner: string;
+    repo: string;
+    defaultLabels: string;
+    webhookSecret: string | null;
+    createdAt: string;
+    updatedAt: string;
+  } | null,
+): ProjectGithubIntegration | null {
+  if (!row) {
+    return null;
+  }
+  return {
+    projectId: row.projectId,
+    owner: row.owner,
+    repo: row.repo,
+    defaultLabels: parseLabels(row.defaultLabels),
+    webhookSecret: row.webhookSecret,
+    createdAt: row.createdAt,
+    updatedAt: row.updatedAt,
+  };
+}
+
+apiRouter.get("/projects/:projectId/github-integration", (ctx) => {
+  const projectId = ctx.req.param("projectId");
+  requireProjectAccess(ctx, projectId, false);
+  const row = one<{
+    projectId: string;
+    owner: string;
+    repo: string;
+    defaultLabels: string;
+    webhookSecret: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>(
+    `SELECT project_id as projectId, owner, repo, default_labels as defaultLabels,
+       webhook_secret as webhookSecret, created_at as createdAt, updated_at as updatedAt
+     FROM project_github_integrations WHERE project_id = ?`,
+    [projectId],
+  );
+  return ctx.json({ integration: mapIntegrationRow(row) });
+});
+
+apiRouter.put("/projects/:projectId/github-integration", async (ctx) => {
+  const projectId = ctx.req.param("projectId");
+  requireProjectAccess(ctx, projectId, true);
+  const payload = githubIntegrationSchema.parse(await ctx.req.json());
+  const now = new Date().toISOString();
+  const existing = getGithubIntegration(projectId);
+  const createdAt =
+    one<{ createdAt: string }>(
+      "SELECT created_at as createdAt FROM project_github_integrations WHERE project_id = ?",
+      [projectId],
+    )?.createdAt ?? now;
+  run(
+    `INSERT INTO project_github_integrations
+       (project_id, owner, repo, default_labels, webhook_secret, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(project_id) DO UPDATE SET
+       owner = excluded.owner,
+       repo = excluded.repo,
+       default_labels = excluded.default_labels,
+       webhook_secret = excluded.webhook_secret,
+       updated_at = excluded.updated_at`,
+    [
+      projectId,
+      payload.owner,
+      payload.repo,
+      JSON.stringify(payload.defaultLabels),
+      payload.webhookSecret ?? existing?.webhookSecret ?? null,
+      createdAt,
+      now,
+    ],
+  );
+
+  const row = one<{
+    projectId: string;
+    owner: string;
+    repo: string;
+    defaultLabels: string;
+    webhookSecret: string | null;
+    createdAt: string;
+    updatedAt: string;
+  }>(
+    `SELECT project_id as projectId, owner, repo, default_labels as defaultLabels,
+       webhook_secret as webhookSecret, created_at as createdAt, updated_at as updatedAt
+     FROM project_github_integrations WHERE project_id = ?`,
+    [projectId],
+  );
+  return ctx.json({ integration: mapIntegrationRow(row) });
+});
+
+apiRouter.delete("/projects/:projectId/github-integration", (ctx) => {
+  const projectId = ctx.req.param("projectId");
+  requireProjectAccess(ctx, projectId, true);
+  run("DELETE FROM project_github_integrations WHERE project_id = ?", [projectId]);
+  run("DELETE FROM error_group_github_issues WHERE project_id = ?", [projectId]);
+  return ctx.json({ success: true });
+});
+
+apiRouter.post("/projects/:projectId/github-integration/backfill", async (ctx) => {
+  const projectId = ctx.req.param("projectId");
+  requireProjectAccess(ctx, projectId, true);
+
+  const integration = getGithubIntegration(projectId);
+  if (!integration) {
+    throw new HttpError(400, "GitHub integration is not configured for this project");
+  }
+
+  const project = one<{ name: string }>("SELECT name FROM projects WHERE id = ?", [projectId]);
+  if (!project) {
+    throw new HttpError(404, "Project not found");
+  }
+
+  const client = getClickHouseClient();
+  const groupsResult = await client.query({
+    query: `
+      SELECT
+        group_id AS groupId,
+        any(title) AS title,
+        any(fingerprint) AS fingerprint,
+        any(message) AS message,
+        min(timestamp) AS firstSeen
+      FROM events
+      WHERE project_id = {projectId:String}
+      GROUP BY group_id
+      ORDER BY firstSeen ASC
+    `,
+    query_params: { projectId },
+    format: "JSONEachRow",
+  });
+  const groups = (await groupsResult.json()) as Array<{
+    groupId: string;
+    title: string;
+    fingerprint: string;
+    message: string;
+    firstSeen: string;
+  }>;
+
+  const existingLinks = new Set(
+    all<{ groupId: string }>(
+      `SELECT group_id as groupId FROM error_group_github_issues WHERE project_id = ?`,
+      [projectId],
+    ).map((row) => row.groupId),
+  );
+
+  const unlinked = groups.filter((group) => !existingLinks.has(group.groupId));
+
+  let created = 0;
+  let failed = 0;
+  for (const group of unlinked) {
+    const link = await ensureGithubIssueForGroup({
+      projectId,
+      projectName: project.name,
+      groupId: group.groupId,
+      title: group.title,
+      fingerprint: group.fingerprint,
+      firstSeen: group.firstSeen,
+      message: group.message ?? null,
+    });
+    if (link) {
+      created += 1;
+    } else {
+      failed += 1;
+    }
+  }
+
+  return ctx.json({
+    totalGroups: groups.length,
+    alreadyLinked: groups.length - unlinked.length,
+    candidatesProcessed: unlinked.length,
+    created,
+    failed,
+  });
 });

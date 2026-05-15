@@ -32,3 +32,7 @@ INGEST_SECRET_SEED=stub-ingest-secret-seed
 
 EKEEPER_ORG=myyogateacher
 MINIMAPS_STORAGE_PATH=./backend/data/minimaps
+
+# GitHub issue sync. Use a classic PAT with `repo` scope authorized for the org via SSO.
+GITHUB_TOKEN=
+GITHUB_API_URL=https://api.github.com

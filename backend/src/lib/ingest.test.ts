@@ -32,6 +32,17 @@ describe("ingest helpers", () => {
     expect(event.breadcrumbs).toHaveLength(1);
   });
 
+  test("normalize event captures user id, email, and username on separate fields", () => {
+    const event = normalizeEvent("project_1", {
+      event_id: "evt_user",
+      user: { id: "user-1", email: "shubhangi@myyogateacher.com", username: "shubhangi" },
+    });
+
+    expect(event.userId).toBe("user-1");
+    expect(event.userEmail).toBe("shubhangi@myyogateacher.com");
+    expect(event.userUsername).toBe("shubhangi");
+  });
+
   test("parse envelope extracts event items", () => {
     const raw = [
       JSON.stringify({ event_id: "env_1" }),

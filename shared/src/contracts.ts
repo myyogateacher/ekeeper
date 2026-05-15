@@ -64,6 +64,18 @@ export interface ErrorGroupSummary {
   state: IssueState;
   assignedUserId: string | null;
   assignedUserName: string | null;
+  githubIssueNumber: number | null;
+  githubIssueUrl: string | null;
+}
+
+export interface ProjectGithubIntegration {
+  projectId: string;
+  owner: string;
+  repo: string;
+  defaultLabels: string[];
+  webhookSecret: string | null;
+  createdAt: string;
+  updatedAt: string;
 }
 
 export interface Breadcrumb {
@@ -118,6 +130,8 @@ export interface ErrorEventDetail {
   assignedUserName: string | null;
   sourceMapApplied: boolean;
   sourceMapRelease: string | null;
+  githubIssueNumber: number | null;
+  githubIssueUrl: string | null;
 }
 
 export interface OccurrenceSummary {
@@ -154,6 +168,8 @@ export interface NormalizedIngestEvent {
   release: string | null;
   environment: string | null;
   userId: string | null;
+  userEmail: string | null;
+  userUsername: string | null;
   browser: string | null;
   device: string | null;
   os: string | null;

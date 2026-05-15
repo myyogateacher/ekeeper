@@ -13,6 +13,7 @@ import { connectRedis } from "./lib/redis";
 import { getServerAuthToken } from "./lib/server-settings";
 import { apiRouter } from "./routes/api";
 import { authRouter } from "./routes/auth";
+import { githubRouter } from "./routes/github";
 import { ingestRouter } from "./routes/ingest";
 import { pluginRouter } from "./routes/plugin";
 
@@ -56,6 +57,7 @@ app.onError((error, ctx) => {
 
 app.route("/auth", authRouter);
 app.route("/api", apiRouter);
+app.route("/api/github", githubRouter);
 app.route("/api/ingest", ingestRouter);
 app.route("/api/0", pluginRouter);
 
