@@ -73,7 +73,8 @@ export interface ProjectGithubIntegration {
   owner: string;
   repo: string;
   defaultLabels: string[];
-  webhookSecret: string | null;
+  webhookSecretSet: boolean;
+  personalAccessTokenSet: boolean;
   createdAt: string;
   updatedAt: string;
 }

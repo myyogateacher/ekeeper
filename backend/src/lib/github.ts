@@ -7,24 +7,26 @@ export interface GithubIssueRef {
   state: "open" | "closed";
 }
 
-function authHeaders(): Record<string, string> {
-  if (!config.GITHUB_TOKEN) {
-    throw new Error("GITHUB_TOKEN is not configured");
-  }
+function authHeaders(token: string): Record<string, string> {
   return {
-    Authorization: `Bearer ${config.GITHUB_TOKEN}`,
+    Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
     "X-GitHub-Api-Version": "2022-11-28",
     "User-Agent": "ekeeper-issue-sync",
   };
 }
 
-async function githubFetch(method: string, path: string, body?: unknown): Promise<Response> {
+async function githubFetch(
+  token: string,
+  method: string,
+  path: string,
+  body?: unknown,
+): Promise<Response> {
   const url = `${config.GITHUB_API_URL.replace(/\/+$/, "")}${path}`;
   const response = await fetch(url, {
     method,
     headers: {
-      ...authHeaders(),
+      ...authHeaders(token),
       "Content-Type": "application/json",
     },
     body: body === undefined ? undefined : JSON.stringify(body),
@@ -33,13 +35,14 @@ async function githubFetch(method: string, path: string, body?: unknown): Promis
 }
 
 export async function createGithubIssue(input: {
+  token: string;
   owner: string;
   repo: string;
   title: string;
   body: string;
   labels: string[];
 }): Promise<GithubIssueRef> {
-  const response = await githubFetch("POST", `/repos/${input.owner}/${input.repo}/issues`, {
+  const response = await githubFetch(input.token, "POST", `/repos/${input.owner}/${input.repo}/issues`, {
     title: input.title,
     body: input.body,
     labels: input.labels,
@@ -66,6 +69,7 @@ export async function createGithubIssue(input: {
 }
 
 export async function setGithubIssueState(input: {
+  token: string;
   owner: string;
   repo: string;
   issueNumber: number;
@@ -73,6 +77,7 @@ export async function setGithubIssueState(input: {
   stateReason?: "completed" | "reopened" | "not_planned";
 }): Promise<void> {
   const response = await githubFetch(
+    input.token,
     "PATCH",
     `/repos/${input.owner}/${input.repo}/issues/${input.issueNumber}`,
     {

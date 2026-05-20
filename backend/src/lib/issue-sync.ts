@@ -8,6 +8,11 @@ export interface GithubIntegrationRow {
   repo: string;
   defaultLabels: string;
   webhookSecret: string | null;
+  personalAccessToken: string | null;
+}
+
+function resolveToken(integration: GithubIntegrationRow): string | null {
+  return integration.personalAccessToken?.trim() || config.GITHUB_TOKEN || null;
 }
 
 export interface GithubIssueLinkRow {
@@ -20,7 +25,8 @@ export interface GithubIssueLinkRow {
 
 export function getGithubIntegration(projectId: string): GithubIntegrationRow | null {
   return one<GithubIntegrationRow>(
-    `SELECT project_id as projectId, owner, repo, default_labels as defaultLabels, webhook_secret as webhookSecret
+    `SELECT project_id as projectId, owner, repo, default_labels as defaultLabels,
+       webhook_secret as webhookSecret, personal_access_token as personalAccessToken
      FROM project_github_integrations WHERE project_id = ?`,
     [projectId],
   );
@@ -112,8 +118,11 @@ export async function ensureGithubIssueForGroup(input: {
   if (!integration) {
     return null;
   }
-  if (!config.GITHUB_TOKEN) {
-    console.warn("[issue-sync] GITHUB_TOKEN not configured; skipping GitHub issue creation");
+  const token = resolveToken(integration);
+  if (!token) {
+    console.warn("[issue-sync] no GitHub PAT configured for project; skipping issue creation", {
+      projectId: input.projectId,
+    });
     return null;
   }
 
@@ -124,6 +133,7 @@ export async function ensureGithubIssueForGroup(input: {
 
   try {
     const created = await createGithubIssue({
+      token,
       owner: integration.owner,
       repo: integration.repo,
       title: input.title,
@@ -189,7 +199,8 @@ export async function syncGithubIssueState(input: {
   if (!link) {
     return;
   }
-  if (!config.GITHUB_TOKEN) {
+  const token = resolveToken(integration);
+  if (!token) {
     return;
   }
 
@@ -203,6 +214,7 @@ export async function syncGithubIssueState(input: {
 
   try {
     await setGithubIssueState({
+      token,
       owner: integration.owner,
       repo: integration.repo,
       issueNumber: link.githubIssueNumber,
