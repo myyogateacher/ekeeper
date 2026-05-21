@@ -104,7 +104,13 @@ export const api = {
     ),
   saveGithubIntegration: (
     projectId: string,
-    payload: { owner: string; repo: string; defaultLabels: string[]; webhookSecret: string | null },
+    payload: {
+      owner: string;
+      repo: string;
+      defaultLabels: string[];
+      webhookSecret: string | null;
+      personalAccessToken: string | null;
+    },
   ) =>
     request<{ integration: ProjectGithubIntegration | null }>(
       `/api/projects/${projectId}/github-integration`,

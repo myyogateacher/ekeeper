@@ -60,6 +60,7 @@ const githubIntegrationSchema = z.object({
   repo: z.string().min(1).max(120),
   defaultLabels: z.array(z.string().min(1).max(60)).max(20).default([]),
   webhookSecret: z.string().min(1).max(200).nullable().optional(),
+  personalAccessToken: z.string().min(1).max(500).nullable().optional(),
 });
 
 const minimapUploadSchema = z.object({
@@ -750,6 +751,7 @@ function mapIntegrationRow(
     repo: string;
     defaultLabels: string;
     webhookSecret: string | null;
+    personalAccessToken: string | null;
     createdAt: string;
     updatedAt: string;
   } | null,
@@ -762,7 +764,8 @@ function mapIntegrationRow(
     owner: row.owner,
     repo: row.repo,
     defaultLabels: parseLabels(row.defaultLabels),
-    webhookSecret: row.webhookSecret,
+    webhookSecretSet: Boolean(row.webhookSecret),
+    personalAccessTokenSet: Boolean(row.personalAccessToken),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -777,11 +780,13 @@ apiRouter.get("/projects/:projectId/github-integration", (ctx) => {
     repo: string;
     defaultLabels: string;
     webhookSecret: string | null;
+    personalAccessToken: string | null;
     createdAt: string;
     updatedAt: string;
   }>(
     `SELECT project_id as projectId, owner, repo, default_labels as defaultLabels,
-       webhook_secret as webhookSecret, created_at as createdAt, updated_at as updatedAt
+       webhook_secret as webhookSecret, personal_access_token as personalAccessToken,
+       created_at as createdAt, updated_at as updatedAt
      FROM project_github_integrations WHERE project_id = ?`,
     [projectId],
   );
@@ -801,13 +806,14 @@ apiRouter.put("/projects/:projectId/github-integration", async (ctx) => {
     )?.createdAt ?? now;
   run(
     `INSERT INTO project_github_integrations
-       (project_id, owner, repo, default_labels, webhook_secret, created_at, updated_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)
+       (project_id, owner, repo, default_labels, webhook_secret, personal_access_token, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(project_id) DO UPDATE SET
        owner = excluded.owner,
        repo = excluded.repo,
        default_labels = excluded.default_labels,
        webhook_secret = excluded.webhook_secret,
+       personal_access_token = excluded.personal_access_token,
        updated_at = excluded.updated_at`,
     [
       projectId,
@@ -815,6 +821,7 @@ apiRouter.put("/projects/:projectId/github-integration", async (ctx) => {
       payload.repo,
       JSON.stringify(payload.defaultLabels),
       payload.webhookSecret ?? existing?.webhookSecret ?? null,
+      payload.personalAccessToken ?? existing?.personalAccessToken ?? null,
       createdAt,
       now,
     ],
@@ -826,11 +833,13 @@ apiRouter.put("/projects/:projectId/github-integration", async (ctx) => {
     repo: string;
     defaultLabels: string;
     webhookSecret: string | null;
+    personalAccessToken: string | null;
     createdAt: string;
     updatedAt: string;
   }>(
     `SELECT project_id as projectId, owner, repo, default_labels as defaultLabels,
-       webhook_secret as webhookSecret, created_at as createdAt, updated_at as updatedAt
+       webhook_secret as webhookSecret, personal_access_token as personalAccessToken,
+       created_at as createdAt, updated_at as updatedAt
      FROM project_github_integrations WHERE project_id = ?`,
     [projectId],
   );

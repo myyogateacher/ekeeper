@@ -1,7 +1,24 @@
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
+import { HelpCircle } from "lucide-react";
 import { toast } from "react-toastify";
 import { api } from "@/lib/api";
+
+function HelpPopover({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <details className="relative">
+      <summary
+        className="flex cursor-pointer list-none items-center text-slate-400 transition hover:text-slate-200"
+        aria-label={label}
+      >
+        <HelpCircle className="h-4 w-4" />
+      </summary>
+      <div className="absolute left-0 top-6 z-10 w-[420px] max-w-[80vw] rounded-2xl border border-white/10 bg-slate-950 p-4 text-xs leading-6 text-slate-200 shadow-xl">
+        {children}
+      </div>
+    </details>
+  );
+}
 
 export function SettingsPage() {
   const queryClient = useQueryClient();
@@ -10,6 +27,7 @@ export function SettingsPage() {
   const [ghRepo, setGhRepo] = useState("");
   const [ghLabels, setGhLabels] = useState("");
   const [ghWebhookSecret, setGhWebhookSecret] = useState("");
+  const [ghPat, setGhPat] = useState("");
   const { data: me, isLoading } = useQuery({ queryKey: ["me"], queryFn: api.me });
   const { data } = useQuery({
     queryKey: ["server-settings"],
@@ -42,6 +60,7 @@ export function SettingsPage() {
           .map((label) => label.trim())
           .filter(Boolean),
         webhookSecret: ghWebhookSecret.trim() ? ghWebhookSecret.trim() : null,
+        personalAccessToken: ghPat.trim() ? ghPat.trim() : null,
       }),
     onSuccess: async () => {
       toast.info("GitHub integration saved");
@@ -57,6 +76,7 @@ export function SettingsPage() {
       setGhRepo("");
       setGhLabels("");
       setGhWebhookSecret("");
+      setGhPat("");
       toast.info("GitHub integration removed");
       await queryClient.invalidateQueries({ queryKey: ["github-integration", selectedProjectId] });
     },
@@ -93,7 +113,8 @@ export function SettingsPage() {
     setGhOwner(integration?.owner ?? "");
     setGhRepo(integration?.repo ?? "");
     setGhLabels(integration?.defaultLabels?.join(", ") ?? "");
-    setGhWebhookSecret(integration?.webhookSecret ?? "");
+    setGhWebhookSecret("");
+    setGhPat("");
   }, [integrationData, selectedProjectId]);
 
   if (isLoading) {
@@ -103,6 +124,9 @@ export function SettingsPage() {
   const isAdmin = me?.user.role === "admin";
   const settings = data?.settings;
   const selectedProject = projects?.projects.find((project) => project.id === selectedProjectId) ?? projects?.projects[0];
+  const webhookBase = (settings?.ekeeperUrl ?? (typeof window !== "undefined" ? window.location.origin : "")).replace(/\/+$/, "");
+  const webhookUrl = `${webhookBase}/api/github/webhook`;
+  const integration = integrationData?.integration ?? null;
   const viteSnippet = settings
     ? `sentryVitePlugin({
   org: "${settings.ekeeperOrg}",
@@ -241,12 +265,68 @@ export function SettingsPage() {
             />
           </div>
           <div className="lg:col-span-2">
-            <label className="mb-2 block text-xs uppercase tracking-[0.22em] text-slate-400">
-              Webhook secret
-            </label>
+            <div className="mb-2 flex items-center gap-2">
+              <label className="text-xs uppercase tracking-[0.22em] text-slate-400">
+                Personal access token
+              </label>
+              <HelpPopover label="How to generate a GitHub PAT">
+                <p className="font-semibold text-white">Step 1 — Generate a classic PAT</p>
+                <p className="mt-1">
+                  GitHub → click your avatar → Settings → Developer settings → Personal access tokens → Tokens (classic) → Generate new token (classic).
+                </p>
+                <p className="mt-3 font-semibold text-white">Step 2 — Configure scope</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  <li>Name it something like <code className="rounded bg-slate-900 px-1">ekeeper-token</code> and set an expiration.</li>
+                  <li>Under <span className="font-semibold">Select scopes</span> check the top-level <code className="rounded bg-slate-900 px-1">repo</code> box (full private-repo access).</li>
+                  <li>Click <span className="font-semibold">Generate token</span> and copy the value (starts with <code className="rounded bg-slate-900 px-1">ghp_</code>).</li>
+                </ul>
+                <p className="mt-3 font-semibold text-white">Step 3 — Authorize for the org (if SSO is enforced)</p>
+                <p className="mt-1">
+                  On the token list page, click the <span className="font-semibold">Configure SSO</span> dropdown next to the token and authorize for <code className="rounded bg-slate-900 px-1">myyogateacher</code>. Without this, every GitHub API call returns 404.
+                </p>
+                <p className="mt-3 font-semibold text-white">Step 4 — Paste into the field above → Save</p>
+              </HelpPopover>
+            </div>
             <input
               className="input"
-              placeholder="Used to verify incoming GitHub webhooks"
+              type="password"
+              autoComplete="off"
+              placeholder={integration?.personalAccessTokenSet ? "•••••••• (configured — leave blank to keep)" : "ghp_ or github_pat_ token with repo scope"}
+              value={ghPat}
+              onChange={(event) => setGhPat(event.target.value)}
+              disabled={!selectedProjectId}
+            />
+          </div>
+          <div className="lg:col-span-2">
+            <div className="mb-2 flex items-center gap-2">
+              <label className="text-xs uppercase tracking-[0.22em] text-slate-400">
+                Webhook secret
+              </label>
+              <HelpPopover label="How to set up the webhook secret">
+                <p className="font-semibold text-white">Step 1 — Generate a webhook secret</p>
+                <p className="mt-1">Random, ~32 bytes:</p>
+                <pre className="mt-2 overflow-x-auto rounded-xl bg-slate-900 p-2 text-[11px] text-slate-100">openssl rand -hex 32</pre>
+                <p className="mt-1">Paste that into the Webhook secret field here → Save.</p>
+                <p className="mt-3 font-semibold text-white">Step 2 — Add the GitHub webhook on the repo</p>
+                <ul className="mt-1 list-disc space-y-1 pl-4">
+                  <li>GitHub → <code className="rounded bg-slate-900 px-1">{ghOwner.trim() || "owner"}/{ghRepo.trim() || "repo"}</code> → Settings → Webhooks → Add webhook</li>
+                  <li>
+                    Payload URL: <code className="rounded bg-slate-900 px-1 break-all">{webhookUrl}</code>
+                  </li>
+                  <li>Content type: <code className="rounded bg-slate-900 px-1">application/json</code></li>
+                  <li>Secret: paste the same string you generated in step 1</li>
+                  <li>
+                    <span className="font-semibold">Which events?</span> → Let me select individual events → check <span className="font-semibold">Issues</span> only
+                  </li>
+                  <li>Save</li>
+                </ul>
+              </HelpPopover>
+            </div>
+            <input
+              className="input"
+              type="password"
+              autoComplete="off"
+              placeholder={integration?.webhookSecretSet ? "•••••••• (configured — leave blank to keep)" : "Used to verify incoming GitHub webhooks"}
               value={ghWebhookSecret}
               onChange={(event) => setGhWebhookSecret(event.target.value)}
               disabled={!selectedProjectId}

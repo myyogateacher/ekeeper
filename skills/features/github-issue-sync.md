@@ -20,29 +20,37 @@ directions.
 
 ## Configuration
 
-Two places:
+The Settings page is the primary configuration surface — one form per
+project:
 
-1. **Server env** (`.env`):
-   - `GITHUB_TOKEN` — classic PAT with `repo` scope. For SSO-enforced
-     orgs (like myyogateacher), the token must be SSO-authorized for
-     the org or every API call returns 404.
-   - `GITHUB_API_URL` — defaults to `https://api.github.com`. Only change
-     this for GitHub Enterprise.
-2. **Per-project**, via the Settings page → "GitHub integration" section:
-   - `owner` and `repo` — the target repo (e.g. `myyogateacher`,
-     `mobile-myt-new`).
-   - `defaultLabels` — comma-separated labels applied to every created
-     issue.
-   - `webhookSecret` — random string used to HMAC-verify inbound
-     webhooks. Must match the secret you configure on the GitHub repo
-     webhook.
+- `owner` and `repo` — the target repo (e.g. `myyogateacher`,
+  `mobile-myt-new`).
+- `defaultLabels` — comma-separated labels applied to every created
+  issue.
+- `personalAccessToken` — classic GitHub PAT with `repo` scope. For
+  SSO-enforced orgs (like myyogateacher), the token must be
+  SSO-authorized for the org or every API call returns 404. Stored on
+  the integration row in SQLite.
+- `webhookSecret` — random string used to HMAC-verify inbound
+  webhooks. Must match the secret configured on the GitHub repo
+  webhook.
+
+Optional environment fallbacks:
+
+- `GITHUB_TOKEN` — used only if a project hasn't set its own
+  `personalAccessToken`. Lets ops keep a single PAT in env for all
+  projects if they prefer.
+- `GITHUB_API_URL` — defaults to `https://api.github.com`. Only change
+  this for GitHub Enterprise.
 
 ## How to wire up a new repo end-to-end
 
-1. Create or pick a classic PAT with `repo`, SSO-authorize for the org,
-   put it in `.env` as `GITHUB_TOKEN`, restart the backend.
-2. Settings → pick the project → fill `owner`, `repo`, labels, webhook
-   secret → Save.
+1. Create a classic GitHub PAT with the `repo` scope. If your org uses
+   SAML SSO, click "Configure SSO" on the token list and authorize for
+   the org.
+2. Settings → pick the project → fill `owner`, `repo`, labels, paste
+   the PAT into "Personal access token", choose any random string for
+   "Webhook secret" → Save.
 3. In GitHub: repo → Settings → Webhooks → Add webhook:
    - **Payload URL**: `https://<your-ekeeper-host>/api/github/webhook`
    - **Content type**: `application/json`
@@ -79,6 +87,21 @@ Two places:
   (`ProjectGithubIntegration`, `githubIssueNumber`/`githubIssueUrl` on
   `ErrorGroupSummary` and `ErrorEventDetail`)
 
+## Secret storage
+
+- `personal_access_token` and `webhook_secret` are stored in plaintext
+  on the SQLite integration row. The PAT is a real credential; the
+  webhook secret is only used for HMAC verification. We accept
+  plaintext for now to match the existing posture of `project_keys`,
+  but note that this means an attacker with SQLite read access can
+  exfiltrate GitHub tokens. Encryption-at-rest is a future improvement.
+- The `GET /projects/:projectId/github-integration` response **never
+  returns the secret values** — only `personalAccessTokenSet` and
+  `webhookSecretSet` booleans. This prevents a project viewer (read
+  access) from extracting the PAT via DevTools on the Settings page.
+  To replace a secret, type a new value into the form and save; to
+  clear, remove the integration entirely.
+
 ## Idempotency
 
 - `error_group_github_issues` has `PRIMARY KEY (project_id, group_id)`
@@ -103,8 +126,8 @@ Two places:
   cases so the endpoint doesn't leak which repos are mapped.
 - **A new error group lands but no GitHub issue appears**: check the
   backend log for an `[issue-sync]` warning. The most likely cause is
-  `GITHUB_TOKEN` not set in env. The integration is configured per
-  project but the token is global — both have to be present.
+  the project having no PAT (neither on the integration row nor in
+  `GITHUB_TOKEN`).
 
 ## Things this feature deliberately doesn't do
 
