@@ -58,7 +58,7 @@ export function computeGroupFingerprint(payload: Record<string, unknown>): strin
     Record<string, unknown>
   >)
     .slice(-4)
-    .map((frame) => [frame.filename, frame.function, frame.lineno].filter(Boolean).join(":"))
+    .map((frame) => [frame.filename, frame.function].filter(Boolean).join(":"))
     .join("|");
 
   return hashString(`${type}|${value}|${frames}`).slice(0, 32);

@@ -94,6 +94,7 @@ export async function setGithubIssueState(input: {
 
 export interface GithubIssueListItem {
   number: number;
+  title: string;
   html_url: string;
   node_id: string;
   state: "open" | "closed";

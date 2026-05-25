@@ -2,6 +2,27 @@ import { describe, expect, test } from "bun:test";
 import { computeGroupFingerprint, normalizeEvent, parseEnvelope } from "./ingest";
 
 describe("ingest helpers", () => {
+  test("fingerprint is stable when only stack frame line numbers differ", () => {
+    const buildPayload = (lineno: number) => ({
+      message: "Boom",
+      exception: {
+        values: [
+          {
+            type: "TypeError",
+            value: "Boom",
+            stacktrace: {
+              frames: [{ filename: "main.jsbundle", function: "run", lineno, colno: 4866 }],
+            },
+          },
+        ],
+      },
+    });
+
+    expect(computeGroupFingerprint(buildPayload(12))).toBe(
+      computeGroupFingerprint(buildPayload(5102)),
+    );
+  });
+
   test("fingerprint is stable for same payload", () => {
     const payload = {
       message: "Boom",

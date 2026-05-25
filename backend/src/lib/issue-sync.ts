@@ -256,7 +256,7 @@ function upsertGithubLink(input: {
 }
 
 export interface CleanupDuplicatesResult {
-  fingerprintsScanned: number;
+  titlesScanned: number;
   duplicatesClosed: number;
   linksRepaired: number;
   labelsAdded: number;
@@ -280,56 +280,67 @@ export async function cleanupDuplicateGithubIssues(input: {
     repo: integration.repo,
   });
 
-  const byFingerprint = new Map<string, GithubIssueListItem[]>();
+  const byTitle = new Map<string, GithubIssueListItem[]>();
   for (const issue of allIssues) {
-    const fingerprint = extractFingerprint(issue.body);
-    if (!fingerprint) {
+    if (!extractFingerprint(issue.body)) {
       continue;
     }
-    const bucket = byFingerprint.get(fingerprint) ?? [];
+    const bucket = byTitle.get(issue.title) ?? [];
     bucket.push(issue);
-    byFingerprint.set(fingerprint, bucket);
+    byTitle.set(issue.title, bucket);
   }
 
   let duplicatesClosed = 0;
   let linksRepaired = 0;
   let labelsAdded = 0;
 
-  for (const [fingerprint, issues] of byFingerprint) {
+  for (const issues of byTitle.values()) {
     const sorted = issues
       .slice()
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
     const canonical = sorted[0]!;
-    const expectedLabel = fingerprintLabel(fingerprint);
 
-    const canonicalHasLabel = canonical.labels.some((entry) =>
-      typeof entry === "string" ? entry === expectedLabel : entry.name === expectedLabel,
+    const fingerprintsInBucket = new Set<string>();
+    for (const issue of sorted) {
+      const fp = extractFingerprint(issue.body);
+      if (fp) {
+        fingerprintsInBucket.add(fp);
+      }
+    }
+
+    const existingLabels = new Set(
+      canonical.labels.map((entry) => (typeof entry === "string" ? entry : entry.name)),
     );
-    if (!canonicalHasLabel) {
+    const labelsToAdd = Array.from(fingerprintsInBucket)
+      .map((fp) => fingerprintLabel(fp))
+      .filter((label) => !existingLabels.has(label));
+    if (labelsToAdd.length > 0) {
       await addLabelsToGithubIssue({
         token,
         owner: integration.owner,
         repo: integration.repo,
         issueNumber: canonical.number,
-        labels: [expectedLabel],
+        labels: labelsToAdd,
       });
-      labelsAdded += 1;
+      labelsAdded += labelsToAdd.length;
     }
 
-    const existingLink = getGithubLink(input.projectId, fingerprint);
-    if (
-      !existingLink ||
-      existingLink.githubIssueNumber !== canonical.number ||
-      existingLink.githubIssueUrl !== canonical.html_url
-    ) {
-      upsertGithubLink({
-        projectId: input.projectId,
-        groupId: fingerprint,
-        issueNumber: canonical.number,
-        issueUrl: canonical.html_url,
-        nodeId: canonical.node_id,
-      });
-      linksRepaired += 1;
+    for (const fp of fingerprintsInBucket) {
+      const existingLink = getGithubLink(input.projectId, fp);
+      if (
+        !existingLink ||
+        existingLink.githubIssueNumber !== canonical.number ||
+        existingLink.githubIssueUrl !== canonical.html_url
+      ) {
+        upsertGithubLink({
+          projectId: input.projectId,
+          groupId: fp,
+          issueNumber: canonical.number,
+          issueUrl: canonical.html_url,
+          nodeId: canonical.node_id,
+        });
+        linksRepaired += 1;
+      }
     }
 
     for (const duplicate of sorted.slice(1)) {
@@ -355,7 +366,7 @@ export async function cleanupDuplicateGithubIssues(input: {
   }
 
   return {
-    fingerprintsScanned: byFingerprint.size,
+    titlesScanned: byTitle.size,
     duplicatesClosed,
     linksRepaired,
     labelsAdded,

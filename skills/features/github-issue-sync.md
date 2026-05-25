@@ -137,14 +137,40 @@ button) does a one-shot reconcile against the live repo:
 1. List every issue in the repo (paginated, 100 per page).
 2. For each issue, parse the eKeeper fingerprint from the
    `**Fingerprint:** \`<hash>\`` line we always include in the body.
-3. Group by fingerprint. For each group:
+   Issues without that marker are skipped (not ours).
+3. **Group by exact issue title.** Same title = same logical error,
+   even if the eKeeper fingerprints differ (which they do across
+   releases — see "Fingerprint stability" below).
+4. For each title with one or more eKeeper issues:
    - Pick the oldest issue as canonical.
-   - Add the `ek:fp:<fingerprint>` label to it if missing.
-   - Repoint the local link row at it.
-   - Comment "Duplicate of #N" on every other issue in the group and
-     close them with `state_reason: not_planned`.
+   - Collect every fingerprint that appears in the bucket. Add an
+     `ek:fp:<fingerprint>` label to the canonical for every one of
+     them. So if four releases produced four split groups, the
+     canonical ends up with four labels, and future ingest events
+     matching any of those fingerprints will hit the
+     `listGithubIssuesByLabel` check and reuse the canonical.
+   - Repoint every fingerprint's local link row at the canonical
+     issue. Multiple eKeeper groups can now legitimately share a
+     GitHub issue — that's the desired behaviour for split-by-release
+     groups.
+   - Comment "Duplicate of #N" on every other issue in the bucket
+     and close them with `state_reason: not_planned`.
 
 Idempotent — running it twice produces zero further changes.
+
+## Fingerprint stability across releases
+
+`computeGroupFingerprint` hashes `type | value | last-4-frames` where
+each frame is `filename:function`. Line and column numbers are
+**deliberately excluded** — they shift with every JS bundle rebuild
+and would otherwise produce a fresh group for the same bug after
+every release.
+
+A consequence: events that landed *before* this change retain their
+historical fingerprints. They stay as separate groups in
+`events`. The cleanup tool above is what merges them on the GitHub
+side; eKeeper's own grouping stays split for old data. New events
+ingested after the change are stable across releases.
 
 ## Failure modes and how to read them
 
