@@ -1,6 +1,40 @@
 import { config } from "../config";
 import { all, one, run } from "../db/sqlite";
-import { createGithubIssue, setGithubIssueState } from "./github";
+import {
+  addLabelsToGithubIssue,
+  commentOnGithubIssue,
+  createGithubIssue,
+  listAllGithubIssues,
+  listGithubIssuesByLabel,
+  setGithubIssueState,
+  type GithubIssueListItem,
+} from "./github";
+
+const FINGERPRINT_LABEL_PREFIX = "ek:fp:";
+const FINGERPRINT_BODY_MARKER = /\*\*Fingerprint:\*\*\s+`([a-f0-9]{1,64})`/i;
+
+function fingerprintLabel(fingerprint: string): string {
+  return `${FINGERPRINT_LABEL_PREFIX}${fingerprint}`;
+}
+
+function extractFingerprint(body: string | null | undefined): string | null {
+  if (!body) {
+    return null;
+  }
+  for (const entry of body.split("\n")) {
+    const match = FINGERPRINT_BODY_MARKER.exec(entry);
+    if (match) {
+      return match[1] ?? null;
+    }
+  }
+  return null;
+}
+
+function pickOldest(issues: GithubIssueListItem[]): GithubIssueListItem {
+  return issues
+    .slice()
+    .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime())[0]!;
+}
 
 export interface GithubIntegrationRow {
   projectId: string;
@@ -132,6 +166,34 @@ export async function ensureGithubIssueForGroup(input: {
   }
 
   try {
+    const label = fingerprintLabel(input.fingerprint);
+
+    const remoteMatches = await listGithubIssuesByLabel({
+      token,
+      owner: integration.owner,
+      repo: integration.repo,
+      label,
+    });
+
+    if (remoteMatches.length > 0) {
+      const canonical = pickOldest(remoteMatches);
+      const link = upsertGithubLink({
+        projectId: input.projectId,
+        groupId: input.groupId,
+        issueNumber: canonical.number,
+        issueUrl: canonical.html_url,
+        nodeId: canonical.node_id,
+      });
+      console.log("[issue-sync] reused existing GitHub issue via fingerprint label", {
+        projectId: input.projectId,
+        groupId: input.groupId,
+        issueNumber: canonical.number,
+        remoteMatchCount: remoteMatches.length,
+      });
+      return link;
+    }
+
+    const labels = [...parseLabels(integration.defaultLabels), label];
     const created = await createGithubIssue({
       token,
       owner: integration.owner,
@@ -145,37 +207,16 @@ export async function ensureGithubIssueForGroup(input: {
         firstSeen: input.firstSeen,
         message: input.message,
       }),
-      labels: parseLabels(integration.defaultLabels),
+      labels,
     });
 
-    const now = new Date().toISOString();
-    run(
-      `INSERT INTO error_group_github_issues
-         (project_id, group_id, github_issue_number, github_issue_url, github_node_id, created_at, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(project_id, group_id) DO UPDATE SET
-         github_issue_number = excluded.github_issue_number,
-         github_issue_url = excluded.github_issue_url,
-         github_node_id = excluded.github_node_id,
-         updated_at = excluded.updated_at`,
-      [
-        input.projectId,
-        input.groupId,
-        created.number,
-        created.url,
-        created.nodeId,
-        now,
-        now,
-      ],
-    );
-
-    return {
+    return upsertGithubLink({
       projectId: input.projectId,
       groupId: input.groupId,
-      githubIssueNumber: created.number,
-      githubIssueUrl: created.url,
-      githubNodeId: created.nodeId,
-    };
+      issueNumber: created.number,
+      issueUrl: created.url,
+      nodeId: created.nodeId,
+    });
   } catch (error) {
     console.error("[issue-sync] failed to create GitHub issue", {
       projectId: input.projectId,
@@ -184,6 +225,141 @@ export async function ensureGithubIssueForGroup(input: {
     });
     return null;
   }
+}
+
+function upsertGithubLink(input: {
+  projectId: string;
+  groupId: string;
+  issueNumber: number;
+  issueUrl: string;
+  nodeId: string | null;
+}): GithubIssueLinkRow {
+  const now = new Date().toISOString();
+  run(
+    `INSERT INTO error_group_github_issues
+       (project_id, group_id, github_issue_number, github_issue_url, github_node_id, created_at, updated_at)
+     VALUES (?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(project_id, group_id) DO UPDATE SET
+       github_issue_number = excluded.github_issue_number,
+       github_issue_url = excluded.github_issue_url,
+       github_node_id = excluded.github_node_id,
+       updated_at = excluded.updated_at`,
+    [input.projectId, input.groupId, input.issueNumber, input.issueUrl, input.nodeId, now, now],
+  );
+  return {
+    projectId: input.projectId,
+    groupId: input.groupId,
+    githubIssueNumber: input.issueNumber,
+    githubIssueUrl: input.issueUrl,
+    githubNodeId: input.nodeId,
+  };
+}
+
+export interface CleanupDuplicatesResult {
+  fingerprintsScanned: number;
+  duplicatesClosed: number;
+  linksRepaired: number;
+  labelsAdded: number;
+}
+
+export async function cleanupDuplicateGithubIssues(input: {
+  projectId: string;
+}): Promise<CleanupDuplicatesResult> {
+  const integration = getGithubIntegration(input.projectId);
+  if (!integration) {
+    throw new Error("GitHub integration is not configured for this project");
+  }
+  const token = resolveToken(integration);
+  if (!token) {
+    throw new Error("No GitHub PAT configured for this project");
+  }
+
+  const allIssues = await listAllGithubIssues({
+    token,
+    owner: integration.owner,
+    repo: integration.repo,
+  });
+
+  const byFingerprint = new Map<string, GithubIssueListItem[]>();
+  for (const issue of allIssues) {
+    const fingerprint = extractFingerprint(issue.body);
+    if (!fingerprint) {
+      continue;
+    }
+    const bucket = byFingerprint.get(fingerprint) ?? [];
+    bucket.push(issue);
+    byFingerprint.set(fingerprint, bucket);
+  }
+
+  let duplicatesClosed = 0;
+  let linksRepaired = 0;
+  let labelsAdded = 0;
+
+  for (const [fingerprint, issues] of byFingerprint) {
+    const sorted = issues
+      .slice()
+      .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
+    const canonical = sorted[0]!;
+    const expectedLabel = fingerprintLabel(fingerprint);
+
+    const canonicalHasLabel = canonical.labels.some((entry) =>
+      typeof entry === "string" ? entry === expectedLabel : entry.name === expectedLabel,
+    );
+    if (!canonicalHasLabel) {
+      await addLabelsToGithubIssue({
+        token,
+        owner: integration.owner,
+        repo: integration.repo,
+        issueNumber: canonical.number,
+        labels: [expectedLabel],
+      });
+      labelsAdded += 1;
+    }
+
+    const existingLink = getGithubLink(input.projectId, fingerprint);
+    if (
+      !existingLink ||
+      existingLink.githubIssueNumber !== canonical.number ||
+      existingLink.githubIssueUrl !== canonical.html_url
+    ) {
+      upsertGithubLink({
+        projectId: input.projectId,
+        groupId: fingerprint,
+        issueNumber: canonical.number,
+        issueUrl: canonical.html_url,
+        nodeId: canonical.node_id,
+      });
+      linksRepaired += 1;
+    }
+
+    for (const duplicate of sorted.slice(1)) {
+      if (duplicate.state !== "closed") {
+        await commentOnGithubIssue({
+          token,
+          owner: integration.owner,
+          repo: integration.repo,
+          issueNumber: duplicate.number,
+          body: `Duplicate of #${canonical.number}. Closed by eKeeper cleanup.`,
+        });
+        await setGithubIssueState({
+          token,
+          owner: integration.owner,
+          repo: integration.repo,
+          issueNumber: duplicate.number,
+          state: "closed",
+          stateReason: "not_planned",
+        });
+        duplicatesClosed += 1;
+      }
+    }
+  }
+
+  return {
+    fingerprintsScanned: byFingerprint.size,
+    duplicatesClosed,
+    linksRepaired,
+    labelsAdded,
+  };
 }
 
 export async function syncGithubIssueState(input: {

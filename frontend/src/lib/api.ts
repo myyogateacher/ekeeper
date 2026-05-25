@@ -128,6 +128,13 @@ export const api = {
       created: number;
       failed: number;
     }>(`/api/projects/${projectId}/github-integration/backfill`, { method: "POST" }),
+  cleanupDuplicateGithubIssues: (projectId: string) =>
+    request<{
+      fingerprintsScanned: number;
+      duplicatesClosed: number;
+      linksRepaired: number;
+      labelsAdded: number;
+    }>(`/api/projects/${projectId}/github-integration/cleanup-duplicates`, { method: "POST" }),
   errorDetail: (projectId: string, groupId: string, eventId?: string) =>
     request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[] }>(
       `/api/projects/${projectId}/errors/${groupId}${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ""}`,
