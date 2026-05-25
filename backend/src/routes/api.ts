@@ -9,6 +9,7 @@ import { createId, randomToken } from "../lib/ids";
 import { cleanupExpiredMinimaps, deobfuscateEvent, listMinimapArtifacts, saveMinimapArtifact } from "../lib/minimaps";
 import { getServerSettings, regenerateServerAuthToken } from "../lib/server-settings";
 import {
+  cleanupDuplicateGithubIssues,
   ensureGithubIssueForGroup,
   getGithubIntegration,
   getGithubLink,
@@ -850,7 +851,6 @@ apiRouter.delete("/projects/:projectId/github-integration", (ctx) => {
   const projectId = ctx.req.param("projectId");
   requireProjectAccess(ctx, projectId, true);
   run("DELETE FROM project_github_integrations WHERE project_id = ?", [projectId]);
-  run("DELETE FROM error_group_github_issues WHERE project_id = ?", [projectId]);
   return ctx.json({ success: true });
 });
 
@@ -928,4 +928,16 @@ apiRouter.post("/projects/:projectId/github-integration/backfill", async (ctx) =
     created,
     failed,
   });
+});
+
+apiRouter.post("/projects/:projectId/github-integration/cleanup-duplicates", async (ctx) => {
+  const projectId = ctx.req.param("projectId");
+  requireProjectAccess(ctx, projectId, true);
+
+  try {
+    const result = await cleanupDuplicateGithubIssues({ projectId });
+    return ctx.json(result);
+  } catch (error) {
+    throw new HttpError(400, error instanceof Error ? error.message : "Cleanup failed");
+  }
 });

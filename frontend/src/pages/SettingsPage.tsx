@@ -94,6 +94,18 @@ export function SettingsPage() {
     onError: (error) => toast.error(error instanceof Error ? error.message : "Backfill failed"),
   });
 
+  const cleanupDuplicates = useMutation({
+    mutationFn: () => api.cleanupDuplicateGithubIssues(selectedProjectId),
+    onSuccess: (result) => {
+      toast.info(
+        `Cleanup done — scanned ${result.fingerprintsScanned} fingerprint${result.fingerprintsScanned === 1 ? "" : "s"}, ` +
+          `closed ${result.duplicatesClosed} duplicate${result.duplicatesClosed === 1 ? "" : "s"}, ` +
+          `repaired ${result.linksRepaired} link${result.linksRepaired === 1 ? "" : "s"}.`,
+      );
+    },
+    onError: (error) => toast.error(error instanceof Error ? error.message : "Cleanup failed"),
+  });
+
   useEffect(() => {
     if (!selectedProjectId && projects?.projects?.[0]?.id) {
       setSelectedProjectId(projects.projects[0].id);
@@ -353,6 +365,22 @@ export function SettingsPage() {
                   }}
                 >
                   {backfillIntegration.isPending ? "Backfilling…" : "Backfill existing issues"}
+                </button>
+                <button
+                  type="button"
+                  className="button-secondary"
+                  disabled={cleanupDuplicates.isPending}
+                  onClick={() => {
+                    if (
+                      window.confirm(
+                        "Scan the GitHub repo for duplicate issues created by eKeeper? The oldest issue per fingerprint will be kept and labelled; the rest will be commented and closed as \"not planned\".",
+                      )
+                    ) {
+                      cleanupDuplicates.mutate();
+                    }
+                  }}
+                >
+                  {cleanupDuplicates.isPending ? "Cleaning up…" : "Clean up duplicate GitHub issues"}
                 </button>
                 <button
                   type="button"

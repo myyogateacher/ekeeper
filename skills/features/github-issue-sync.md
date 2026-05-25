@@ -104,13 +104,47 @@ Optional environment fallbacks:
 
 ## Idempotency
 
-- `error_group_github_issues` has `PRIMARY KEY (project_id, group_id)`
-  and a `UNIQUE INDEX (project_id, github_issue_number)`. An ingest
-  flush that re-sees an existing group will skip the GitHub call —
-  `ensureGithubIssueForGroup` short-circuits if the link row exists.
-- The webhook handler looks up the integration by `(owner, repo)`, then
-  the group link by `(owner, repo, issue_number)`. If either is missing
-  the call no-ops; no fake links get written.
+Three layers, cheapest first:
+
+1. **Local link row** — `error_group_github_issues` has
+   `PRIMARY KEY (project_id, group_id)` and a
+   `UNIQUE INDEX (project_id, github_issue_number)`. If a link exists
+   for the group, `ensureGithubIssueForGroup` short-circuits with no
+   GitHub call.
+2. **GitHub-side label search** — when the local link is missing, the
+   backend searches the repo for an issue tagged with
+   `ek:fp:<fingerprint>` (the fingerprint label). If any match comes
+   back, the oldest one is claimed in the local link table and reused.
+   This is what survives a SQLite wipe or `DELETE` of the integration
+   row.
+3. **POST a new issue** with the `ek:fp:<fingerprint>` label as the
+   final step, only if both prior checks come up empty.
+
+Removing the integration via `DELETE /github-integration` no longer
+cascades to `error_group_github_issues`; link rows persist so a
+reconfigure picks up where it left off.
+
+The webhook handler looks up the integration by `(owner, repo)`, then
+the group link by `(owner, repo, issue_number)`. If either is missing
+the call no-ops; no fake links get written.
+
+## Cleaning up existing duplicates
+
+`POST /projects/:projectId/github-integration/cleanup-duplicates`
+(invoked from the Settings page "Clean up duplicate GitHub issues"
+button) does a one-shot reconcile against the live repo:
+
+1. List every issue in the repo (paginated, 100 per page).
+2. For each issue, parse the eKeeper fingerprint from the
+   `**Fingerprint:** \`<hash>\`` line we always include in the body.
+3. Group by fingerprint. For each group:
+   - Pick the oldest issue as canonical.
+   - Add the `ek:fp:<fingerprint>` label to it if missing.
+   - Repoint the local link row at it.
+   - Comment "Duplicate of #N" on every other issue in the group and
+     close them with `state_reason: not_planned`.
+
+Idempotent — running it twice produces zero further changes.
 
 ## Failure modes and how to read them
 
@@ -139,3 +173,6 @@ Optional environment fallbacks:
   5000 req/hour; the backfill loop is sequential so a project with
   more than a few thousand groups would need pacing — not a concern for
   the mobile-myt-new rollout.
+- Cleanup paginates through every issue in the repo and is heavier than
+  the dedup-on-create path. For a repo with tens of thousands of issues
+  the loop will need pacing or a search-API rewrite.

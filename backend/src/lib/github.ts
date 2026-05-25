@@ -91,3 +91,94 @@ export async function setGithubIssueState(input: {
     throw new Error(`GitHub update issue failed (${response.status}): ${text}`);
   }
 }
+
+export interface GithubIssueListItem {
+  number: number;
+  html_url: string;
+  node_id: string;
+  state: "open" | "closed";
+  body: string | null;
+  created_at: string;
+  labels: Array<{ name: string } | string>;
+}
+
+export async function listGithubIssuesByLabel(input: {
+  token: string;
+  owner: string;
+  repo: string;
+  label: string;
+}): Promise<GithubIssueListItem[]> {
+  const path = `/repos/${input.owner}/${input.repo}/issues?state=all&per_page=100&labels=${encodeURIComponent(input.label)}`;
+  const response = await githubFetch(input.token, "GET", path);
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub list issues by label failed (${response.status}): ${text}`);
+  }
+  return (await response.json()) as GithubIssueListItem[];
+}
+
+export async function listAllGithubIssues(input: {
+  token: string;
+  owner: string;
+  repo: string;
+}): Promise<GithubIssueListItem[]> {
+  const collected: GithubIssueListItem[] = [];
+  let page = 1;
+  while (true) {
+    const path = `/repos/${input.owner}/${input.repo}/issues?state=all&per_page=100&page=${page}`;
+    const response = await githubFetch(input.token, "GET", path);
+    if (!response.ok) {
+      const text = await response.text();
+      throw new Error(`GitHub list issues failed (${response.status}): ${text}`);
+    }
+    const batch = (await response.json()) as Array<GithubIssueListItem & { pull_request?: unknown }>;
+    const issuesOnly = batch.filter((entry) => !entry.pull_request);
+    collected.push(...issuesOnly);
+    if (batch.length < 100) {
+      break;
+    }
+    page += 1;
+  }
+  return collected;
+}
+
+export async function addLabelsToGithubIssue(input: {
+  token: string;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  labels: string[];
+}): Promise<void> {
+  if (input.labels.length === 0) {
+    return;
+  }
+  const response = await githubFetch(
+    input.token,
+    "POST",
+    `/repos/${input.owner}/${input.repo}/issues/${input.issueNumber}/labels`,
+    { labels: input.labels },
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub add labels failed (${response.status}): ${text}`);
+  }
+}
+
+export async function commentOnGithubIssue(input: {
+  token: string;
+  owner: string;
+  repo: string;
+  issueNumber: number;
+  body: string;
+}): Promise<void> {
+  const response = await githubFetch(
+    input.token,
+    "POST",
+    `/repos/${input.owner}/${input.repo}/issues/${input.issueNumber}/comments`,
+    { body: input.body },
+  );
+  if (!response.ok) {
+    const text = await response.text();
+    throw new Error(`GitHub comment failed (${response.status}): ${text}`);
+  }
+}
