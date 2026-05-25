@@ -260,10 +260,22 @@ export interface CleanupDuplicatesResult {
   duplicatesClosed: number;
   linksRepaired: number;
   labelsAdded: number;
+  dryRun?: boolean;
+  buckets?: CleanupBucketPreview[];
+}
+
+export interface CleanupBucketPreview {
+  title: string;
+  canonicalIssueNumber: number;
+  canonicalIssueUrl: string;
+  fingerprints: string[];
+  duplicateIssueNumbers: number[];
+  labelsThatWouldBeAdded: string[];
 }
 
 export async function cleanupDuplicateGithubIssues(input: {
   projectId: string;
+  dryRun?: boolean;
 }): Promise<CleanupDuplicatesResult> {
   const integration = getGithubIntegration(input.projectId);
   if (!integration) {
@@ -293,6 +305,7 @@ export async function cleanupDuplicateGithubIssues(input: {
   let duplicatesClosed = 0;
   let linksRepaired = 0;
   let labelsAdded = 0;
+  const buckets: CleanupBucketPreview[] = [];
 
   for (const issues of byTitle.values()) {
     const sorted = issues
@@ -314,6 +327,36 @@ export async function cleanupDuplicateGithubIssues(input: {
     const labelsToAdd = Array.from(fingerprintsInBucket)
       .map((fp) => fingerprintLabel(fp))
       .filter((label) => !existingLabels.has(label));
+
+    const duplicateNumbers = sorted
+      .slice(1)
+      .filter((duplicate) => duplicate.state !== "closed")
+      .map((duplicate) => duplicate.number);
+
+    if (input.dryRun) {
+      buckets.push({
+        title: canonical.title,
+        canonicalIssueNumber: canonical.number,
+        canonicalIssueUrl: canonical.html_url,
+        fingerprints: Array.from(fingerprintsInBucket),
+        duplicateIssueNumbers: duplicateNumbers,
+        labelsThatWouldBeAdded: labelsToAdd,
+      });
+      labelsAdded += labelsToAdd.length;
+      duplicatesClosed += duplicateNumbers.length;
+      for (const fp of fingerprintsInBucket) {
+        const existingLink = getGithubLink(input.projectId, fp);
+        if (
+          !existingLink ||
+          existingLink.githubIssueNumber !== canonical.number ||
+          existingLink.githubIssueUrl !== canonical.html_url
+        ) {
+          linksRepaired += 1;
+        }
+      }
+      continue;
+    }
+
     if (labelsToAdd.length > 0) {
       await addLabelsToGithubIssue({
         token,
@@ -365,12 +408,17 @@ export async function cleanupDuplicateGithubIssues(input: {
     }
   }
 
-  return {
+  const result: CleanupDuplicatesResult = {
     titlesScanned: byTitle.size,
     duplicatesClosed,
     linksRepaired,
     labelsAdded,
   };
+  if (input.dryRun) {
+    result.dryRun = true;
+    result.buckets = buckets;
+  }
+  return result;
 }
 
 export async function syncGithubIssueState(input: {

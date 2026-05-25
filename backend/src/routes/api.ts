@@ -933,9 +933,10 @@ apiRouter.post("/projects/:projectId/github-integration/backfill", async (ctx) =
 apiRouter.post("/projects/:projectId/github-integration/cleanup-duplicates", async (ctx) => {
   const projectId = ctx.req.param("projectId");
   requireProjectAccess(ctx, projectId, true);
+  const dryRun = ctx.req.query("dryRun") === "true";
 
   try {
-    const result = await cleanupDuplicateGithubIssues({ projectId });
+    const result = await cleanupDuplicateGithubIssues({ projectId, dryRun });
     return ctx.json(result);
   } catch (error) {
     throw new HttpError(400, error instanceof Error ? error.message : "Cleanup failed");
