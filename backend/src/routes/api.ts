@@ -873,9 +873,13 @@ apiRouter.post("/projects/:projectId/github-integration/backfill", async (ctx) =
     query: `
       SELECT
         group_id AS groupId,
-        any(title) AS title,
-        any(fingerprint) AS fingerprint,
-        any(message) AS message,
+        argMin(title, timestamp) AS title,
+        argMin(fingerprint, timestamp) AS fingerprint,
+        argMin(message, timestamp) AS message,
+        argMin(release, timestamp) AS release,
+        argMin(exception, timestamp) AS exception,
+        argMin(stacktrace, timestamp) AS stacktrace,
+        argMin(raw_payload, timestamp) AS rawPayload,
         min(timestamp) AS firstSeen
       FROM events
       WHERE project_id = {projectId:String}
@@ -890,6 +894,10 @@ apiRouter.post("/projects/:projectId/github-integration/backfill", async (ctx) =
     title: string;
     fingerprint: string;
     message: string;
+    release: string;
+    exception: string;
+    stacktrace: string;
+    rawPayload: string;
     firstSeen: string;
   }>;
 
@@ -905,6 +913,16 @@ apiRouter.post("/projects/:projectId/github-integration/backfill", async (ctx) =
   let created = 0;
   let failed = 0;
   for (const group of unlinked) {
+    const exceptionType = (() => {
+      try {
+        const parsed = JSON.parse(group.exception ?? "{}");
+        const values = Array.isArray(parsed?.values) ? parsed.values : [];
+        const primary = values[0];
+        return typeof primary?.type === "string" && primary.type.length > 0 ? primary.type : null;
+      } catch {
+        return null;
+      }
+    })();
     const link = await ensureGithubIssueForGroup({
       projectId,
       projectName: project.name,
@@ -913,6 +931,11 @@ apiRouter.post("/projects/:projectId/github-integration/backfill", async (ctx) =
       fingerprint: group.fingerprint,
       firstSeen: group.firstSeen,
       message: group.message ?? null,
+      release: group.release && group.release.length > 0 ? group.release : null,
+      exceptionType,
+      stacktrace: group.stacktrace,
+      exception: group.exception,
+      rawPayload: group.rawPayload,
     });
     if (link) {
       created += 1;

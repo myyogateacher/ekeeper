@@ -27,6 +27,20 @@ function toClickHouseDateTime(value: string): string {
   return value.replace("T", " ").replace("Z", "");
 }
 
+function extractExceptionType(exception: Record<string, unknown> | null | undefined): string | null {
+  if (!exception || typeof exception !== "object") {
+    return null;
+  }
+  const values = Array.isArray((exception as Record<string, unknown>).values)
+    ? ((exception as Record<string, unknown>).values as Array<Record<string, unknown>>)
+    : [];
+  const primary = values[0];
+  if (primary && typeof primary.type === "string" && primary.type.length > 0) {
+    return primary.type;
+  }
+  return null;
+}
+
 function roundDateToFiveMinutes(date: Date) {
   const rounded = new Date(date);
   rounded.setUTCSeconds(0, 0);
@@ -190,6 +204,11 @@ async function maybeCreateGithubIssues(input: {
       fingerprint: event.fingerprint,
       firstSeen: event.timestamp,
       message: event.message,
+      release: event.release,
+      exceptionType: extractExceptionType(event.exception),
+      stacktrace: event.stacktrace,
+      exception: event.exception,
+      rawPayload: event.rawPayload,
     });
   }
 }

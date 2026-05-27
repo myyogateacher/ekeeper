@@ -10,6 +10,47 @@ import {
   type GithubIssueListItem,
 } from "./github";
 import { normalizeExceptionValue } from "./ingest";
+import { deobfuscateEvent } from "./minimaps";
+
+const STACK_FRAMES_IN_BODY = 8;
+
+interface RawFrame {
+  filename?: unknown;
+  function?: unknown;
+  lineno?: unknown;
+  colno?: unknown;
+  in_app?: unknown;
+}
+
+function formatFrameLine(frame: RawFrame): string {
+  const fn = typeof frame.function === "string" && frame.function.length > 0 ? frame.function : "<anonymous>";
+  const file = typeof frame.filename === "string" && frame.filename.length > 0 ? frame.filename : "<unknown>";
+  const lineno = typeof frame.lineno === "number" ? frame.lineno : Number(frame.lineno);
+  const colno = typeof frame.colno === "number" ? frame.colno : Number(frame.colno);
+  const loc = Number.isFinite(lineno)
+    ? `:${lineno}${Number.isFinite(colno) ? `:${colno}` : ""}`
+    : "";
+  return `at ${fn} (${file}${loc})`;
+}
+
+function buildStackBlock(stacktrace: unknown, exception: unknown): string {
+  const stack = stacktrace && typeof stacktrace === "object" ? (stacktrace as Record<string, unknown>) : null;
+  let frames = stack && Array.isArray(stack.frames) ? (stack.frames as RawFrame[]) : null;
+  if (!frames || frames.length === 0) {
+    const exc = exception && typeof exception === "object" ? (exception as Record<string, unknown>) : null;
+    const values = exc && Array.isArray(exc.values) ? (exc.values as Array<Record<string, unknown>>) : null;
+    const primary = values?.[0];
+    const primaryStack = primary?.stacktrace && typeof primary.stacktrace === "object"
+      ? (primary.stacktrace as Record<string, unknown>)
+      : null;
+    frames = primaryStack && Array.isArray(primaryStack.frames) ? (primaryStack.frames as RawFrame[]) : null;
+  }
+  if (!frames || frames.length === 0) {
+    return "";
+  }
+  const topFrames = frames.slice(-STACK_FRAMES_IN_BODY).reverse();
+  return topFrames.map(formatFrameLine).join("\n");
+}
 
 function normalizeTitleForBucketing(title: string): string {
   const colonIndex = title.indexOf(": ");
@@ -132,18 +173,34 @@ function buildIssueBody(input: {
   groupId: string;
   firstSeen: string;
   message: string | null;
+  release: string | null;
+  exceptionType: string | null;
+  sourceMapApplied: boolean;
+  stackBlock: string;
 }): string {
   const ekeeperUrl = `${config.APP_URL.replace(/\/+$/, "")}/errors/${input.projectId}/${input.groupId}`;
   const lines: string[] = [
     `**Project:** ${input.projectName}`,
     `**Fingerprint:** \`${input.fingerprint}\``,
     `**First seen:** ${input.firstSeen}`,
-    "",
-    "Reported automatically by eKeeper.",
   ];
+  if (input.release) {
+    lines.push(`**Release:** \`${input.release}\``);
+  }
+  if (input.exceptionType) {
+    lines.push(`**Exception type:** \`${input.exceptionType}\``);
+  }
+  lines.push("", "Reported automatically by eKeeper.");
 
   if (input.message) {
-    lines.push("", "```", input.message, "```");
+    lines.push("", "**Message:**", "```", input.message, "```");
+  }
+
+  if (input.stackBlock) {
+    const heading = input.sourceMapApplied
+      ? `**Stack (top ${STACK_FRAMES_IN_BODY}, source-mapped):**`
+      : `**Stack (top ${STACK_FRAMES_IN_BODY}, minified):**`;
+    lines.push("", heading, "```", input.stackBlock, "```");
   }
 
   lines.push("", `View in eKeeper: ${ekeeperUrl}`);
@@ -158,6 +215,11 @@ export async function ensureGithubIssueForGroup(input: {
   fingerprint: string;
   firstSeen: string;
   message: string | null;
+  release?: string | null;
+  exceptionType?: string | null;
+  stacktrace?: string | Record<string, unknown> | null;
+  exception?: string | Record<string, unknown> | null;
+  rawPayload?: string | null;
 }): Promise<GithubIssueLinkRow | null> {
   const integration = getGithubIntegration(input.projectId);
   if (!integration) {
@@ -205,6 +267,20 @@ export async function ensureGithubIssueForGroup(input: {
     }
 
     const labels = [...parseLabels(integration.defaultLabels), label];
+
+    const deobfuscated = input.rawPayload
+      ? deobfuscateEvent({
+          projectId: input.projectId,
+          rawPayload: input.rawPayload,
+          stacktrace: input.stacktrace ?? null,
+          exception: input.exception ?? {},
+        })
+      : null;
+    const stackBlock = buildStackBlock(
+      deobfuscated?.stacktrace ?? input.stacktrace ?? null,
+      deobfuscated?.exception ?? input.exception ?? null,
+    );
+
     const created = await createGithubIssue({
       token,
       owner: integration.owner,
@@ -217,6 +293,10 @@ export async function ensureGithubIssueForGroup(input: {
         groupId: input.groupId,
         firstSeen: input.firstSeen,
         message: input.message,
+        release: input.release ?? deobfuscated?.release ?? null,
+        exceptionType: input.exceptionType ?? null,
+        sourceMapApplied: Boolean(deobfuscated?.applied),
+        stackBlock,
       }),
       labels,
     });

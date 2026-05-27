@@ -87,6 +87,46 @@ Optional environment fallbacks:
   (`ProjectGithubIntegration`, `githubIssueNumber`/`githubIssueUrl` on
   `ErrorGroupSummary` and `ErrorEventDetail`)
 
+## Issue body shape
+
+`buildIssueBody` (in `issue-sync.ts`) renders the body so downstream
+automations — especially the Claude auto-fix workflow on
+`mobile-myt-new` — have enough context to locate the failing call site
+without re-reading the eKeeper UI:
+
+```
+**Project:** student-app-prod
+**Fingerprint:** `abc123...`
+**First seen:** 2026-05-23T23:32:54Z
+**Release:** `com.myyogateacher.studentapp@4.0.3+1`
+**Exception type:** `TypeError`
+
+Reported automatically by eKeeper.
+
+**Message:**
+```
+Cannot read properties of undefined (reading 'target')
+```
+
+**Stack (top 8, source-mapped):**
+```
+at handleEvent (src/features/session/hooks/useSession.ts:88:12)
+at apiCall (src/features/session/services/api.ts:142:18)
+...
+```
+
+View in eKeeper: https://glitch.azure-services.../errors/<projectId>/<groupId>
+```
+
+Source-mapped frames come from `deobfuscateEvent` in `minimaps.ts`. If
+the project has matching source maps uploaded for that release, frames
+point at `src/...` paths in the original codebase. If maps aren't
+available, the body falls back to the minified frames and the heading
+says `(top 8, minified)` so the consumer knows.
+
+The fingerprint marker line is what `cleanupDuplicateGithubIssues`
+parses when bucketing — see "Cleaning up existing duplicates" below.
+
 ## Secret storage
 
 - `personal_access_token` and `webhook_secret` are stored in plaintext
