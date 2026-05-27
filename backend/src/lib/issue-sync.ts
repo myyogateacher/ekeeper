@@ -9,6 +9,17 @@ import {
   setGithubIssueState,
   type GithubIssueListItem,
 } from "./github";
+import { normalizeExceptionValue } from "./ingest";
+
+function normalizeTitleForBucketing(title: string): string {
+  const colonIndex = title.indexOf(": ");
+  if (colonIndex === -1) {
+    return normalizeExceptionValue(title);
+  }
+  const head = title.slice(0, colonIndex + 2);
+  const tail = title.slice(colonIndex + 2);
+  return head + normalizeExceptionValue(tail);
+}
 
 const FINGERPRINT_LABEL_PREFIX = "ek:fp:";
 const FINGERPRINT_BODY_MARKER = /\*\*Fingerprint:\*\*\s+`([a-f0-9]{1,64})`/i;
@@ -297,9 +308,10 @@ export async function cleanupDuplicateGithubIssues(input: {
     if (!extractFingerprint(issue.body)) {
       continue;
     }
-    const bucket = byTitle.get(issue.title) ?? [];
+    const key = normalizeTitleForBucketing(issue.title);
+    const bucket = byTitle.get(key) ?? [];
     bucket.push(issue);
-    byTitle.set(issue.title, bucket);
+    byTitle.set(key, bucket);
   }
 
   let duplicatesClosed = 0;

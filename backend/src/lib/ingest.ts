@@ -5,6 +5,47 @@ function hashString(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
 
+const POINTER_PATTERN = /0x[0-9a-fA-F]{4,}/g;
+const BRACE_OPEN_PLACEHOLDER = "";
+const BRACE_CLOSE_PLACEHOLDER = "";
+
+function splitTopLevelCommas(input: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let start = 0;
+  for (let i = 0; i < input.length; i += 1) {
+    const ch = input[i];
+    if (ch === "{" || ch === BRACE_OPEN_PLACEHOLDER) {
+      depth += 1;
+    } else if (ch === "}" || ch === BRACE_CLOSE_PLACEHOLDER) {
+      depth -= 1;
+    } else if (ch === "," && depth === 0) {
+      parts.push(input.slice(start, i));
+      start = i + 1;
+    }
+  }
+  parts.push(input.slice(start));
+  return parts.map((part) => part.trim()).filter((part) => part.length > 0);
+}
+
+export function normalizeExceptionValue(raw: string): string {
+  if (!raw) {
+    return raw;
+  }
+  let s = raw.replace(POINTER_PATTERN, "0x_");
+
+  let previous = "";
+  while (previous !== s) {
+    previous = s;
+    s = s.replace(/\{([^{}]*)\}/g, (_, inner: string) => {
+      const sorted = splitTopLevelCommas(inner).sort();
+      return BRACE_OPEN_PLACEHOLDER + sorted.join(", ") + BRACE_CLOSE_PLACEHOLDER;
+    });
+  }
+
+  return s.replaceAll(BRACE_OPEN_PLACEHOLDER, "{").replaceAll(BRACE_CLOSE_PLACEHOLDER, "}");
+}
+
 function normalizeBreadcrumbs(value: unknown): Breadcrumb[] {
   const source = Array.isArray(value)
     ? value
@@ -53,7 +94,7 @@ export function computeGroupFingerprint(payload: Record<string, unknown>): strin
     : [];
   const exception = exceptionValues[0] ?? {};
   const type = String(exception.type ?? "Error");
-  const value = String(exception.value ?? payload.message ?? "Unknown error");
+  const value = normalizeExceptionValue(String(exception.value ?? payload.message ?? "Unknown error"));
   const frames = (((exception.stacktrace as Record<string, unknown> | undefined)?.frames ?? []) as Array<
     Record<string, unknown>
   >)
@@ -69,7 +110,9 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
     ? (((payload.exception as Record<string, unknown>).values as unknown[]) as Array<Record<string, unknown>>)
     : [];
   const primaryException = exceptionValues[0] ?? {};
-  const message = String(primaryException.value ?? payload.message ?? "Unknown error");
+  const message = normalizeExceptionValue(
+    String(primaryException.value ?? payload.message ?? "Unknown error"),
+  );
   const exceptionType = String(primaryException.type ?? "Error");
   const title = `${exceptionType}: ${message}`;
   const fingerprint = computeGroupFingerprint(payload);

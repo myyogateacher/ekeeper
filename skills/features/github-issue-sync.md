@@ -160,17 +160,35 @@ Idempotent — running it twice produces zero further changes.
 
 ## Fingerprint stability across releases
 
-`computeGroupFingerprint` hashes `type | value | last-4-frames` where
-each frame is `filename:function`. Line and column numbers are
-**deliberately excluded** — they shift with every JS bundle rebuild
-and would otherwise produce a fresh group for the same bug after
-every release.
+`computeGroupFingerprint` hashes `type | normalizedValue | last-4-frames`:
 
-A consequence: events that landed *before* this change retain their
-historical fingerprints. They stay as separate groups in
-`events`. The cleanup tool above is what merges them on the GitHub
+- Each frame is `filename:function`. Line and column numbers are
+  **deliberately excluded** — they shift with every JS bundle rebuild
+  and would otherwise produce a fresh group for the same bug after
+  every release.
+- The exception value passes through `normalizeExceptionValue` first:
+  hex pointer addresses (`0x[0-9a-fA-F]{4,}`) collapse to `0x_`, and
+  inside any `{key=value, ...}` block (Apple's `NSDictionary`
+  description style) the comma-separated pairs are sorted
+  alphabetically. Innermost braces are processed first via a
+  fixed-point loop; nested braces are tracked with a top-level-comma
+  splitter so a `{a, b, {c, d}}` block stays grouped correctly.
+
+The same normalized form is used as the issue title in
+`normalizeEvent`, so the title cleanup buckets stay aligned with the
+fingerprint. The raw payload on the detail page is untouched —
+debugging info is preserved.
+
+Why this matters: an iOS `NSError` printed as
+`UserInfo={NSUnderlyingError=0x303ae6bb0 {Code=28}, NSURL=...}` and
+`UserInfo={NSURL=..., NSUnderlyingError=0x303a575d0 {Code=28}}` are
+the same logical error but used to produce two groups and two GitHub
+issues. After normalization, they share a fingerprint and a title.
+
+Events that landed *before* this change retain their historical
+fingerprints in `events`. The cleanup tool merges them on the GitHub
 side; eKeeper's own grouping stays split for old data. New events
-ingested after the change are stable across releases.
+ingested after the change are stable.
 
 ## Failure modes and how to read them
 
