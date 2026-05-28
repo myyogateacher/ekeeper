@@ -34,6 +34,24 @@ Important filesystem locations:
 - SQLite path from `SQLITE_PATH`
 - minimap storage path from `MINIMAPS_STORAGE_PATH`
 
+### SQLite must be on a persistent volume
+
+If the directory holding `SQLITE_PATH` is on ephemeral container storage, every redeploy wipes the database. Among the tables that get reset:
+
+- `users`, `sessions` — every operator has to sign in again
+- `projects`, `project_keys` — every SDK DSN becomes invalid; ingest starts rejecting events
+- `project_github_integrations`, `error_group_github_issues` — every project's GitHub mapping disappears, and the next ingest flush opens fresh GitHub issues for groups that were previously linked
+
+That last failure mode is the most expensive — it produces silent duplicate issues on the GitHub side after each deploy, with no signal in the logs.
+
+When using the bundled `docker-compose.sample.yml`, the `sqlite-data` named volume is already mounted at `/app/backend/data/sqlite`. When deploying with a custom compose file, raw Docker, or Kubernetes, verify the mount before going live:
+
+```bash
+docker compose config | grep -A2 sqlite-data
+```
+
+Same applies to `MINIMAPS_STORAGE_PATH` — losing it means source maps stop deobfuscating until they're re-uploaded.
+
 ## Required Environment
 
 Review these before starting production:
