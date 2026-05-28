@@ -98,7 +98,7 @@ export function SettingsPage() {
     mutationFn: () => api.cleanupDuplicateGithubIssues(selectedProjectId),
     onSuccess: (result) => {
       toast.info(
-        `Cleanup done — scanned ${result.fingerprintsScanned} fingerprint${result.fingerprintsScanned === 1 ? "" : "s"}, ` +
+        `Cleanup done — scanned ${result.titlesScanned} title${result.titlesScanned === 1 ? "" : "s"}, ` +
           `closed ${result.duplicatesClosed} duplicate${result.duplicatesClosed === 1 ? "" : "s"}, ` +
           `repaired ${result.linksRepaired} link${result.linksRepaired === 1 ? "" : "s"}.`,
       );

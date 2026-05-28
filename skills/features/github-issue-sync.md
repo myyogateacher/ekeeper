@@ -87,6 +87,46 @@ Optional environment fallbacks:
   (`ProjectGithubIntegration`, `githubIssueNumber`/`githubIssueUrl` on
   `ErrorGroupSummary` and `ErrorEventDetail`)
 
+## Issue body shape
+
+`buildIssueBody` (in `issue-sync.ts`) renders the body so downstream
+automations — especially the Claude auto-fix workflow on
+`mobile-myt-new` — have enough context to locate the failing call site
+without re-reading the eKeeper UI:
+
+```
+**Project:** student-app-prod
+**Fingerprint:** `abc123...`
+**First seen:** 2026-05-23T23:32:54Z
+**Release:** `com.myyogateacher.studentapp@4.0.3+1`
+**Exception type:** `TypeError`
+
+Reported automatically by eKeeper.
+
+**Message:**
+```
+Cannot read properties of undefined (reading 'target')
+```
+
+**Stack (top 8, source-mapped):**
+```
+at handleEvent (src/features/session/hooks/useSession.ts:88:12)
+at apiCall (src/features/session/services/api.ts:142:18)
+...
+```
+
+View in eKeeper: https://glitch.azure-services.../errors/<projectId>/<groupId>
+```
+
+Source-mapped frames come from `deobfuscateEvent` in `minimaps.ts`. If
+the project has matching source maps uploaded for that release, frames
+point at `src/...` paths in the original codebase. If maps aren't
+available, the body falls back to the minified frames and the heading
+says `(top 8, minified)` so the consumer knows.
+
+The fingerprint marker line is what `cleanupDuplicateGithubIssues`
+parses when bucketing — see "Cleaning up existing duplicates" below.
+
 ## Secret storage
 
 - `personal_access_token` and `webhook_secret` are stored in plaintext
@@ -137,14 +177,58 @@ button) does a one-shot reconcile against the live repo:
 1. List every issue in the repo (paginated, 100 per page).
 2. For each issue, parse the eKeeper fingerprint from the
    `**Fingerprint:** \`<hash>\`` line we always include in the body.
-3. Group by fingerprint. For each group:
+   Issues without that marker are skipped (not ours).
+3. **Group by exact issue title.** Same title = same logical error,
+   even if the eKeeper fingerprints differ (which they do across
+   releases — see "Fingerprint stability" below).
+4. For each title with one or more eKeeper issues:
    - Pick the oldest issue as canonical.
-   - Add the `ek:fp:<fingerprint>` label to it if missing.
-   - Repoint the local link row at it.
-   - Comment "Duplicate of #N" on every other issue in the group and
-     close them with `state_reason: not_planned`.
+   - Collect every fingerprint that appears in the bucket. Add an
+     `ek:fp:<fingerprint>` label to the canonical for every one of
+     them. So if four releases produced four split groups, the
+     canonical ends up with four labels, and future ingest events
+     matching any of those fingerprints will hit the
+     `listGithubIssuesByLabel` check and reuse the canonical.
+   - Repoint every fingerprint's local link row at the canonical
+     issue. Multiple eKeeper groups can now legitimately share a
+     GitHub issue — that's the desired behaviour for split-by-release
+     groups.
+   - Comment "Duplicate of #N" on every other issue in the bucket
+     and close them with `state_reason: not_planned`.
 
 Idempotent — running it twice produces zero further changes.
+
+## Fingerprint stability across releases
+
+`computeGroupFingerprint` hashes `type | normalizedValue | last-4-frames`:
+
+- Each frame is `filename:function`. Line and column numbers are
+  **deliberately excluded** — they shift with every JS bundle rebuild
+  and would otherwise produce a fresh group for the same bug after
+  every release.
+- The exception value passes through `normalizeExceptionValue` first:
+  hex pointer addresses (`0x[0-9a-fA-F]{4,}`) collapse to `0x_`, and
+  inside any `{key=value, ...}` block (Apple's `NSDictionary`
+  description style) the comma-separated pairs are sorted
+  alphabetically. Innermost braces are processed first via a
+  fixed-point loop; nested braces are tracked with a top-level-comma
+  splitter so a `{a, b, {c, d}}` block stays grouped correctly.
+
+The same normalized form is used as the issue title in
+`normalizeEvent`, so the title cleanup buckets stay aligned with the
+fingerprint. The raw payload on the detail page is untouched —
+debugging info is preserved.
+
+Why this matters: an iOS `NSError` printed as
+`UserInfo={NSUnderlyingError=0x303ae6bb0 {Code=28}, NSURL=...}` and
+`UserInfo={NSURL=..., NSUnderlyingError=0x303a575d0 {Code=28}}` are
+the same logical error but used to produce two groups and two GitHub
+issues. After normalization, they share a fingerprint and a title.
+
+Events that landed *before* this change retain their historical
+fingerprints in `events`. The cleanup tool merges them on the GitHub
+side; eKeeper's own grouping stays split for old data. New events
+ingested after the change are stable.
 
 ## Failure modes and how to read them
 

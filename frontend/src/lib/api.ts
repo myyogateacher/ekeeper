@@ -130,7 +130,7 @@ export const api = {
     }>(`/api/projects/${projectId}/github-integration/backfill`, { method: "POST" }),
   cleanupDuplicateGithubIssues: (projectId: string) =>
     request<{
-      fingerprintsScanned: number;
+      titlesScanned: number;
       duplicatesClosed: number;
       linksRepaired: number;
       labelsAdded: number;

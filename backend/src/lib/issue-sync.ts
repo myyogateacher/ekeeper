@@ -9,6 +9,58 @@ import {
   setGithubIssueState,
   type GithubIssueListItem,
 } from "./github";
+import { normalizeExceptionValue } from "./ingest";
+import { deobfuscateEvent } from "./minimaps";
+
+const STACK_FRAMES_IN_BODY = 8;
+
+interface RawFrame {
+  filename?: unknown;
+  function?: unknown;
+  lineno?: unknown;
+  colno?: unknown;
+  in_app?: unknown;
+}
+
+function formatFrameLine(frame: RawFrame): string {
+  const fn = typeof frame.function === "string" && frame.function.length > 0 ? frame.function : "<anonymous>";
+  const file = typeof frame.filename === "string" && frame.filename.length > 0 ? frame.filename : "<unknown>";
+  const lineno = typeof frame.lineno === "number" ? frame.lineno : Number(frame.lineno);
+  const colno = typeof frame.colno === "number" ? frame.colno : Number(frame.colno);
+  const loc = Number.isFinite(lineno)
+    ? `:${lineno}${Number.isFinite(colno) ? `:${colno}` : ""}`
+    : "";
+  return `at ${fn} (${file}${loc})`;
+}
+
+function buildStackBlock(stacktrace: unknown, exception: unknown): string {
+  const stack = stacktrace && typeof stacktrace === "object" ? (stacktrace as Record<string, unknown>) : null;
+  let frames = stack && Array.isArray(stack.frames) ? (stack.frames as RawFrame[]) : null;
+  if (!frames || frames.length === 0) {
+    const exc = exception && typeof exception === "object" ? (exception as Record<string, unknown>) : null;
+    const values = exc && Array.isArray(exc.values) ? (exc.values as Array<Record<string, unknown>>) : null;
+    const primary = values?.[0];
+    const primaryStack = primary?.stacktrace && typeof primary.stacktrace === "object"
+      ? (primary.stacktrace as Record<string, unknown>)
+      : null;
+    frames = primaryStack && Array.isArray(primaryStack.frames) ? (primaryStack.frames as RawFrame[]) : null;
+  }
+  if (!frames || frames.length === 0) {
+    return "";
+  }
+  const topFrames = frames.slice(-STACK_FRAMES_IN_BODY).reverse();
+  return topFrames.map(formatFrameLine).join("\n");
+}
+
+function normalizeTitleForBucketing(title: string): string {
+  const colonIndex = title.indexOf(": ");
+  if (colonIndex === -1) {
+    return normalizeExceptionValue(title);
+  }
+  const head = title.slice(0, colonIndex + 2);
+  const tail = title.slice(colonIndex + 2);
+  return head + normalizeExceptionValue(tail);
+}
 
 const FINGERPRINT_LABEL_PREFIX = "ek:fp:";
 const FINGERPRINT_BODY_MARKER = /\*\*Fingerprint:\*\*\s+`([a-f0-9]{1,64})`/i;
@@ -121,18 +173,34 @@ function buildIssueBody(input: {
   groupId: string;
   firstSeen: string;
   message: string | null;
+  release: string | null;
+  exceptionType: string | null;
+  sourceMapApplied: boolean;
+  stackBlock: string;
 }): string {
   const ekeeperUrl = `${config.APP_URL.replace(/\/+$/, "")}/errors/${input.projectId}/${input.groupId}`;
   const lines: string[] = [
     `**Project:** ${input.projectName}`,
     `**Fingerprint:** \`${input.fingerprint}\``,
     `**First seen:** ${input.firstSeen}`,
-    "",
-    "Reported automatically by eKeeper.",
   ];
+  if (input.release) {
+    lines.push(`**Release:** \`${input.release}\``);
+  }
+  if (input.exceptionType) {
+    lines.push(`**Exception type:** \`${input.exceptionType}\``);
+  }
+  lines.push("", "Reported automatically by eKeeper.");
 
   if (input.message) {
-    lines.push("", "```", input.message, "```");
+    lines.push("", "**Message:**", "```", input.message, "```");
+  }
+
+  if (input.stackBlock) {
+    const heading = input.sourceMapApplied
+      ? `**Stack (top ${STACK_FRAMES_IN_BODY}, source-mapped):**`
+      : `**Stack (top ${STACK_FRAMES_IN_BODY}, minified):**`;
+    lines.push("", heading, "```", input.stackBlock, "```");
   }
 
   lines.push("", `View in eKeeper: ${ekeeperUrl}`);
@@ -147,6 +215,11 @@ export async function ensureGithubIssueForGroup(input: {
   fingerprint: string;
   firstSeen: string;
   message: string | null;
+  release?: string | null;
+  exceptionType?: string | null;
+  stacktrace?: string | Record<string, unknown> | null;
+  exception?: string | Record<string, unknown> | null;
+  rawPayload?: string | null;
 }): Promise<GithubIssueLinkRow | null> {
   const integration = getGithubIntegration(input.projectId);
   if (!integration) {
@@ -194,6 +267,20 @@ export async function ensureGithubIssueForGroup(input: {
     }
 
     const labels = [...parseLabels(integration.defaultLabels), label];
+
+    const deobfuscated = input.rawPayload
+      ? deobfuscateEvent({
+          projectId: input.projectId,
+          rawPayload: input.rawPayload,
+          stacktrace: input.stacktrace ?? null,
+          exception: input.exception ?? {},
+        })
+      : null;
+    const stackBlock = buildStackBlock(
+      deobfuscated?.stacktrace ?? input.stacktrace ?? null,
+      deobfuscated?.exception ?? input.exception ?? null,
+    );
+
     const created = await createGithubIssue({
       token,
       owner: integration.owner,
@@ -206,6 +293,10 @@ export async function ensureGithubIssueForGroup(input: {
         groupId: input.groupId,
         firstSeen: input.firstSeen,
         message: input.message,
+        release: input.release ?? deobfuscated?.release ?? null,
+        exceptionType: input.exceptionType ?? null,
+        sourceMapApplied: Boolean(deobfuscated?.applied),
+        stackBlock,
       }),
       labels,
     });
@@ -256,14 +347,26 @@ function upsertGithubLink(input: {
 }
 
 export interface CleanupDuplicatesResult {
-  fingerprintsScanned: number;
+  titlesScanned: number;
   duplicatesClosed: number;
   linksRepaired: number;
   labelsAdded: number;
+  dryRun?: boolean;
+  buckets?: CleanupBucketPreview[];
+}
+
+export interface CleanupBucketPreview {
+  title: string;
+  canonicalIssueNumber: number;
+  canonicalIssueUrl: string;
+  fingerprints: string[];
+  duplicateIssueNumbers: number[];
+  labelsThatWouldBeAdded: string[];
 }
 
 export async function cleanupDuplicateGithubIssues(input: {
   projectId: string;
+  dryRun?: boolean;
 }): Promise<CleanupDuplicatesResult> {
   const integration = getGithubIntegration(input.projectId);
   if (!integration) {
@@ -280,56 +383,99 @@ export async function cleanupDuplicateGithubIssues(input: {
     repo: integration.repo,
   });
 
-  const byFingerprint = new Map<string, GithubIssueListItem[]>();
+  const byTitle = new Map<string, GithubIssueListItem[]>();
   for (const issue of allIssues) {
-    const fingerprint = extractFingerprint(issue.body);
-    if (!fingerprint) {
+    if (!extractFingerprint(issue.body)) {
       continue;
     }
-    const bucket = byFingerprint.get(fingerprint) ?? [];
+    const key = normalizeTitleForBucketing(issue.title);
+    const bucket = byTitle.get(key) ?? [];
     bucket.push(issue);
-    byFingerprint.set(fingerprint, bucket);
+    byTitle.set(key, bucket);
   }
 
   let duplicatesClosed = 0;
   let linksRepaired = 0;
   let labelsAdded = 0;
+  const buckets: CleanupBucketPreview[] = [];
 
-  for (const [fingerprint, issues] of byFingerprint) {
+  for (const issues of byTitle.values()) {
     const sorted = issues
       .slice()
       .sort((a, b) => new Date(a.created_at).getTime() - new Date(b.created_at).getTime());
     const canonical = sorted[0]!;
-    const expectedLabel = fingerprintLabel(fingerprint);
 
-    const canonicalHasLabel = canonical.labels.some((entry) =>
-      typeof entry === "string" ? entry === expectedLabel : entry.name === expectedLabel,
+    const fingerprintsInBucket = new Set<string>();
+    for (const issue of sorted) {
+      const fp = extractFingerprint(issue.body);
+      if (fp) {
+        fingerprintsInBucket.add(fp);
+      }
+    }
+
+    const existingLabels = new Set(
+      canonical.labels.map((entry) => (typeof entry === "string" ? entry : entry.name)),
     );
-    if (!canonicalHasLabel) {
+    const labelsToAdd = Array.from(fingerprintsInBucket)
+      .map((fp) => fingerprintLabel(fp))
+      .filter((label) => !existingLabels.has(label));
+
+    const duplicateNumbers = sorted
+      .slice(1)
+      .filter((duplicate) => duplicate.state !== "closed")
+      .map((duplicate) => duplicate.number);
+
+    if (input.dryRun) {
+      buckets.push({
+        title: canonical.title,
+        canonicalIssueNumber: canonical.number,
+        canonicalIssueUrl: canonical.html_url,
+        fingerprints: Array.from(fingerprintsInBucket),
+        duplicateIssueNumbers: duplicateNumbers,
+        labelsThatWouldBeAdded: labelsToAdd,
+      });
+      labelsAdded += labelsToAdd.length;
+      duplicatesClosed += duplicateNumbers.length;
+      for (const fp of fingerprintsInBucket) {
+        const existingLink = getGithubLink(input.projectId, fp);
+        if (
+          !existingLink ||
+          existingLink.githubIssueNumber !== canonical.number ||
+          existingLink.githubIssueUrl !== canonical.html_url
+        ) {
+          linksRepaired += 1;
+        }
+      }
+      continue;
+    }
+
+    if (labelsToAdd.length > 0) {
       await addLabelsToGithubIssue({
         token,
         owner: integration.owner,
         repo: integration.repo,
         issueNumber: canonical.number,
-        labels: [expectedLabel],
+        labels: labelsToAdd,
       });
-      labelsAdded += 1;
+      labelsAdded += labelsToAdd.length;
     }
 
-    const existingLink = getGithubLink(input.projectId, fingerprint);
-    if (
-      !existingLink ||
-      existingLink.githubIssueNumber !== canonical.number ||
-      existingLink.githubIssueUrl !== canonical.html_url
-    ) {
-      upsertGithubLink({
-        projectId: input.projectId,
-        groupId: fingerprint,
-        issueNumber: canonical.number,
-        issueUrl: canonical.html_url,
-        nodeId: canonical.node_id,
-      });
-      linksRepaired += 1;
+    for (const fp of fingerprintsInBucket) {
+      const existingLink = getGithubLink(input.projectId, fp);
+      if (
+        !existingLink ||
+        existingLink.githubIssueNumber !== canonical.number ||
+        existingLink.githubIssueUrl !== canonical.html_url
+      ) {
+        upsertGithubLink({
+          projectId: input.projectId,
+          groupId: fp,
+          issueNumber: canonical.number,
+          issueUrl: canonical.html_url,
+          nodeId: canonical.node_id,
+        });
+        linksRepaired += 1;
+      }
     }
 
     for (const duplicate of sorted.slice(1)) {
@@ -354,12 +500,17 @@ export async function cleanupDuplicateGithubIssues(input: {
     }
   }
 
-  return {
-    fingerprintsScanned: byFingerprint.size,
+  const result: CleanupDuplicatesResult = {
+    titlesScanned: byTitle.size,
     duplicatesClosed,
     linksRepaired,
     labelsAdded,
   };
+  if (input.dryRun) {
+    result.dryRun = true;
+    result.buckets = buckets;
+  }
+  return result;
 }
 
 export async function syncGithubIssueState(input: {
