@@ -147,10 +147,12 @@ parses when bucketing — see "Cleaning up existing duplicates" below.
 Three layers, cheapest first:
 
 1. **Local link row** — `error_group_github_issues` has
-   `PRIMARY KEY (project_id, group_id)` and a
-   `UNIQUE INDEX (project_id, github_issue_number)`. If a link exists
-   for the group, `ensureGithubIssueForGroup` short-circuits with no
-   GitHub call.
+   `PRIMARY KEY (project_id, group_id)` and a non-unique index on
+   `(project_id, github_issue_number)`. Multiple groups in the same
+   project can share a GitHub issue (this is what happens after the
+   title-bucket cleanup merges release-shifted duplicates). If a link
+   exists for the group, `ensureGithubIssueForGroup` short-circuits
+   with no GitHub call.
 2. **GitHub-side label search** — when the local link is missing, the
    backend searches the repo for an issue tagged with
    `ek:fp:<fingerprint>` (the fingerprint label). If any match comes
@@ -165,8 +167,9 @@ cascades to `error_group_github_issues`; link rows persist so a
 reconfigure picks up where it left off.
 
 The webhook handler looks up the integration by `(owner, repo)`, then
-the group link by `(owner, repo, issue_number)`. If either is missing
-the call no-ops; no fake links get written.
+**all** group links by `(owner, repo, issue_number)` — closing or
+reopening a single GitHub issue propagates to every eKeeper group
+that's linked to it. If no links match, the webhook no-ops.
 
 ## Cleaning up existing duplicates
 
