@@ -2,7 +2,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 import { Hono } from "hono";
 import { one } from "../db/sqlite";
 import { HttpError } from "../lib/http";
-import { findGithubLinkByIssue } from "../lib/issue-sync";
+import { findGithubLinksByIssue } from "../lib/issue-sync";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type { IssueState } from "@ekeeper/shared";
 
@@ -78,8 +78,8 @@ githubRouter.post("/webhook", async (ctx) => {
     throw new HttpError(401, "Invalid webhook signature");
   }
 
-  const link = findGithubLinkByIssue(repository.owner.login, repository.name, issue.number);
-  if (!link) {
+  const links = findGithubLinksByIssue(repository.owner.login, repository.name, issue.number);
+  if (links.length === 0) {
     return ctx.json({ ignored: true, reason: "no linked group" });
   }
 
@@ -88,7 +88,13 @@ githubRouter.post("/webhook", async (ctx) => {
     return ctx.json({ ignored: true, reason: "unsupported action" });
   }
 
-  upsertIssueWorkflow(link.projectId, link.groupId, { state: nextState });
+  for (const link of links) {
+    upsertIssueWorkflow(link.projectId, link.groupId, { state: nextState });
+  }
 
-  return ctx.json({ ok: true, projectId: link.projectId, groupId: link.groupId, state: nextState });
+  return ctx.json({
+    ok: true,
+    state: nextState,
+    updatedGroups: links.map((link) => ({ projectId: link.projectId, groupId: link.groupId })),
+  });
 });

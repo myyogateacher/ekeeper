@@ -128,12 +128,12 @@ export function getGithubLink(projectId: string, groupId: string): GithubIssueLi
   );
 }
 
-export function findGithubLinkByIssue(
+export function findGithubLinksByIssue(
   owner: string,
   repo: string,
   issueNumber: number,
-): GithubIssueLinkRow | null {
-  return one<GithubIssueLinkRow>(
+): GithubIssueLinkRow[] {
+  return all<GithubIssueLinkRow>(
     `SELECT egi.project_id as projectId, egi.group_id as groupId,
        egi.github_issue_number as githubIssueNumber, egi.github_issue_url as githubIssueUrl,
        egi.github_node_id as githubNodeId
