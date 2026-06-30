@@ -16,6 +16,7 @@ import { authRouter } from "./routes/auth";
 import { githubRouter } from "./routes/github";
 import { ingestRouter } from "./routes/ingest";
 import { pluginRouter } from "./routes/plugin";
+import { oauthRouter, protectedResourceMetadata } from "./routes/oauth";
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -54,6 +55,10 @@ app.onError((error, ctx) => {
   ctx.status(500);
   return ctx.json({ message: "Internal server error" });
 });
+
+app.get("/.well-known/oauth-protected-resource", (ctx) =>
+  ctx.json(protectedResourceMetadata(config.APP_URL)));
+app.route("/", oauthRouter); // serves /.well-known/oauth-authorization-server + /oauth/*
 
 app.route("/auth", authRouter);
 app.route("/api", apiRouter);
