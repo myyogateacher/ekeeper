@@ -3,6 +3,7 @@ import { useEffect, useRef, useState, type ReactNode } from "react";
 import { HelpCircle } from "lucide-react";
 import { toast } from "react-toastify";
 import { api } from "@/lib/api";
+import { McpAccessPanel } from "../components/McpAccessPanel";
 
 function HelpPopover({ label, children }: { label: string; children: ReactNode }) {
   return (
@@ -399,6 +400,8 @@ export function SettingsPage() {
           </div>
         </form>
       </section>
+
+      <McpAccessPanel appUrl={window.location.origin} />
     </div>
   );
 }

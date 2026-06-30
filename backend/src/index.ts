@@ -16,6 +16,8 @@ import { authRouter } from "./routes/auth";
 import { githubRouter } from "./routes/github";
 import { ingestRouter } from "./routes/ingest";
 import { pluginRouter } from "./routes/plugin";
+import { oauthRouter, protectedResourceMetadata } from "./routes/oauth";
+import { mcpRouter } from "./routes/mcp";
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -55,11 +57,16 @@ app.onError((error, ctx) => {
   return ctx.json({ message: "Internal server error" });
 });
 
+app.get("/.well-known/oauth-protected-resource", (ctx) =>
+  ctx.json(protectedResourceMetadata(config.APP_URL)));
+app.route("/", oauthRouter); // serves /.well-known/oauth-authorization-server + /oauth/*
+
 app.route("/auth", authRouter);
 app.route("/api", apiRouter);
 app.route("/api/github", githubRouter);
 app.route("/api/ingest", ingestRouter);
 app.route("/api/0", pluginRouter);
+app.route("/mcp", mcpRouter);
 
 const frontendDist = path.resolve(import.meta.dir, "../../frontend/dist");
 const hasFrontendBuild = existsSync(frontendDist);
