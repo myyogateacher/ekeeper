@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { config } from "../config";
-import { getClient, issueCode, registerClient } from "../lib/oauth-store";
+import { consumeCode, consumeRefresh, getClient, issueCode, issueTokens, registerClient, verifyPkce } from "../lib/oauth-store";
 import { HttpError } from "../lib/http";
 import type { AuthedContext } from "../types/api";
 
@@ -81,4 +81,34 @@ oauthRouter.get("/oauth/authorize", async (ctx) => {
   dest.searchParams.set("code", code);
   if (state) dest.searchParams.set("state", state);
   return ctx.redirect(dest.toString());
+});
+
+async function readBody(ctx: any): Promise<Record<string, string>> {
+  const ct = ctx.req.header("content-type") || "";
+  if (ct.includes("application/json")) return await ctx.req.json().catch(() => ({}));
+  const form = await ctx.req.parseBody().catch(() => ({}));
+  return form as Record<string, string>;
+}
+
+oauthRouter.post("/oauth/token", async (ctx) => {
+  const b = await readBody(ctx);
+  const err = (e: string) => ctx.json({ error: e }, 400 as const);
+
+  if (b.grant_type === "authorization_code") {
+    const stored = await consumeCode(b.code ?? "");
+    if (!stored) return err("invalid_grant");
+    if (stored.clientId !== b.client_id || stored.redirectUri !== b.redirect_uri) return err("invalid_grant");
+    if (!verifyPkce(b.code_verifier ?? "", stored.codeChallenge)) return err("invalid_grant");
+    const t = await issueTokens(stored.userId, stored.clientId);
+    return ctx.json({ access_token: t.accessToken, token_type: "Bearer", expires_in: t.expiresIn, refresh_token: t.refreshToken, scope: t.scope });
+  }
+
+  if (b.grant_type === "refresh_token") {
+    const stored = await consumeRefresh(b.refresh_token ?? "");
+    if (!stored) return err("invalid_grant");
+    const t = await issueTokens(stored.userId, stored.clientId);
+    return ctx.json({ access_token: t.accessToken, token_type: "Bearer", expires_in: t.expiresIn, refresh_token: t.refreshToken, scope: t.scope });
+  }
+
+  return err("unsupported_grant_type");
 });
