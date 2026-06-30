@@ -17,6 +17,7 @@ import { githubRouter } from "./routes/github";
 import { ingestRouter } from "./routes/ingest";
 import { pluginRouter } from "./routes/plugin";
 import { oauthRouter, protectedResourceMetadata } from "./routes/oauth";
+import { mcpRouter } from "./routes/mcp";
 
 declare module "hono" {
   interface ContextVariableMap {
@@ -65,6 +66,7 @@ app.route("/api", apiRouter);
 app.route("/api/github", githubRouter);
 app.route("/api/ingest", ingestRouter);
 app.route("/api/0", pluginRouter);
+app.route("/mcp", mcpRouter);
 
 const frontendDist = path.resolve(import.meta.dir, "../../frontend/dist");
 const hasFrontendBuild = existsSync(frontendDist);
