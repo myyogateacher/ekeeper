@@ -3,6 +3,7 @@ import type { Context } from "hono";
 import { config } from "../config";
 import { validateAccessToken } from "../lib/oauth-store";
 import { accessibleProjectIds, getTool, MCP_TOOLS } from "../lib/mcp-tools";
+import { HttpError } from "../lib/http";
 
 type RpcReq = { jsonrpc: "2.0"; id?: number | string | null; method: string; params?: any };
 const PROTOCOL = "2024-11-05";
@@ -48,7 +49,9 @@ mcpRouter.post("/", async (ctx) => {
   if (!session) return unauthorized(ctx);
   const body = await ctx.req.json().catch(() => null);
   if (!body) return ctx.json({ jsonrpc: "2.0", id: null, error: { code: -32700, message: "Parse error" } }, 400);
-  const ids = accessibleProjectIds(session.userId);
+  let ids: string[];
+  try { ids = accessibleProjectIds(session.userId); }
+  catch (e) { if (e instanceof HttpError && e.status === 401) return unauthorized(ctx); throw e; }
   const res = await handleRpc(ids, body);
   return res === null ? ctx.body(null, 202) : ctx.json(res);
 });

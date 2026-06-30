@@ -425,4 +425,103 @@ describe("POST /oauth/token", () => {
     expect(json.access_token).toBeTruthy();
     expect(json.token_type).toBe("Bearer");
   });
+
+  // ── Security tests ────────────────────────────────────────────────────────
+
+  test("(a) mismatched client_id on code exchange → invalid_grant", async () => {
+    const app = buildApp();
+    const client = registerClient([REDIRECT], "sec-a");
+    const other = registerClient([REDIRECT], "sec-a-other");
+    const { verifier, challenge } = makeVerifierAndChallenge();
+    const code = await issueCode({ userId: "u_sec_a", clientId: client.client_id, redirectUri: REDIRECT, codeChallenge: challenge });
+
+    const res = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      // send wrong client_id — the one not associated with the code
+      body: JSON.stringify({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: other.client_id, redirect_uri: REDIRECT }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json() as any;
+    expect(json.error).toBe("invalid_grant");
+    expect(json.access_token).toBeUndefined();
+  });
+
+  test("(b) mismatched redirect_uri on code exchange → invalid_grant", async () => {
+    const app = buildApp();
+    const client = registerClient([REDIRECT, "http://localhost:8877/other"], "sec-b");
+    const { verifier, challenge } = makeVerifierAndChallenge();
+    const code = await issueCode({ userId: "u_sec_b", clientId: client.client_id, redirectUri: REDIRECT, codeChallenge: challenge });
+
+    const res = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: client.client_id, redirect_uri: "http://localhost:8877/other" }),
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json() as any;
+    expect(json.error).toBe("invalid_grant");
+    expect(json.access_token).toBeUndefined();
+  });
+
+  test("(c) refresh_token reuse on second call → invalid_grant", async () => {
+    const app = buildApp();
+    const client = registerClient([REDIRECT], "sec-c");
+    const { verifier, challenge } = makeVerifierAndChallenge();
+    const code = await issueCode({ userId: "u_sec_c", clientId: client.client_id, redirectUri: REDIRECT, codeChallenge: challenge });
+
+    const codeRes = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: client.client_id, redirect_uri: REDIRECT }),
+    });
+    const { refresh_token } = await codeRes.json() as any;
+
+    // First use — valid
+    const first = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "refresh_token", refresh_token, client_id: client.client_id }),
+    });
+    expect(first.status).toBe(200);
+
+    // Second use of same refresh_token — must be rejected
+    const second = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "refresh_token", refresh_token, client_id: client.client_id }),
+    });
+    expect(second.status).toBe(400);
+    const json = await second.json() as any;
+    expect(json.error).toBe("invalid_grant");
+    expect(json.access_token).toBeUndefined();
+  });
+
+  test("(d) refresh with wrong client_id → invalid_grant", async () => {
+    const app = buildApp();
+    const client = registerClient([REDIRECT], "sec-d");
+    const other = registerClient([REDIRECT], "sec-d-other");
+    const { verifier, challenge } = makeVerifierAndChallenge();
+    const code = await issueCode({ userId: "u_sec_d", clientId: client.client_id, redirectUri: REDIRECT, codeChallenge: challenge });
+
+    const codeRes = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "authorization_code", code, code_verifier: verifier, client_id: client.client_id, redirect_uri: REDIRECT }),
+    });
+    const { refresh_token } = await codeRes.json() as any;
+
+    // Attempt refresh with a different client_id
+    const res = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ grant_type: "refresh_token", refresh_token, client_id: other.client_id }),
+    });
+    expect(res.status).toBe(400);
+    const json = await res.json() as any;
+    expect(json.error).toBe("invalid_grant");
+    expect(json.access_token).toBeUndefined();
+  });
 });

@@ -15,7 +15,9 @@ export function findClientByRegistration(redirectUris: string[], clientName: str
   const row = one<{ client_id: string; redirect_uris: string }>(
     `SELECT client_id, redirect_uris FROM oauth_clients WHERE redirect_uris = ? AND client_name = ?`,
     [JSON.stringify(redirectUris), clientName]);
-  return row ? { client_id: row.client_id, redirect_uris: JSON.parse(row.redirect_uris) as string[] } : null;
+  if (!row) return null;
+  try { return { client_id: row.client_id, redirect_uris: JSON.parse(row.redirect_uris) as string[] }; }
+  catch { return null; }
 }
 
 export function registerClient(redirectUris: string[], clientName: string) {
@@ -28,7 +30,9 @@ export function registerClient(redirectUris: string[], clientName: string) {
 export function getClient(clientId: string) {
   const row = one<{ client_id: string; redirect_uris: string }>(
     `SELECT client_id, redirect_uris FROM oauth_clients WHERE client_id = ?`, [clientId]);
-  return row ? { client_id: row.client_id, redirect_uris: JSON.parse(row.redirect_uris) as string[] } : null;
+  if (!row) return null;
+  try { return { client_id: row.client_id, redirect_uris: JSON.parse(row.redirect_uris) as string[] }; }
+  catch { return null; }
 }
 
 export async function issueCode(d: { userId: string; clientId: string; redirectUri: string; codeChallenge: string }) {
@@ -48,8 +52,11 @@ export async function consumeCode(code: string) {
 export async function issueTokens(userId: string, clientId: string) {
   const redis = await connectRedis();
   const accessToken = randomToken(32), refreshToken = randomToken(32);
-  await redis.set(`mcp:at:${accessToken}`, JSON.stringify({ userId, scope: SCOPE }), { EX: ACCESS_TTL });
-  await redis.set(`mcp:rt:${refreshToken}`, JSON.stringify({ userId, clientId, scope: SCOPE }), { EX: REFRESH_TTL });
+  await redis
+    .multi()
+    .set(`mcp:at:${accessToken}`, JSON.stringify({ userId, scope: SCOPE }), { EX: ACCESS_TTL })
+    .set(`mcp:rt:${refreshToken}`, JSON.stringify({ userId, clientId, scope: SCOPE }), { EX: REFRESH_TTL })
+    .exec();
   return { accessToken, refreshToken, expiresIn: ACCESS_TTL, scope: SCOPE };
 }
 

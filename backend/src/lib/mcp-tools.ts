@@ -1,5 +1,6 @@
 import { getClickHouseClient } from "../db/clickhouse";
 import { all, one } from "../db/sqlite";
+import { HttpError } from "./http";
 
 async function q<T = Record<string, unknown>>(sql: string, params: Record<string, unknown>): Promise<T[]> {
   const rs = await getClickHouseClient().query({ query: sql, query_params: params, format: "JSONEachRow", clickhouse_settings: { readonly: "1" } });
@@ -7,8 +8,11 @@ async function q<T = Record<string, unknown>>(sql: string, params: Record<string
 }
 
 export function accessibleProjectIds(userId: string): string[] {
-  const user = one<{ role: string }>(`SELECT role FROM users WHERE id = ?`, [userId]);
-  if (user?.role === "admin" || user?.role === "viewer") {
+  const user = one<{ role: string; status: string }>(`SELECT role, status FROM users WHERE id = ?`, [userId]);
+  if (!user || user.status !== "active") {
+    throw new HttpError(401, "Token subject is not an active user");
+  }
+  if (user.role === "admin" || user.role === "viewer") {
     return all<{ id: string }>(`SELECT id FROM projects WHERE active = 1`, []).map((r) => r.id);
   }
   return all<{ project_id: string }>(`SELECT project_id FROM project_memberships WHERE user_id = ?`, [userId]).map((r) => r.project_id);
