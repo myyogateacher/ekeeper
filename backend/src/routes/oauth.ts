@@ -1,9 +1,20 @@
 import { Hono } from "hono";
 import type { Context } from "hono";
 import { config } from "../config";
-import { consumeCode, consumeRefresh, getClient, issueCode, issueTokens, registerClient, verifyPkce } from "../lib/oauth-store";
-import { HttpError } from "../lib/http";
+import { consumeCode, consumeRefresh, findClientByRegistration, getClient, issueCode, issueTokens, registerClient, verifyPkce } from "../lib/oauth-store";
 import type { AuthedContext } from "../types/api";
+
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1", "[::1]"]);
+export function isAllowedRedirectUri(u: string): boolean {
+  try {
+    const parsed = new URL(u);
+    if (parsed.protocol === "https:") return true;
+    if (parsed.protocol === "http:") return LOOPBACK_HOSTS.has(parsed.hostname);
+    return false;
+  } catch {
+    return false;
+  }
+}
 
 const base = () => config.APP_URL.replace(/\/+$/, "");
 
@@ -33,10 +44,21 @@ oauthRouter.get("/.well-known/oauth-authorization-server", (ctx) => ctx.json(asM
 oauthRouter.post("/oauth/register", async (ctx) => {
   const body = await ctx.req.json().catch(() => ({}));
   const uris = Array.isArray(body.redirect_uris) ? body.redirect_uris : [];
-  if (uris.length === 0 || !uris.every((u: unknown) => typeof u === "string" && /^https?:\/\//.test(u))) {
-    throw new HttpError(400, "redirect_uris must be a non-empty array of http(s) URLs");
+  if (uris.length === 0 || !uris.every((u: unknown) => typeof u === "string" && isAllowedRedirectUri(u))) {
+    return ctx.json({ error: "redirect_uris must be a non-empty array of https or loopback http URLs" }, 400);
   }
-  const c = registerClient(uris, typeof body.client_name === "string" ? body.client_name : "");
+  const clientName = typeof body.client_name === "string" ? body.client_name : "";
+  const existing = findClientByRegistration(uris, clientName);
+  if (existing) {
+    return ctx.json({
+      client_id: existing.client_id,
+      redirect_uris: existing.redirect_uris,
+      token_endpoint_auth_method: "none",
+      grant_types: ["authorization_code", "refresh_token"],
+      response_types: ["code"],
+    });
+  }
+  const c = registerClient(uris, clientName);
   ctx.status(201);
   return ctx.json({
     client_id: c.client_id,
@@ -113,6 +135,7 @@ oauthRouter.post("/oauth/token", async (ctx) => {
   if (b.grant_type === "refresh_token") {
     const stored = await consumeRefresh(b.refresh_token ?? "");
     if (!stored) return err("invalid_grant");
+    if (b.client_id && b.client_id !== stored.clientId) return err("invalid_grant");
     const t = await issueTokens(stored.userId, stored.clientId);
     return ctx.json({ access_token: t.accessToken, token_type: "Bearer", expires_in: t.expiresIn, refresh_token: t.refreshToken, scope: t.scope });
   }

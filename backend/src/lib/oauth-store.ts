@@ -11,6 +11,13 @@ export function verifyPkce(verifier: string, challenge: string): boolean {
   return createHash("sha256").update(verifier).digest("base64url") === challenge;
 }
 
+export function findClientByRegistration(redirectUris: string[], clientName: string): { client_id: string; redirect_uris: string[] } | null {
+  const row = one<{ client_id: string; redirect_uris: string }>(
+    `SELECT client_id, redirect_uris FROM oauth_clients WHERE redirect_uris = ? AND client_name = ?`,
+    [JSON.stringify(redirectUris), clientName]);
+  return row ? { client_id: row.client_id, redirect_uris: JSON.parse(row.redirect_uris) as string[] } : null;
+}
+
 export function registerClient(redirectUris: string[], clientName: string) {
   const client_id = `mcpc_${randomToken(16)}`;
   run(`INSERT INTO oauth_clients (client_id, redirect_uris, client_name, created_at) VALUES (?, ?, ?, ?)`,

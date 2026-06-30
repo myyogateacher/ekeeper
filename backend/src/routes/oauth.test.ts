@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import { Hono } from "hono";
-import { asMetadata, oauthRouter } from "./oauth";
+import { asMetadata, isAllowedRedirectUri, oauthRouter } from "./oauth";
 import { issueCode, registerClient } from "../lib/oauth-store";
 import type { AuthedContext } from "../types/api";
 
@@ -11,6 +11,94 @@ test("AS metadata advertises endpoints + S256", () => {
   expect(m.token_endpoint).toBe("https://glitch.example.com/oauth/token");
   expect(m.registration_endpoint).toBe("https://glitch.example.com/oauth/register");
   expect(m.code_challenge_methods_supported).toEqual(["S256"]);
+});
+
+describe("isAllowedRedirectUri", () => {
+  test("https URLs are allowed", () => {
+    expect(isAllowedRedirectUri("https://app.example.com/cb")).toBe(true);
+    expect(isAllowedRedirectUri("https://localhost/cb")).toBe(true);
+  });
+  test("http loopback URLs are allowed", () => {
+    expect(isAllowedRedirectUri("http://localhost/cb")).toBe(true);
+    expect(isAllowedRedirectUri("http://localhost:9999/cb")).toBe(true);
+    expect(isAllowedRedirectUri("http://127.0.0.1/cb")).toBe(true);
+    expect(isAllowedRedirectUri("http://127.0.0.1:8080/cb")).toBe(true);
+    expect(isAllowedRedirectUri("http://[::1]/cb")).toBe(true);
+    expect(isAllowedRedirectUri("http://[::1]:9000/cb")).toBe(true);
+  });
+  test("http non-loopback URLs are rejected", () => {
+    expect(isAllowedRedirectUri("http://evil.example.com/cb")).toBe(false);
+    expect(isAllowedRedirectUri("http://app.example.com/cb")).toBe(false);
+  });
+  test("invalid URLs are rejected", () => {
+    expect(isAllowedRedirectUri("not-a-url")).toBe(false);
+    expect(isAllowedRedirectUri("")).toBe(false);
+  });
+});
+
+describe("POST /oauth/register", () => {
+  function buildApp() {
+    const app = new Hono();
+    app.route("/", oauthRouter);
+    return app;
+  }
+
+  // Use a unique suffix per test run to avoid collisions with the persistent SQLite db.
+  const run = Math.random().toString(36).slice(2, 8);
+
+  test("http://evil.example.com/cb is rejected (400)", async () => {
+    const app = buildApp();
+    const res = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: ["http://evil.example.com/cb"], client_name: `EvilClient-${run}` }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  test("http://localhost:9999/cb is accepted (201)", async () => {
+    const app = buildApp();
+    const res = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [`http://localhost:${9000 + Math.floor(Math.random() * 999)}/cb-${run}`], client_name: `LoopbackClient-${run}` }),
+    });
+    expect(res.status).toBe(201);
+    const json = await res.json() as any;
+    expect(json.client_id).toBeTruthy();
+  });
+
+  test("https://app.example.com/cb is accepted (201)", async () => {
+    const app = buildApp();
+    const res = await app.request("/oauth/register", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ redirect_uris: [`https://app-${run}.example.com/cb`], client_name: `HttpsClient-${run}` }),
+    });
+    expect(res.status).toBe(201);
+    const json = await res.json() as any;
+    expect(json.client_id).toBeTruthy();
+    expect(json.redirect_uris).toEqual([`https://app-${run}.example.com/cb`]);
+  });
+
+  test("registering same redirect_uris+name twice returns same client_id (idempotent)", async () => {
+    const app = buildApp();
+    const idemUri = `https://idempotent-${run}.example.com/cb`;
+    const idemName = `IdempotentClient-${run}`;
+    const body = JSON.stringify({ redirect_uris: [idemUri], client_name: idemName });
+    const opts = { method: "POST", headers: { "content-type": "application/json" }, body };
+
+    const first = await app.request("/oauth/register", opts);
+    expect(first.status).toBe(201);
+    const firstJson = await first.json() as any;
+
+    const second = await app.request("/oauth/register", { method: "POST", headers: { "content-type": "application/json" }, body });
+    // Second call returns 200 (existing) rather than 201
+    expect(second.status).toBe(200);
+    const secondJson = await second.json() as any;
+
+    expect(secondJson.client_id).toBe(firstJson.client_id);
+  });
 });
 
 describe("GET /oauth/authorize", () => {

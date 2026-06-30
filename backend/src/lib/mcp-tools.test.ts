@@ -21,7 +21,7 @@ test("buildWhere applies project arg when in allowed set", () => {
   const { params } = buildWhere(["pA"], { project: "pA" });
   expect((params as Record<string, unknown>).project).toBe("pA");
 });
-test("five tools incl list_projects", () => {
+test("six tools incl list_projects", () => {
   expect(MCP_TOOLS.map((t) => t.name).sort()).toEqual(
     ["error_trend", "get_event", "list_projects", "project_info", "search_events", "top_issues"]);
   expect(getTool("error_trend")).toBeDefined();

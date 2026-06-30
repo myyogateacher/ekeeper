@@ -2,7 +2,7 @@ import { getClickHouseClient } from "../db/clickhouse";
 import { all, one } from "../db/sqlite";
 
 async function q<T = Record<string, unknown>>(sql: string, params: Record<string, unknown>): Promise<T[]> {
-  const rs = await getClickHouseClient().query({ query: sql, query_params: params, format: "JSONEachRow" });
+  const rs = await getClickHouseClient().query({ query: sql, query_params: params, format: "JSONEachRow", clickhouse_settings: { readonly: "1" } });
   return rs.json<T>();
 }
 
