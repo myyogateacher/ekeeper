@@ -33,9 +33,8 @@ export async function issueCode(d: { userId: string; clientId: string; redirectU
 
 export async function consumeCode(code: string) {
   const redis = await connectRedis();
-  const raw = await redis.get(`mcp:code:${code}`);
+  const raw = await redis.getDel(`mcp:code:${code}`);
   if (!raw) return null;
-  await redis.del(`mcp:code:${code}`);
   return JSON.parse(raw) as { userId: string; clientId: string; redirectUri: string; codeChallenge: string; scope: string };
 }
 
@@ -56,8 +55,7 @@ export async function validateAccessToken(token: string) {
 
 export async function consumeRefresh(token: string) {
   const redis = await connectRedis();
-  const raw = await redis.get(`mcp:rt:${token}`);
+  const raw = await redis.getDel(`mcp:rt:${token}`);
   if (!raw) return null;
-  await redis.del(`mcp:rt:${token}`);
   return JSON.parse(raw) as { userId: string; clientId: string; scope: string };
 }

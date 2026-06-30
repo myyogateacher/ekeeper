@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { verifyPkce, registerClient, getClient, issueCode, consumeCode, issueTokens, validateAccessToken } from "./oauth-store";
+import { verifyPkce, registerClient, getClient, issueCode, consumeCode, issueTokens, validateAccessToken, consumeRefresh } from "./oauth-store";
 
 describe("oauth-store", () => {
   test("verifyPkce S256", () => {
@@ -13,6 +13,13 @@ describe("oauth-store", () => {
     const c = registerClient(["http://localhost:9999/cb"], "Test");
     expect(c.client_id).toMatch(/^mcpc_/);
     expect(getClient(c.client_id)?.redirect_uris).toEqual(["http://localhost:9999/cb"]);
+  });
+  test("consumeRefresh is single-use", async () => {
+    const { refreshToken } = await issueTokens("u2", "c2");
+    const first = await consumeRefresh(refreshToken);
+    expect(first?.userId).toBe("u2");
+    expect(await consumeRefresh(refreshToken)).toBeNull();  // single-use/rotation
+    expect(await consumeRefresh("nope")).toBeNull();
   });
   test("code is single-use; tokens validate", async () => {
     const code = await issueCode({ userId: "u1", clientId: "c1", redirectUri: "http://localhost:9999/cb", codeChallenge: "x" });
