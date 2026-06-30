@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { config } from "../config";
 import { validateAccessToken } from "../lib/oauth-store";
 import { accessibleProjectIds, getTool, MCP_TOOLS } from "../lib/mcp-tools";
@@ -34,7 +35,7 @@ export async function handleRpc(projectIds: string[], req: RpcReq) {
 
 export const mcpRouter = new Hono();
 
-function unauthorized(ctx: any) {
+function unauthorized(ctx: Context) {
   const meta = `${config.APP_URL.replace(/\/+$/, "")}/.well-known/oauth-protected-resource`;
   ctx.header("WWW-Authenticate", `Bearer resource_metadata="${meta}"`);
   return ctx.json({ jsonrpc: "2.0", id: null, error: { code: -32001, message: "Unauthorized" } }, 401);

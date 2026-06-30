@@ -1,5 +1,7 @@
 import { describe, expect, test } from "bun:test";
-import { handleRpc } from "./mcp";
+import { Hono } from "hono";
+import { handleRpc, mcpRouter } from "./mcp";
+import { issueTokens } from "../lib/oauth-store";
 
 test("tools/list returns the six tools", async () => {
   const res = (await handleRpc(["pA"], { jsonrpc: "2.0", id: 1, method: "tools/list" })) as any;
@@ -31,4 +33,42 @@ test("unknown method returns -32601", async () => {
 test("tools/call with unknown tool returns -32602", async () => {
   const res = (await handleRpc(["pA"], { jsonrpc: "2.0", id: 6, method: "tools/call", params: { name: "nonexistent", arguments: {} } })) as any;
   expect(res!.error.code).toBe(-32602);
+});
+
+describe("HTTP /mcp auth", () => {
+  const app = new Hono();
+  app.route("/mcp", mcpRouter);
+  const body = JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" });
+
+  test("POST /mcp with no Authorization → 401 with WWW-Authenticate containing resource_metadata=", async () => {
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+    });
+    expect(res.status).toBe(401);
+    const wwwAuth = res.headers.get("WWW-Authenticate") ?? "";
+    expect(wwwAuth).toContain("resource_metadata=");
+  });
+
+  test("POST /mcp with invalid bearer → 401", async () => {
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer not-a-real-token" },
+      body,
+    });
+    expect(res.status).toBe(401);
+  });
+
+  test("POST /mcp with valid token → 200 and tools/list returns 6 tools", async () => {
+    const t = await issueTokens("u_http_test", "c_http_test");
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${t.accessToken}` },
+      body,
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.result.tools).toHaveLength(6);
+  });
 });
