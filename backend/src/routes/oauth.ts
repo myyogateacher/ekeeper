@@ -1,7 +1,8 @@
 import { Hono } from "hono";
 import { config } from "../config";
-import { registerClient } from "../lib/oauth-store";
+import { getClient, issueCode, registerClient } from "../lib/oauth-store";
 import { HttpError } from "../lib/http";
+import type { AuthedContext } from "../types/api";
 
 const base = () => config.APP_URL.replace(/\/+$/, "");
 
@@ -43,4 +44,41 @@ oauthRouter.post("/oauth/register", async (ctx) => {
     grant_types: ["authorization_code", "refresh_token"],
     response_types: ["code"],
   });
+});
+
+oauthRouter.get("/oauth/authorize", async (ctx) => {
+  const q = ctx.req.query();
+  const { client_id, redirect_uri, code_challenge, code_challenge_method, state, response_type } = q;
+
+  // Validate PKCE and response_type before touching client state.
+  if (response_type !== "code") return ctx.text("unsupported_response_type", 400);
+  if (code_challenge_method !== "S256" || !code_challenge) return ctx.text("PKCE S256 required", 400);
+
+  const client = client_id ? getClient(client_id) : null;
+  if (!client || !redirect_uri || !client.redirect_uris.includes(redirect_uri)) {
+    return ctx.text("invalid client_id or redirect_uri", 400);
+  }
+
+  const auth = ctx.get("auth") as AuthedContext | undefined;
+
+  if (!auth) {
+    // No active eKeeper session: redirect the user to the SPA login page.
+    // The `next` param encodes the full authorize URL so the SPA can redirect back
+    // after successful login. This requires the SPA to honor the `next` query param
+    // post-login — that wiring is a follow-up; the common case (user already signed
+    // into eKeeper in their browser) works end-to-end today.
+    return ctx.redirect(`${config.FRONTEND_URL}/?next=${encodeURIComponent(ctx.req.url)}`);
+  }
+
+  const code = await issueCode({
+    userId: auth.user.id,
+    clientId: client.client_id,
+    redirectUri: redirect_uri,
+    codeChallenge: code_challenge,
+  });
+
+  const dest = new URL(redirect_uri);
+  dest.searchParams.set("code", code);
+  if (state) dest.searchParams.set("state", state);
+  return ctx.redirect(dest.toString());
 });
