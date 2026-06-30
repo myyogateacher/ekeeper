@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
 import { config } from "../config";
 import { consumeCode, consumeRefresh, getClient, issueCode, issueTokens, registerClient, verifyPkce } from "../lib/oauth-store";
 import { HttpError } from "../lib/http";
@@ -83,16 +84,22 @@ oauthRouter.get("/oauth/authorize", async (ctx) => {
   return ctx.redirect(dest.toString());
 });
 
-async function readBody(ctx: any): Promise<Record<string, string>> {
+async function readBody(ctx: Context): Promise<Record<string, string> | null> {
   const ct = ctx.req.header("content-type") || "";
-  if (ct.includes("application/json")) return await ctx.req.json().catch(() => ({}));
-  const form = await ctx.req.parseBody().catch(() => ({}));
-  return form as Record<string, string>;
+  try {
+    if (ct.includes("application/json")) return await ctx.req.json();
+    const form = await ctx.req.parseBody();
+    return form as Record<string, string>;
+  } catch {
+    return null;
+  }
 }
 
 oauthRouter.post("/oauth/token", async (ctx) => {
   const b = await readBody(ctx);
   const err = (e: string) => ctx.json({ error: e }, 400 as const);
+
+  if (b === null) return err("invalid_request");
 
   if (b.grant_type === "authorization_code") {
     const stored = await consumeCode(b.code ?? "");

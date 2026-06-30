@@ -224,6 +224,7 @@ describe("POST /oauth/token", () => {
     expect(json.token_type).toBe("Bearer");
     expect(json.refresh_token).toBeTruthy();
     expect(json.expires_in).toBeGreaterThan(0);
+    expect(json.scope).toBe("mcp:read");
   });
 
   test("wrong code_verifier → invalid_grant", async () => {
@@ -241,6 +242,7 @@ describe("POST /oauth/token", () => {
     expect(res.status).toBe(400);
     const json = await res.json() as any;
     expect(json.error).toBe("invalid_grant");
+    expect(json.access_token).toBeUndefined();
   });
 
   test("reused code → invalid_grant on second exchange", async () => {
@@ -259,6 +261,7 @@ describe("POST /oauth/token", () => {
     expect(second.status).toBe(400);
     const json = await second.json() as any;
     expect(json.error).toBe("invalid_grant");
+    expect(json.access_token).toBeUndefined();
   });
 
   test("refresh_token grant returns new tokens", async () => {
@@ -300,6 +303,20 @@ describe("POST /oauth/token", () => {
     expect(res.status).toBe(400);
     const json = await res.json() as any;
     expect(json.error).toBe("unsupported_grant_type");
+  });
+
+  test("malformed JSON body → 400 invalid_request", async () => {
+    const app = buildApp();
+    const res = await app.request("/oauth/token", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{not valid json",
+    });
+
+    expect(res.status).toBe(400);
+    const json = await res.json() as any;
+    expect(json.error).toBe("invalid_request");
+    expect(json.access_token).toBeUndefined();
   });
 
   test("form-encoded body works for authorization_code grant", async () => {
