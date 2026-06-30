@@ -39,7 +39,7 @@ secret; per-user identity, audit, and role-based project scoping.
 | `POST /oauth/register` | RFC 7591 | Dynamic client registration (DCR) |
 | `GET /oauth/authorize` | OAuth 2.1 | PKCE authorize; bounces through Google SSO; issues code |
 | `POST /oauth/token` | OAuth 2.1 | code→tokens (PKCE verify) + refresh grant |
-| `POST /mcp` (+ `GET` 405) | MCP | JSON-RPC tools; Bearer access token; 401 → `WWW-Authenticate` |
+| `POST /mcp` (+ `GET` → 401 discovery hint) | MCP | JSON-RPC tools; Bearer access token; 401 → `WWW-Authenticate` |
 
 ## Flow
 
