@@ -59,6 +59,42 @@ describe("ingest helpers", () => {
     );
   });
 
+  test("fingerprint is stable across deploy-specific dynamic import URLs", () => {
+    const buildPayload = (deployId: string, assetName: string) => ({
+      exception: {
+        values: [
+          {
+            type: "TypeError",
+            value: `Failed to fetch dynamically imported module: https://myyogateacher.com/web-app-ssr/${deployId}/assets/${assetName}`,
+            stacktrace: {
+              frames: [
+                {
+                  filename: `https://myyogateacher.com/web-app-ssr/${deployId}/assets/index-${assetName}`,
+                  function: "render",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    });
+
+    expect(
+      computeGroupFingerprint(buildPayload("507d4605-d747-479e-9d6d-dd87e574bd26", "index-4a57cbf6.js")),
+    ).toBe(
+      computeGroupFingerprint(buildPayload("43523cee-aae1-4305-9ec3-afdbb43affb8", "index-d4067662.js")),
+    );
+  });
+
+  test("normalization removes volatile API URL identifiers", () => {
+    const first =
+      "Token expected but missing for URL: https://gapi.myyogateacher.com/v2/sessions/recording/6b7f08df-30c6-47fc-9280-4e4e39f6b934";
+    const second =
+      "Token expected but missing for URL: https://gapi.myyogateacher.com/v2/sessions/recording/7c8f08df-30c6-47fc-9280-4e4e39f6b111";
+
+    expect(normalizeExceptionValue(first)).toBe(normalizeExceptionValue(second));
+  });
+
   test("fingerprint is stable for same payload", () => {
     const payload = {
       message: "Boom",

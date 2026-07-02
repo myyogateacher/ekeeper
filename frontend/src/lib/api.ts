@@ -1,5 +1,6 @@
 import type {
   DashboardProjectCard,
+  DuplicateIssueGroup,
   ErrorEventDetail,
   ErrorGroupSummary,
   IssueState,
@@ -136,7 +137,7 @@ export const api = {
       labelsAdded: number;
     }>(`/api/projects/${projectId}/github-integration/cleanup-duplicates`, { method: "POST" }),
   errorDetail: (projectId: string, groupId: string, eventId?: string) =>
-    request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[] }>(
+    request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[]; duplicateGroups: DuplicateIssueGroup[] }>(
       `/api/projects/${projectId}/errors/${groupId}${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ""}`,
     ),
   updateIssueWorkflow: (projectId: string, groupId: string, payload: { state?: IssueState; assignedUserId?: string | null }) =>

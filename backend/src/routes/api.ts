@@ -6,6 +6,7 @@ import { all, one, run } from "../db/sqlite";
 import { clearUserSessions, requireAuth, requireProjectAccess, requireWorkspaceRole } from "../lib/auth";
 import { HttpError } from "../lib/http";
 import { createId, randomToken } from "../lib/ids";
+import { normalizeExceptionValue } from "../lib/ingest";
 import { cleanupExpiredMinimaps, deobfuscateEvent, listMinimapArtifacts, saveMinimapArtifact } from "../lib/minimaps";
 import { getServerSettings, regenerateServerAuthToken } from "../lib/server-settings";
 import {
@@ -20,6 +21,7 @@ import {
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
   DashboardProjectCard,
+  DuplicateIssueGroup,
   ErrorEventDetail,
   ErrorGroupSummary,
   IssueState,
@@ -71,6 +73,83 @@ const minimapUploadSchema = z.object({
   dist: z.string().min(1).nullable().optional(),
   artifactName: z.string().min(1),
 });
+
+const DUPLICATE_URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/;
+const DUPLICATE_UUID_PATTERN = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/;
+
+function normalizeDuplicateMessageKey(message: string): string {
+  return normalizeExceptionValue(message)
+    .replace(/\s+/g, " ")
+    .trim()
+    .toLowerCase();
+}
+
+function duplicateMessageSearchPattern(message: string): string {
+  const urlIndex = message.search(DUPLICATE_URL_PATTERN);
+  if (urlIndex > -1) {
+    return `${message.slice(0, urlIndex)}%`;
+  }
+
+  const uuidIndex = message.search(DUPLICATE_UUID_PATTERN);
+  if (uuidIndex > 8) {
+    return `${message.slice(0, uuidIndex)}%`;
+  }
+
+  return message;
+}
+
+async function queryDuplicateIssueGroups(
+  projectId: string,
+  groupId: string,
+  message: string,
+): Promise<DuplicateIssueGroup[]> {
+  const key = normalizeDuplicateMessageKey(message);
+  if (!key) {
+    return [];
+  }
+
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query: `
+      SELECT
+        group_id AS groupId,
+        any(title) AS title,
+        any(message) AS message,
+        any(fingerprint) AS fingerprint,
+        count() AS events,
+        uniqIf(user_id, user_id != '') AS affectedUsers,
+        min(timestamp) AS firstSeen,
+        max(timestamp) AS lastSeen,
+        argMax(release, timestamp) AS latestRelease
+      FROM events
+      WHERE project_id = {projectId:String}
+        AND group_id != {groupId:String}
+        AND timestamp >= now() - INTERVAL 90 DAY
+        AND (message = {message:String} OR message LIKE {messagePattern:String})
+      GROUP BY group_id
+      ORDER BY events DESC, lastSeen DESC
+      LIMIT 50
+    `,
+    query_params: {
+      projectId,
+      groupId,
+      message,
+      messagePattern: duplicateMessageSearchPattern(message),
+    },
+    format: "JSONEachRow",
+  });
+  const rows = (await result.json()) as DuplicateIssueGroup[];
+
+  return rows
+    .filter((row) => normalizeDuplicateMessageKey(row.message) === key)
+    .slice(0, 12)
+    .map((row) => ({
+      ...row,
+      events: Number(row.events),
+      affectedUsers: Number(row.affectedUsers),
+      latestRelease: row.latestRelease ?? null,
+    }));
+}
 
 function buildProjectDsn(publicKey: string, sentryProjectId: string): string {
   return `${config.INGEST_DSN_SCHEME}://${publicKey}@${config.INGEST_DSN_HOST}/api/ingest/${publicKey}/${sentryProjectId}`;
@@ -636,15 +715,15 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
   // Fetch the requested event (by eventId) or the latest one
   const eventQuery = eventIdParam
     ? `
-      SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
-        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
+      SELECT event_id AS eventId, group_id AS groupId, title, fingerprint, message, exception, stacktrace,
+        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp, release
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String} AND event_id = {eventId:String}
       LIMIT 1
     `
     : `
-      SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
-        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
+      SELECT event_id AS eventId, group_id AS groupId, title, fingerprint, message, exception, stacktrace,
+        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp, release
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String}
       ORDER BY timestamp DESC
@@ -655,7 +734,12 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
     query_params: { projectId, groupId, eventId: eventIdParam ?? "" },
     format: "JSONEachRow",
   });
-  const events = (await eventResult.json()) as Array<Omit<ErrorEventDetail, "breadcrumbs">>;
+  type ErrorEventRow = Omit<ErrorEventDetail, "breadcrumbs"> & {
+    title: string;
+    fingerprint: string;
+    release: string | null;
+  };
+  const events = (await eventResult.json()) as ErrorEventRow[];
 
   const latestEvent = events[0];
 
@@ -696,6 +780,9 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
       })
     : null;
   const githubLink = getGithubLink(projectId, groupId);
+  const duplicateGroups = latestEvent
+    ? await queryDuplicateIssueGroups(projectId, groupId, latestEvent.message)
+    : [];
   const error = latestEvent
     ? {
         ...latestEvent,
@@ -712,7 +799,7 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         githubIssueUrl: githubLink?.githubIssueUrl ?? null,
       }
     : null;
-  return ctx.json({ error, occurrences });
+  return ctx.json({ error, occurrences, duplicateGroups });
 });
 
 apiRouter.patch("/projects/:projectId/errors/:groupId/workflow", async (ctx) => {

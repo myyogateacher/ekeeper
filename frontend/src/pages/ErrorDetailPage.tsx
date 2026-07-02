@@ -1,6 +1,6 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useParams } from "react-router-dom";
+import { Link, useParams } from "react-router-dom";
 import { HiArrowDownTray, HiChevronLeft, HiChevronRight } from "react-icons/hi2";
 import { api } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
@@ -158,6 +158,7 @@ export function ErrorDetailPage() {
 
   const error = data?.error;
   const occurrences = data?.occurrences ?? [];
+  const duplicateGroups = data?.duplicateGroups ?? [];
   const totalOccurrences = occurrences.length;
   const currentIndex = error
     ? occurrences.findIndex((o) => o.eventId === error.eventId)
@@ -332,6 +333,38 @@ export function ErrorDetailPage() {
             No matching minimap was found for this event, so stack frames are shown in their raw uploaded form.
           </div>
         )}
+        {duplicateGroups.length > 0 ? (
+          <div className="mt-4 rounded-3xl border border-amber-300/20 bg-amber-400/10 p-4">
+            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
+              <h3 className="text-sm font-semibold text-amber-100">Duplicate issue groups</h3>
+              <p className="text-xs uppercase tracking-[0.2em] text-amber-100/70">
+                {duplicateGroups.length} related group{duplicateGroups.length === 1 ? "" : "s"}
+              </p>
+            </div>
+            <div className="mt-3 grid gap-3">
+              {duplicateGroups.map((group) => (
+                <Link
+                  key={group.groupId}
+                  className="block min-w-0 rounded-2xl border border-white/10 bg-slate-950/30 p-4 transition hover:border-amber-200/40 hover:bg-slate-950/50"
+                  to={`/errors/${projectId}/${group.groupId}`}
+                >
+                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
+                    <div className="min-w-0">
+                      <p className="break-words text-sm font-medium text-white">{group.message}</p>
+                      <p className="mt-1 break-all font-mono text-[11px] text-slate-400">{group.groupId}</p>
+                    </div>
+                    <div className="grid shrink-0 grid-cols-2 gap-2 text-xs text-slate-300 sm:grid-cols-4 lg:text-right">
+                      <span>{group.events} events</span>
+                      <span>{group.affectedUsers} users</span>
+                      <span>{formatDate(group.lastSeen)}</span>
+                      <span className="break-all">{group.latestRelease ?? "No release"}</span>
+                    </div>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          </div>
+        ) : null}
       </section>
 
       <section className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
