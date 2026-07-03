@@ -728,15 +728,15 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
   // Fetch the requested event (by eventId) or the latest one
   const eventQuery = eventIdParam
     ? `
-      SELECT event_id AS eventId, group_id AS groupId, title, fingerprint, message, exception, stacktrace,
-        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp, release
+      SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
+        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String} AND event_id = {eventId:String}
       LIMIT 1
     `
     : `
-      SELECT event_id AS eventId, group_id AS groupId, title, fingerprint, message, exception, stacktrace,
-        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp, release
+      SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
+        browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String}
       ORDER BY timestamp DESC
@@ -747,12 +747,7 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
     query_params: { projectId, groupId, eventId: eventIdParam ?? "" },
     format: "JSONEachRow",
   });
-  type ErrorEventRow = Omit<ErrorEventDetail, "breadcrumbs"> & {
-    title: string;
-    fingerprint: string;
-    release: string | null;
-  };
-  const events = (await eventResult.json()) as ErrorEventRow[];
+  const events = (await eventResult.json()) as Array<Omit<ErrorEventDetail, "breadcrumbs">>;
 
   const latestEvent = events[0];
 
