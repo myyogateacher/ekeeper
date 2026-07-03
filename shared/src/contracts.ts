@@ -140,6 +140,18 @@ export interface OccurrenceSummary {
   timestamp: string;
 }
 
+export interface DuplicateIssueGroup {
+  groupId: string;
+  title: string;
+  message: string;
+  fingerprint: string;
+  events: number;
+  affectedUsers: number;
+  firstSeen: string;
+  lastSeen: string;
+  latestRelease: string | null;
+}
+
 export interface MigrationRecord {
   version: string;
   name: string;

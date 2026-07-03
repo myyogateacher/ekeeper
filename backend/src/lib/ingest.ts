@@ -6,8 +6,37 @@ function hashString(value: string): string {
 }
 
 const POINTER_PATTERN = /0x[0-9a-fA-F]{4,}/g;
+const UUID_PATTERN = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/g;
+const LONG_HEX_SEGMENT_PATTERN = /(^|\/)[0-9a-fA-F]{24,}(?=\/|$)/g;
+const HASHED_ASSET_PATTERN = /([A-Za-z0-9_]+)-[A-Za-z0-9_-]{8,}(\.(?:m?js|css|map))\b/g;
+const URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/g;
 const BRACE_OPEN_PLACEHOLDER = "";
 const BRACE_CLOSE_PLACEHOLDER = "";
+
+function normalizeUrl(value: string): string {
+  try {
+    const url = new URL(value);
+    const normalizedPath = url.pathname
+      .replace(UUID_PATTERN, "_uuid_")
+      .replace(LONG_HEX_SEGMENT_PATTERN, "$1_hash_")
+      .replace(HASHED_ASSET_PATTERN, "$1-_hash_$2");
+    return `${url.origin}${normalizedPath}`;
+  } catch {
+    return value
+      .replace(UUID_PATTERN, "_uuid_")
+      .replace(LONG_HEX_SEGMENT_PATTERN, "$1_hash_")
+      .replace(HASHED_ASSET_PATTERN, "$1-_hash_$2");
+  }
+}
+
+function normalizeVolatileText(raw: string): string {
+  return raw
+    .replace(POINTER_PATTERN, "0x_")
+    .replace(URL_PATTERN, (url) => normalizeUrl(url))
+    .replace(UUID_PATTERN, "_uuid_")
+    .replace(LONG_HEX_SEGMENT_PATTERN, "$1_hash_")
+    .replace(HASHED_ASSET_PATTERN, "$1-_hash_$2");
+}
 
 function splitTopLevelCommas(input: string): string[] {
   const parts: string[] = [];
@@ -32,7 +61,7 @@ export function normalizeExceptionValue(raw: string): string {
   if (!raw) {
     return raw;
   }
-  let s = raw.replace(POINTER_PATTERN, "0x_");
+  let s = normalizeVolatileText(raw);
 
   let previous = "";
   while (previous !== s) {
@@ -99,7 +128,12 @@ export function computeGroupFingerprint(payload: Record<string, unknown>): strin
     Record<string, unknown>
   >)
     .slice(-4)
-    .map((frame) => [frame.filename, frame.function].filter(Boolean).join(":"))
+    .map((frame) =>
+      [
+        typeof frame.filename === "string" ? normalizeVolatileText(frame.filename) : frame.filename,
+        frame.function,
+      ].filter(Boolean).join(":"),
+    )
     .join("|");
 
   return hashString(`${type}|${value}|${frames}`).slice(0, 32);
