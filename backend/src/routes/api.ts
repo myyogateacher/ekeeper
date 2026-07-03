@@ -151,6 +151,19 @@ async function queryDuplicateIssueGroups(
     }));
 }
 
+async function safeQueryDuplicateIssueGroups(
+  projectId: string,
+  groupId: string,
+  message: string,
+): Promise<DuplicateIssueGroup[]> {
+  try {
+    return await queryDuplicateIssueGroups(projectId, groupId, message);
+  } catch (error) {
+    console.warn("Failed to query duplicate issue groups", { projectId, groupId, error });
+    return [];
+  }
+}
+
 function buildProjectDsn(publicKey: string, sentryProjectId: string): string {
   return `${config.INGEST_DSN_SCHEME}://${publicKey}@${config.INGEST_DSN_HOST}/api/ingest/${publicKey}/${sentryProjectId}`;
 }
@@ -781,7 +794,7 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
     : null;
   const githubLink = getGithubLink(projectId, groupId);
   const duplicateGroups = latestEvent
-    ? await queryDuplicateIssueGroups(projectId, groupId, latestEvent.message)
+    ? await safeQueryDuplicateIssueGroups(projectId, groupId, latestEvent.message)
     : [];
   const error = latestEvent
     ? {

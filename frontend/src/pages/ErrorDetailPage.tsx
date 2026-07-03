@@ -133,7 +133,7 @@ export function ErrorDetailPage() {
   const { projectId = "", groupId = "" } = useParams();
   const queryClient = useQueryClient();
   const [selectedEventId, setSelectedEventId] = useState<string | undefined>(undefined);
-  const { data, isFetching } = useQuery({
+  const { data, isFetching, isError, error: detailError } = useQuery({
     queryKey: ["error-detail", projectId, groupId, selectedEventId],
     queryFn: () => api.errorDetail(projectId, groupId, selectedEventId),
     enabled: Boolean(projectId && groupId),
@@ -169,6 +169,17 @@ export function ErrorDetailPage() {
     if (target) {
       setSelectedEventId(target.eventId);
     }
+  }
+
+  if (isError) {
+    return (
+      <div className="glass-panel p-6">
+        <h2 className="text-2xl font-semibold text-white">Failed to load error detail</h2>
+        <p className="mt-2 text-sm text-slate-400">
+          {detailError instanceof Error ? detailError.message : "Request failed"}
+        </p>
+      </div>
+    );
   }
 
   if (!error) {
