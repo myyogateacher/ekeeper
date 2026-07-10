@@ -7,7 +7,7 @@ import { clearUserSessions, requireAuth, requireProjectAccess, requireWorkspaceR
 import { HttpError } from "../lib/http";
 import { createId, randomToken } from "../lib/ids";
 import { cleanupExpiredMinimaps, deobfuscateEvent, listMinimapArtifacts, saveMinimapArtifact } from "../lib/minimaps";
-import { getServerSettings, regenerateServerAuthToken } from "../lib/server-settings";
+import { getMcpSecretKey, getServerSettings, regenerateMcpSecretKey, regenerateServerAuthToken } from "../lib/server-settings";
 import {
   cleanupDuplicateGithubIssues,
   ensureGithubIssueForGroup,
@@ -499,6 +499,17 @@ apiRouter.post("/settings/server/regenerate-token", (ctx) => {
     ekeeperAuthToken: regenerateServerAuthToken(),
   };
   return ctx.json({ settings });
+});
+
+// The MCP secret key is viewable by any signed-in user; rotation is admin-only.
+apiRouter.get("/settings/mcp-key", (ctx) => {
+  requireAuth(ctx);
+  return ctx.json({ key: getMcpSecretKey() });
+});
+
+apiRouter.post("/settings/mcp-key/regenerate", (ctx) => {
+  requireWorkspaceRole(ctx, ["admin"]);
+  return ctx.json({ key: regenerateMcpSecretKey() });
 });
 
 apiRouter.get("/minimaps", (ctx) => {

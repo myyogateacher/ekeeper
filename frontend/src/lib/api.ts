@@ -71,6 +71,8 @@ export const api = {
   dashboard: () => request<{ cards: DashboardProjectCard[] }>("/api/dashboard/summary?range=7d"),
   serverSettings: () => request<{ settings: ServerSettings }>("/api/settings/server"),
   regenerateServerToken: () => request<{ settings: ServerSettings }>("/api/settings/server/regenerate-token", { method: "POST" }),
+  mcpKey: () => request<{ key: string }>("/api/settings/mcp-key"),
+  regenerateMcpKey: () => request<{ key: string }>("/api/settings/mcp-key/regenerate", { method: "POST" }),
   minimaps: (projectId?: string) =>
     request<{ artifacts: MinimapArtifact[]; olderThanThirtyDays: number }>(
       projectId ? `/api/minimaps?projectId=${encodeURIComponent(projectId)}` : "/api/minimaps",
