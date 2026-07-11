@@ -2,6 +2,7 @@ import { afterAll, describe, expect, test } from "bun:test";
 import { Hono } from "hono";
 import { handleRpc, mcpRouter } from "./mcp";
 import { issueTokens } from "../lib/oauth-store";
+import { getMcpSecretKey } from "../lib/server-settings";
 import { run } from "../db/sqlite";
 
 test("tools/list returns the six tools", async () => {
@@ -82,6 +83,27 @@ describe("HTTP /mcp auth", () => {
     expect(res.status).toBe(200);
     const json = (await res.json()) as any;
     expect(json.result.tools).toHaveLength(6);
+  });
+
+  test("POST /mcp with the MCP secret key → 200 and tools/list returns 6 tools", async () => {
+    const key = getMcpSecretKey();
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${key}` },
+      body,
+    });
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as any;
+    expect(json.result.tools).toHaveLength(6);
+  });
+
+  test("POST /mcp with a wrong secret key → 401", async () => {
+    const res = await app.request("/mcp", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": "Bearer mcpk_deadbeefdeadbeefdeadbeefdeadbeefdeadbeefdeadbeef" },
+      body,
+    });
+    expect(res.status).toBe(401);
   });
 
   test("GET /mcp → 401 with WWW-Authenticate header present", async () => {

@@ -401,7 +401,7 @@ export function SettingsPage() {
         </form>
       </section>
 
-      <McpAccessPanel appUrl={window.location.origin} />
+      <McpAccessPanel appUrl={window.location.origin} isAdmin={isAdmin} />
     </div>
   );
 }
