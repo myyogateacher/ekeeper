@@ -222,20 +222,32 @@ async function dashboardCards(projectIds: string[], projects: Project[]): Promis
     return [];
   }
 
+  // Exclude closed issues from the group count so it drops on closure
+  const closedGroupKeys = all<{ key: string }>(
+    `SELECT project_id || ':' || group_id AS key
+     FROM issue_workflows
+     WHERE state = 'closed' AND project_id IN (${projectIds.map(() => "?").join(", ")})`,
+    projectIds,
+  ).map((row) => row.key);
+
   const client = getClickHouseClient();
   const filter = projectIds.map((id) => `'${id}'`).join(", ");
+  const recurringGroups = closedGroupKeys.length
+    ? "uniqIf(group_id, concat(project_id, ':', group_id) NOT IN {closedGroupKeys:Array(String)})"
+    : "uniq(group_id)";
   const result = await client.query({
     query: `
       SELECT
         project_id AS projectId,
         count() AS totalEvents7d,
-        uniq(group_id) AS recurringGroups7d,
+        ${recurringGroups} AS recurringGroups7d,
         uniqIf(user_id, user_id != '') AS impactedUsers7d,
         any(title) AS topGroupTitle
       FROM events
       WHERE project_id IN (${filter}) AND timestamp >= now() - INTERVAL 7 DAY
       GROUP BY project_id
     `,
+    query_params: closedGroupKeys.length ? { closedGroupKeys } : undefined,
     format: "JSONEachRow",
   });
   const rows = (await result.json()) as Array<
