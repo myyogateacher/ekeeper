@@ -30,9 +30,15 @@ export function SettingsPage() {
   const [ghWebhookSecret, setGhWebhookSecret] = useState("");
   const [ghPat, setGhPat] = useState("");
   const { data: me, isLoading } = useQuery({ queryKey: ["me"], queryFn: api.me });
+  const isAdmin = me?.user.role === "admin";
   const { data } = useQuery({
     queryKey: ["server-settings"],
     queryFn: api.serverSettings,
+  });
+  const { data: uploadToken } = useQuery({
+    queryKey: ["server-upload-token"],
+    queryFn: api.serverUploadToken,
+    enabled: isAdmin,
   });
   const { data: projects } = useQuery({
     queryKey: ["projects"],
@@ -41,7 +47,7 @@ export function SettingsPage() {
   const regenerateToken = useMutation({
     mutationFn: api.regenerateServerToken,
     onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["server-settings"] });
+      await queryClient.invalidateQueries({ queryKey: ["server-upload-token"] });
     },
   });
 
@@ -134,7 +140,6 @@ export function SettingsPage() {
     return <section className="glass-panel p-6 text-slate-300">Loading server settings...</section>;
   }
 
-  const isAdmin = me?.user.role === "admin";
   const settings = data?.settings;
   const selectedProject = projects?.projects.find((project) => project.id === selectedProjectId) ?? projects?.projects[0];
   const webhookBase = (settings?.ekeeperUrl ?? (typeof window !== "undefined" ? window.location.origin : "")).replace(/\/+$/, "");
@@ -145,7 +150,7 @@ export function SettingsPage() {
   org: "${settings.ekeeperOrg}",
   project: "${selectedProject?.slug ?? ""}",
   url: "${settings.ekeeperUrl}",
-  authToken: "${settings.ekeeperAuthToken}",
+  authToken: "${uploadToken?.token ?? "<upload token — visible to admins only>"}",
   reactComponentAnnotation: { enabled: true },
   bundleSizeOptimizations: {
     excludeTracing: true,

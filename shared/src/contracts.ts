@@ -104,10 +104,12 @@ export interface MinimapArtifact {
   expiresAt: string;
 }
 
+// Display-safe server settings, readable by every signed-in role. The upload
+// auth token is intentionally excluded — it authorizes plugin artifact uploads
+// and is served to admins only via GET /api/settings/server/token.
 export interface ServerSettings {
   ekeeperOrg: string;
   ekeeperUrl: string;
-  ekeeperAuthToken: string;
   minimapsRetentionDays: number;
   minimapsKeepReleases: number;
 }

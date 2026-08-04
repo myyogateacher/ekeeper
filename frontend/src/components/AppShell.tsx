@@ -12,14 +12,16 @@ interface AppShellProps extends PropsWithChildren {
 
 export function AppShell({ children, user, onLogout }: AppShellProps) {
   const [isCollapsed, setIsCollapsed] = useState(true);
-  const navItems = [
-    { to: "/dashboard", label: "Dashboard", icon: Activity, adminOnly: false },
-    { to: "/projects", label: "Projects", icon: FolderKanban, adminOnly: false },
-    { to: "/users", label: "Users", icon: ShieldCheck, adminOnly: false },
-    { to: "/errors", label: "Errors", icon: TriangleAlert, adminOnly: false },
-    { to: "/minimaps", label: "Minimaps", icon: FileCode2, adminOnly: false },
-    { to: "/settings", label: "Settings", icon: Settings, adminOnly: false },
-  ].filter((item) => !item.adminOnly || user.role === "admin");
+  const allNavItems: { to: string; label: string; icon: typeof Activity; roles?: User["role"][] }[] = [
+    { to: "/dashboard", label: "Dashboard", icon: Activity },
+    { to: "/projects", label: "Projects", icon: FolderKanban },
+    { to: "/users", label: "Users", icon: ShieldCheck },
+    { to: "/errors", label: "Errors", icon: TriangleAlert },
+    // GET /api/minimaps is admin/viewer only — hide the entry from managers.
+    { to: "/minimaps", label: "Minimaps", icon: FileCode2, roles: ["admin", "viewer"] },
+    { to: "/settings", label: "Settings", icon: Settings },
+  ];
+  const navItems = allNavItems.filter((item) => !item.roles || item.roles.includes(user.role));
 
   return (
     <div className="min-h-screen py-6 pr-4 sm:pr-6 lg:pr-8">

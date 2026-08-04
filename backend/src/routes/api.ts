@@ -15,7 +15,7 @@ import {
   listMinimapArtifacts,
   saveMinimapArtifact,
 } from "../lib/minimaps";
-import { getMcpSecretKey, getServerSettings, regenerateMcpSecretKey, regenerateServerAuthToken } from "../lib/server-settings";
+import { getMcpSecretKey, getServerAuthToken, getServerSettings, regenerateMcpSecretKey, regenerateServerAuthToken } from "../lib/server-settings";
 import {
   cleanupDuplicateGithubIssues,
   ensureGithubIssueForGroup,
@@ -661,19 +661,24 @@ apiRouter.get("/dashboard/summary", async (ctx) => {
   return ctx.json({ cards });
 });
 
+// Display-safe settings (org, URL, minimap retention) — no secrets, so any
+// signed-in role may read them.
 apiRouter.get("/settings/server", (ctx) => {
-  requireWorkspaceRole(ctx, ["admin", "viewer"]);
+  requireAuth(ctx);
   const settings: ServerSettings = getServerSettings();
   return ctx.json({ settings });
 });
 
+// The upload token doubles as the bearer credential for plugin artifact
+// uploads (/api/0), so only admins may read or rotate it.
+apiRouter.get("/settings/server/token", (ctx) => {
+  requireWorkspaceRole(ctx, ["admin"]);
+  return ctx.json({ token: getServerAuthToken() });
+});
+
 apiRouter.post("/settings/server/regenerate-token", (ctx) => {
   requireWorkspaceRole(ctx, ["admin"]);
-  const settings: ServerSettings = {
-    ...getServerSettings(),
-    ekeeperAuthToken: regenerateServerAuthToken(),
-  };
-  return ctx.json({ settings });
+  return ctx.json({ token: regenerateServerAuthToken() });
 });
 
 // The MCP secret key is viewable by any signed-in user; rotation is admin-only.

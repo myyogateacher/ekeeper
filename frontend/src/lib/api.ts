@@ -71,7 +71,8 @@ export const api = {
     request<{ users: User[] }>(projectId ? `/api/error-assignees?projectId=${projectId}` : "/api/error-assignees"),
   dashboard: () => request<{ cards: DashboardProjectCard[] }>("/api/dashboard/summary?range=7d"),
   serverSettings: () => request<{ settings: ServerSettings }>("/api/settings/server"),
-  regenerateServerToken: () => request<{ settings: ServerSettings }>("/api/settings/server/regenerate-token", { method: "POST" }),
+  serverUploadToken: () => request<{ token: string }>("/api/settings/server/token"),
+  regenerateServerToken: () => request<{ token: string }>("/api/settings/server/regenerate-token", { method: "POST" }),
   mcpKey: () => request<{ key: string }>("/api/settings/mcp-key"),
   regenerateMcpKey: () => request<{ key: string }>("/api/settings/mcp-key/regenerate", { method: "POST" }),
   minimaps: (projectId?: string, pagination?: { limit?: number; offset?: number }) => {

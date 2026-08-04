@@ -38,8 +38,7 @@ export function MinimapsPage() {
 
   const artifacts = data?.artifacts ?? [];
   const total = data?.total ?? 0;
-  // Server settings are admin/viewer only (the payload carries an upload token), so
-  // roles without access get generic copy rather than a wrong hardcoded number.
+  // Fall back to generic copy until the settings query resolves.
   const retentionDays = settings?.settings.minimapsRetentionDays;
   const keepReleases = settings?.settings.minimapsKeepReleases;
   const retentionPolicy =
