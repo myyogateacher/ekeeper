@@ -1,8 +1,12 @@
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { useEffect, useState } from "react";
+import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
+import { useEffect, useRef, useState } from "react";
 import { DataTable } from "@/components/DataTable";
 import { api } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
+
+const PAGE_SIZE = 25;
+const CLEANUP_POLL_INTERVAL_MS = 2000;
+const CLEANUP_POLL_ATTEMPTS = 5;
 
 export function MinimapsPage() {
   const queryClient = useQueryClient();
@@ -12,26 +16,47 @@ export function MinimapsPage() {
   const [artifactName, setArtifactName] = useState("");
   const [file, setFile] = useState<File | null>(null);
   const [selectedProjectId, setSelectedProjectId] = useState("");
+  const [page, setPage] = useState(0);
+  const [cleanupStatus, setCleanupStatus] = useState<string | null>(null);
+  const cleanupPollRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const { data: me, isLoading } = useQuery({ queryKey: ["me"], queryFn: api.me });
   const { data: projects } = useQuery({
     queryKey: ["projects"],
     queryFn: api.projects,
   });
   const { data } = useQuery({
-    queryKey: ["minimaps", selectedProjectId],
-    queryFn: () => api.minimaps(selectedProjectId || undefined),
+    queryKey: ["minimaps", selectedProjectId, page],
+    queryFn: () =>
+      api.minimaps(selectedProjectId || undefined, { limit: PAGE_SIZE, offset: page * PAGE_SIZE }),
     enabled: Boolean(selectedProjectId),
+    placeholderData: keepPreviousData,
   });
   const { data: settings } = useQuery({
     queryKey: ["server-settings"],
     queryFn: api.serverSettings,
   });
 
+  const artifacts = data?.artifacts ?? [];
+  const total = data?.total ?? 0;
+
   useEffect(() => {
     if (!selectedProjectId && projects?.projects?.[0]?.id) {
       setSelectedProjectId(projects.projects[0].id);
     }
   }, [projects, selectedProjectId]);
+
+  // Snap back to the last valid page when the total shrinks (for example after a cleanup).
+  useEffect(() => {
+    if (total > 0 && page > 0 && page * PAGE_SIZE >= total) {
+      setPage(Math.ceil(total / PAGE_SIZE) - 1);
+    }
+  }, [total, page]);
+
+  useEffect(() => () => {
+    if (cleanupPollRef.current) {
+      clearTimeout(cleanupPollRef.current);
+    }
+  }, []);
 
   const uploadMutation = useMutation({
     mutationFn: async () => {
@@ -59,10 +84,40 @@ export function MinimapsPage() {
     },
   });
 
+  // Deletion runs in the background, so poll a few times until the eligible count settles.
+  const pollCleanupProgress = (attempt: number) => {
+    if (attempt > CLEANUP_POLL_ATTEMPTS) {
+      return;
+    }
+
+    cleanupPollRef.current = setTimeout(() => {
+      void queryClient.invalidateQueries({ queryKey: ["minimaps"] }).then(() => {
+        const remaining = queryClient.getQueryData<{ olderThanThirtyDays: number }>([
+          "minimaps",
+          selectedProjectId,
+          page,
+        ])?.olderThanThirtyDays;
+        if (remaining === 0) {
+          return;
+        }
+        pollCleanupProgress(attempt + 1);
+      });
+    }, CLEANUP_POLL_INTERVAL_MS);
+  };
+
   const cleanupMutation = useMutation({
     mutationFn: api.cleanupOldMinimaps,
-    onSuccess: async () => {
-      await queryClient.invalidateQueries({ queryKey: ["minimaps"] });
+    onSuccess: (result) => {
+      setCleanupStatus(
+        result.started
+          ? `Cleanup started — ${result.eligible} artifacts will be removed in the background.`
+          : `A cleanup is already running — ${result.eligible} artifacts still eligible.`,
+      );
+      void queryClient.invalidateQueries({ queryKey: ["minimaps"] });
+      if (cleanupPollRef.current) {
+        clearTimeout(cleanupPollRef.current);
+      }
+      pollCleanupProgress(1);
     },
   });
 
@@ -73,6 +128,9 @@ export function MinimapsPage() {
   const isAdmin = me?.user.role === "admin";
 
   const selectedProject = projects?.projects.find((project) => project.id === selectedProjectId) ?? projects?.projects[0];
+
+  const rangeEnd = Math.min((page + 1) * PAGE_SIZE, total);
+  const rangeStart = total === 0 ? 0 : Math.min(page * PAGE_SIZE + 1, rangeEnd);
 
   return (
     <div className="space-y-6">
@@ -90,7 +148,10 @@ export function MinimapsPage() {
               <select
                 className="input pr-10"
                 value={selectedProject?.id ?? ""}
-                onChange={(event) => setSelectedProjectId(event.target.value)}
+                onChange={(event) => {
+                  setSelectedProjectId(event.target.value);
+                  setPage(0);
+                }}
               >
                 {(projects?.projects ?? []).map((project) => (
                   <option key={project.id} value={project.id}>
@@ -103,18 +164,27 @@ export function MinimapsPage() {
           <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-5 text-sm text-slate-300">
             <p className="font-medium text-white">Retention</p>
             <p className="mt-2 leading-6">
-              Artifacts older than 30 days can be removed in one action. Right now {data?.olderThanThirtyDays ?? 0}{" "}
-              uploaded minimaps are eligible.
+              Artifacts older than 30 days can be removed in one action. This applies across all projects, not just the
+              one selected above. Right now {data?.olderThanThirtyDays ?? 0} uploaded minimaps are eligible.
             </p>
             {isAdmin ? (
-              <button
-                className="button-secondary mt-4"
-                type="button"
-                onClick={() => cleanupMutation.mutate()}
-                disabled={cleanupMutation.isPending}
-              >
-                Remove minimaps older than 30 days
-              </button>
+              <>
+                <button
+                  className="button-secondary mt-4"
+                  type="button"
+                  onClick={() => {
+                    setCleanupStatus(null);
+                    cleanupMutation.mutate();
+                  }}
+                  disabled={cleanupMutation.isPending}
+                >
+                  Remove minimaps older than 30 days
+                </button>
+                {cleanupStatus ? <p className="mt-3 text-sm text-cyan-100">{cleanupStatus}</p> : null}
+                {cleanupMutation.error ? (
+                  <p className="mt-3 text-sm text-rose-200">{cleanupMutation.error.message}</p>
+                ) : null}
+              </>
             ) : null}
           </div>
         </div>
@@ -184,7 +254,7 @@ export function MinimapsPage() {
       ) : null}
 
       <DataTable headers={["Artifact", "Release", "Org / Project", "Uploaded", "Expires"]}>
-        {(data?.artifacts ?? []).map((artifact) => (
+        {artifacts.map((artifact) => (
           <tr key={artifact.id} className="text-slate-200">
             <td className="px-5 py-4">
               <div>
@@ -206,6 +276,30 @@ export function MinimapsPage() {
           </tr>
         ))}
       </DataTable>
+
+      <div className="flex items-center justify-between gap-4 text-sm text-slate-300">
+        <p>
+          {total === 0 ? "No minimaps uploaded" : `Showing ${rangeStart}–${rangeEnd} of ${total}`}
+        </p>
+        <div className="flex items-center gap-3">
+          <button
+            className="button-secondary"
+            type="button"
+            onClick={() => setPage((current) => Math.max(current - 1, 0))}
+            disabled={page === 0}
+          >
+            Previous
+          </button>
+          <button
+            className="button-secondary"
+            type="button"
+            onClick={() => setPage((current) => current + 1)}
+            disabled={rangeEnd >= total}
+          >
+            Next
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

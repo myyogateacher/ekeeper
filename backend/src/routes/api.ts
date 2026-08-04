@@ -7,7 +7,14 @@ import { clearUserSessions, requireAuth, requireProjectAccess, requireWorkspaceR
 import { HttpError } from "../lib/http";
 import { createId, randomToken } from "../lib/ids";
 import { normalizeExceptionValue } from "../lib/ingest";
-import { cleanupExpiredMinimaps, deobfuscateEvent, listMinimapArtifacts, saveMinimapArtifact } from "../lib/minimaps";
+import {
+  cleanupExpiredMinimapsAsync,
+  countExpiredMinimaps,
+  deobfuscateEvent,
+  isMinimapCleanupRunning,
+  listMinimapArtifacts,
+  saveMinimapArtifact,
+} from "../lib/minimaps";
 import { getMcpSecretKey, getServerSettings, regenerateMcpSecretKey, regenerateServerAuthToken } from "../lib/server-settings";
 import {
   cleanupDuplicateGithubIssues,
@@ -269,9 +276,33 @@ async function dashboardCards(projectIds: string[], projects: Project[]): Promis
   });
 }
 
+const DATE_ONLY_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
+
+/**
+ * Normalizes an ISO date/datetime query param into a ClickHouse-friendly UTC datetime string.
+ * Invalid values are ignored (returns undefined) so a bad param never breaks the listing.
+ * Date-only values snap to the start (`from`) or end (`to`) of that UTC day.
+ */
+function parseDateBoundary(value: string | undefined, edge: "from" | "to"): string | undefined {
+  const trimmed = value?.trim();
+  if (!trimmed) {
+    return undefined;
+  }
+
+  const normalized = DATE_ONLY_PATTERN.test(trimmed)
+    ? `${trimmed}T${edge === "from" ? "00:00:00.000Z" : "23:59:59.999Z"}`
+    : trimmed;
+  const parsed = new Date(normalized);
+  if (Number.isNaN(parsed.getTime())) {
+    return undefined;
+  }
+
+  return parsed.toISOString().slice(0, 19).replace("T", " ");
+}
+
 async function queryErrorGroups(
   projectIds: string[],
-  options: { user?: string } = {},
+  options: { user?: string; from?: string; to?: string } = {},
 ): Promise<ErrorGroupSummary[]> {
   if (projectIds.length === 0) {
     return [];
@@ -280,9 +311,27 @@ async function queryErrorGroups(
   const client = getClickHouseClient();
   const filter = projectIds.map((id) => `'${id}'`).join(", ");
   const userTerm = options.user?.trim();
-  const userFilter = userTerm
-    ? `HAVING countIf(user_id = {userTerm:String} OR user_email = {userTerm:String} OR user_username = {userTerm:String}) > 0`
-    : "";
+  const fromTs = parseDateBoundary(options.from, "from");
+  const toTs = parseDateBoundary(options.to, "to");
+
+  // Range filters apply to the group's last-seen timestamp: "issues seen within this window".
+  const havingConditions: string[] = [];
+  const queryParams: Record<string, string> = {};
+  if (userTerm) {
+    havingConditions.push(
+      "countIf(user_id = {userTerm:String} OR user_email = {userTerm:String} OR user_username = {userTerm:String}) > 0",
+    );
+    queryParams.userTerm = userTerm;
+  }
+  if (fromTs) {
+    havingConditions.push("max(timestamp) >= parseDateTimeBestEffort({fromTs:String})");
+    queryParams.fromTs = fromTs;
+  }
+  if (toTs) {
+    havingConditions.push("max(timestamp) <= parseDateTimeBestEffort({toTs:String})");
+    queryParams.toTs = toTs;
+  }
+  const userFilter = havingConditions.length ? `HAVING ${havingConditions.join(" AND ")}` : "";
 
   const result = await client.query({
     query: `
@@ -303,7 +352,7 @@ async function queryErrorGroups(
       ${userFilter}
       ORDER BY count7d DESC, lastSeen DESC
     `,
-    query_params: userTerm ? { userTerm } : undefined,
+    query_params: Object.keys(queryParams).length ? queryParams : undefined,
     format: "JSONEachRow",
   });
 
@@ -387,6 +436,28 @@ function filterErrors(
 
     return true;
   });
+}
+
+const ERRORS_DEFAULT_LIMIT = 25;
+const ERRORS_MAX_LIMIT = 100;
+
+function parseErrorPagination(limitParam?: string, offsetParam?: string) {
+  const parsedLimit = Number.parseInt(limitParam ?? "", 10);
+  const parsedOffset = Number.parseInt(offsetParam ?? "", 10);
+  const limit = Number.isFinite(parsedLimit) && parsedLimit > 0
+    ? Math.min(parsedLimit, ERRORS_MAX_LIMIT)
+    : ERRORS_DEFAULT_LIMIT;
+  const offset = Number.isFinite(parsedOffset) && parsedOffset > 0 ? parsedOffset : 0;
+  return { limit, offset };
+}
+
+function paginateErrors(errors: ErrorGroupSummary[], limit: number, offset: number) {
+  return {
+    errors: errors.slice(offset, offset + limit),
+    total: errors.length,
+    limit,
+    offset,
+  };
 }
 
 export const apiRouter = new Hono();
@@ -619,11 +690,12 @@ apiRouter.post("/settings/mcp-key/regenerate", (ctx) => {
 apiRouter.get("/minimaps", (ctx) => {
   requireWorkspaceRole(ctx, ["admin", "viewer"]);
   const projectId = ctx.req.query("projectId") ?? undefined;
-  const artifacts = listMinimapArtifacts(projectId);
-  const olderThanThirtyDays = artifacts.filter(
-    (artifact) => new Date(artifact.uploadedAt).getTime() < Date.now() - 30 * 24 * 60 * 60 * 1000,
-  ).length;
-  return ctx.json({ artifacts, olderThanThirtyDays });
+  return ctx.json(
+    listMinimapArtifacts(projectId, {
+      limit: Number(ctx.req.query("limit")),
+      offset: Number(ctx.req.query("offset")),
+    }),
+  );
 });
 
 apiRouter.post("/minimaps/upload", async (ctx) => {
@@ -661,8 +733,16 @@ apiRouter.post("/minimaps/upload", async (ctx) => {
 
 apiRouter.post("/minimaps/cleanup-old", (ctx) => {
   requireWorkspaceRole(ctx, ["admin"]);
-  const result = cleanupExpiredMinimaps();
-  return ctx.json(result);
+  const eligible = countExpiredMinimaps();
+  if (isMinimapCleanupRunning()) {
+    return ctx.json({ started: false, eligible }, 202);
+  }
+
+  // Fire and forget: deletion continues in the background so the request returns immediately.
+  void cleanupExpiredMinimapsAsync().catch((error) => {
+    console.error("[minimaps] async cleanup failed", error);
+  });
+  return ctx.json({ started: true, eligible }, 202);
 });
 
 apiRouter.get("/projects/all/errors", async (ctx) => {
@@ -672,28 +752,38 @@ apiRouter.get("/projects/all/errors", async (ctx) => {
     ? all<{ id: string }>("SELECT id FROM projects").map((project) => project.id)
     : auth.memberships.map((membership) => membership.projectId);
   const errors = filterErrors(
-    await queryErrorGroups(projectIds, { user: ctx.req.query("user") ?? undefined }),
+    await queryErrorGroups(projectIds, {
+      user: ctx.req.query("user") ?? undefined,
+      from: ctx.req.query("from") ?? undefined,
+      to: ctx.req.query("to") ?? undefined,
+    }),
     {
       state: ctx.req.query("state") ?? "open_or_reopened",
       assignment: ctx.req.query("assignment") ?? "any",
       assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
     },
   );
-  return ctx.json({ errors });
+  const { limit, offset } = parseErrorPagination(ctx.req.query("limit"), ctx.req.query("offset"));
+  return ctx.json(paginateErrors(errors, limit, offset));
 });
 
 apiRouter.get("/projects/:projectId/errors", async (ctx) => {
   const projectId = ctx.req.param("projectId");
   requireProjectAccess(ctx, projectId, false);
   const errors = filterErrors(
-    await queryErrorGroups([projectId], { user: ctx.req.query("user") ?? undefined }),
+    await queryErrorGroups([projectId], {
+      user: ctx.req.query("user") ?? undefined,
+      from: ctx.req.query("from") ?? undefined,
+      to: ctx.req.query("to") ?? undefined,
+    }),
     {
       state: ctx.req.query("state") ?? "open_or_reopened",
       assignment: ctx.req.query("assignment") ?? "any",
       assignedUserId: ctx.req.query("assignedUserId") ?? undefined,
     },
   );
-  return ctx.json({ errors });
+  const { limit, offset } = parseErrorPagination(ctx.req.query("limit"), ctx.req.query("offset"));
+  return ctx.json(paginateErrors(errors, limit, offset));
 });
 
 apiRouter.get("/error-assignees", (ctx) => {

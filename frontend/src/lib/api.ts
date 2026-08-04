@@ -74,30 +74,53 @@ export const api = {
   regenerateServerToken: () => request<{ settings: ServerSettings }>("/api/settings/server/regenerate-token", { method: "POST" }),
   mcpKey: () => request<{ key: string }>("/api/settings/mcp-key"),
   regenerateMcpKey: () => request<{ key: string }>("/api/settings/mcp-key/regenerate", { method: "POST" }),
-  minimaps: (projectId?: string) =>
-    request<{ artifacts: MinimapArtifact[]; olderThanThirtyDays: number }>(
-      projectId ? `/api/minimaps?projectId=${encodeURIComponent(projectId)}` : "/api/minimaps",
-    ),
+  minimaps: (projectId?: string, pagination?: { limit?: number; offset?: number }) => {
+    const search = new URLSearchParams();
+    if (projectId) search.set("projectId", projectId);
+    if (pagination?.limit !== undefined) search.set("limit", String(pagination.limit));
+    if (pagination?.offset !== undefined) search.set("offset", String(pagination.offset));
+    const suffix = search.toString() ? `?${search.toString()}` : "";
+    return request<{
+      artifacts: MinimapArtifact[];
+      total: number;
+      limit: number;
+      offset: number;
+      olderThanThirtyDays: number;
+    }>(`/api/minimaps${suffix}`);
+  },
   uploadMinimap: (payload: FormData) =>
     request<{ artifact: MinimapArtifact }>("/api/minimaps/upload", {
       method: "POST",
       body: payload,
     }),
   cleanupOldMinimaps: () =>
-    request<{ deleted: number; artifacts: MinimapArtifact[] }>("/api/minimaps/cleanup-old", {
+    request<{ started: boolean; eligible: number }>("/api/minimaps/cleanup-old", {
       method: "POST",
     }),
   errors: (
     projectId?: string,
-    filters?: { state?: string; assignment?: string; assignedUserId?: string; user?: string },
+    filters?: {
+      state?: string;
+      assignment?: string;
+      assignedUserId?: string;
+      user?: string;
+      from?: string;
+      to?: string;
+      limit?: number;
+      offset?: number;
+    },
   ) => {
     const search = new URLSearchParams();
     if (filters?.state) search.set("state", filters.state);
     if (filters?.assignment) search.set("assignment", filters.assignment);
     if (filters?.assignedUserId) search.set("assignedUserId", filters.assignedUserId);
     if (filters?.user) search.set("user", filters.user);
+    if (filters?.from) search.set("from", filters.from);
+    if (filters?.to) search.set("to", filters.to);
+    if (filters?.limit !== undefined) search.set("limit", String(filters.limit));
+    if (filters?.offset !== undefined) search.set("offset", String(filters.offset));
     const suffix = search.toString() ? `?${search.toString()}` : "";
-    return request<{ errors: ErrorGroupSummary[] }>(
+    return request<{ errors: ErrorGroupSummary[]; total: number; limit: number; offset: number }>(
       projectId ? `/api/projects/${projectId}/errors${suffix}` : `/api/projects/all/errors${suffix}`,
     );
   },

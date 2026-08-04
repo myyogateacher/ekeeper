@@ -1,5 +1,7 @@
+import type { SQLQueryBindings } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import path from "node:path";
 import { SourceMapConsumer, type RawSourceMap } from "source-map-js";
 import { config } from "../config";
@@ -28,12 +30,39 @@ interface DeobfuscationResult {
   release: string | null;
 }
 
+const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const DEFAULT_PAGE_SIZE = 25;
+const MAX_PAGE_SIZE = 100;
+const CLEANUP_BATCH_SIZE = 25;
+
+let cleanupRunning = false;
+
 const storageRoot = path.isAbsolute(config.MINIMAPS_STORAGE_PATH)
   ? config.MINIMAPS_STORAGE_PATH
   : path.resolve(import.meta.dir, "../../..", config.MINIMAPS_STORAGE_PATH);
 
 function ensureStorageRoot() {
   mkdirSync(storageRoot, { recursive: true });
+}
+
+function retentionCutoff() {
+  return new Date(Date.now() - RETENTION_MS).toISOString();
+}
+
+function clampLimit(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return DEFAULT_PAGE_SIZE;
+  }
+  return Math.min(Math.floor(parsed), MAX_PAGE_SIZE);
+}
+
+function clampOffset(value: unknown) {
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed <= 0) {
+    return 0;
+  }
+  return Math.floor(parsed);
 }
 
 function normalizeRelease(value: string) {
@@ -276,18 +305,45 @@ function getReleaseArtifacts(projectId: string, release: string) {
   );
 }
 
-export function listMinimapArtifacts(projectId?: string) {
+export function listMinimapArtifacts(
+  projectId?: string,
+  pagination: { limit?: number; offset?: number } = {},
+) {
   ensureStorageRoot();
-  return all<MinimapArtifact>(
+  const limit = clampLimit(pagination.limit);
+  const offset = clampOffset(pagination.offset);
+  const where = projectId ? "WHERE project_id = ?" : "";
+  const filterParams: SQLQueryBindings[] = projectId ? [projectId] : [];
+
+  const artifacts = all<MinimapArtifact>(
     `
       SELECT id, org, project_id as projectId, project, release, dist, artifact_name as artifactName, checksum, file_path as filePath,
         content_type as contentType, size, uploaded_at as uploadedAt, expires_at as expiresAt
       FROM minimap_artifacts
-      ${projectId ? "WHERE project_id = ?" : ""}
+      ${where}
       ORDER BY uploaded_at DESC
+      LIMIT ? OFFSET ?
     `,
-    projectId ? [projectId] : [],
+    [...filterParams, limit, offset],
   );
+
+  const total = one<{ total: number }>(
+    `SELECT COUNT(*) as total FROM minimap_artifacts ${where}`,
+    filterParams,
+  )?.total ?? 0;
+
+  // Retention cleanup is workspace-wide, so this count is deliberately unfiltered:
+  // it must match the number of artifacts the cleanup action would actually delete.
+  const olderThanThirtyDays = countExpiredMinimaps();
+
+  return { artifacts, total, limit, offset, olderThanThirtyDays };
+}
+
+export function countExpiredMinimaps() {
+  return one<{ total: number }>(
+    "SELECT COUNT(*) as total FROM minimap_artifacts WHERE uploaded_at < ?",
+    [retentionCutoff()],
+  )?.total ?? 0;
 }
 
 export function saveMinimapArtifact(input: {
@@ -384,37 +440,56 @@ export function saveMinimapArtifact(input: {
   } satisfies MinimapArtifact;
 }
 
-export function cleanupExpiredMinimaps() {
-  ensureStorageRoot();
-  const cutoff = new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString();
-  const expired = all<MinimapArtifact>(
-    `
-      SELECT id, org, project_id as projectId, project, release, dist, artifact_name as artifactName, checksum, file_path as filePath,
-        content_type as contentType, size, uploaded_at as uploadedAt, expires_at as expiresAt
-      FROM minimap_artifacts
-      WHERE uploaded_at < ?
-    `,
-    [cutoff],
-  );
+export function isMinimapCleanupRunning() {
+  return cleanupRunning;
+}
 
-  for (const artifact of expired) {
-    if (existsSync(artifact.filePath)) {
-      rmSync(artifact.filePath, { force: true });
+/**
+ * Deletes expired artifacts off the request path. Files are removed with the
+ * promise-based fs API and rows are deleted in small batches so a large cleanup
+ * never blocks the event loop.
+ */
+export async function cleanupExpiredMinimapsAsync() {
+  if (cleanupRunning) {
+    return { started: false, deleted: 0 };
+  }
+
+  cleanupRunning = true;
+  let deleted = 0;
+  let failed = 0;
+
+  try {
+    ensureStorageRoot();
+    const expired = all<{ id: string; filePath: string }>(
+      "SELECT id, file_path as filePath FROM minimap_artifacts WHERE uploaded_at < ?",
+      [retentionCutoff()],
+    );
+
+    for (let index = 0; index < expired.length; index += CLEANUP_BATCH_SIZE) {
+      const batch = expired.slice(index, index + CLEANUP_BATCH_SIZE);
+      for (const artifact of batch) {
+        try {
+          await rm(artifact.filePath, { force: true });
+          run("DELETE FROM minimap_artifacts WHERE id = ?", [artifact.id]);
+          deleted += 1;
+        } catch (error) {
+          failed += 1;
+          console.error("[minimaps] failed to delete expired artifact", {
+            artifactId: artifact.id,
+            filePath: artifact.filePath,
+            error,
+          });
+        }
+      }
+      // Yield between batches so the server keeps serving requests.
+      await new Promise((resolve) => setTimeout(resolve, 0));
     }
-    run("DELETE FROM minimap_artifacts WHERE id = ?", [artifact.id]);
-  }
 
-  if (expired.length > 0) {
-    console.log("[minimaps] cleaned expired artifacts", {
-      deleted: expired.length,
-      artifactIds: expired.map((artifact) => artifact.id),
-    });
+    console.log("[minimaps] async cleanup finished", { deleted, failed, eligible: expired.length });
+    return { started: true, deleted };
+  } finally {
+    cleanupRunning = false;
   }
-
-  return {
-    deleted: expired.length,
-    artifacts: expired,
-  };
 }
 
 export function deobfuscateEvent(input: {
