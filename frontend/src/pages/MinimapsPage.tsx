@@ -38,6 +38,22 @@ export function MinimapsPage() {
 
   const artifacts = data?.artifacts ?? [];
   const total = data?.total ?? 0;
+  // Server settings are admin/viewer only (the payload carries an upload token), so
+  // roles without access get generic copy rather than a wrong hardcoded number.
+  const retentionDays = settings?.settings.minimapsRetentionDays;
+  const keepReleases = settings?.settings.minimapsKeepReleases;
+  const retentionPolicy =
+    retentionDays === undefined
+      ? "Artifacts outside the configured retention window"
+      : keepReleases && keepReleases > 0
+        ? `Artifacts older than ${retentionDays} days, or beyond the ${keepReleases} most recent releases per project,`
+        : `Artifacts older than ${retentionDays} days`;
+  const cleanupLabel =
+    retentionDays === undefined
+      ? "Remove minimaps outside retention"
+      : keepReleases && keepReleases > 0
+        ? `Remove minimaps outside the ${retentionDays}-day / ${keepReleases}-release window`
+        : `Remove minimaps older than ${retentionDays} days`;
 
   useEffect(() => {
     if (!selectedProjectId && projects?.projects?.[0]?.id) {
@@ -92,11 +108,11 @@ export function MinimapsPage() {
 
     cleanupPollRef.current = setTimeout(() => {
       void queryClient.invalidateQueries({ queryKey: ["minimaps"] }).then(() => {
-        const remaining = queryClient.getQueryData<{ olderThanThirtyDays: number }>([
+        const remaining = queryClient.getQueryData<{ retentionEligible: number }>([
           "minimaps",
           selectedProjectId,
           page,
-        ])?.olderThanThirtyDays;
+        ])?.retentionEligible;
         if (remaining === 0) {
           return;
         }
@@ -164,8 +180,9 @@ export function MinimapsPage() {
           <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-5 text-sm text-slate-300">
             <p className="font-medium text-white">Retention</p>
             <p className="mt-2 leading-6">
-              Artifacts older than 30 days can be removed in one action. This applies across all projects, not just the
-              one selected above. Right now {data?.olderThanThirtyDays ?? 0} uploaded minimaps are eligible.
+              {retentionPolicy} can be removed in one action, and a scheduled cleanup applies the same policy daily.
+              This applies across all projects, not just the one selected above. Right now{" "}
+              {data?.retentionEligible ?? 0} uploaded minimaps are eligible.
             </p>
             {isAdmin ? (
               <>
@@ -178,7 +195,7 @@ export function MinimapsPage() {
                   }}
                   disabled={cleanupMutation.isPending}
                 >
-                  Remove minimaps older than 30 days
+                  {cleanupLabel}
                 </button>
                 {cleanupStatus ? <p className="mt-3 text-sm text-cyan-100">{cleanupStatus}</p> : null}
                 {cleanupMutation.error ? (

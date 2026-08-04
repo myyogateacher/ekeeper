@@ -1,5 +1,13 @@
 import { z } from "zod";
 
+// Unset docker-compose substitutions arrive as empty strings, which would coerce to 0
+// and silently disable a policy. Treat blank as "not provided" so the default applies.
+const optionalCount = (fallback: number, min: number) =>
+  z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(min),
+  ).catch(fallback);
+
 const envSchema = z.object({
   NODE_ENV: z.enum(["development", "test", "production"]).default("development"),
   APP_URL: z.string().url().default("http://localhost:3000"),
@@ -29,6 +37,10 @@ const envSchema = z.object({
   INGEST_SECRET_SEED: z.string().min(1),
   EKEEPER_ORG: z.string().min(1).default("ekeeper"),
   MINIMAPS_STORAGE_PATH: z.string().min(1).default("./backend/data/minimaps"),
+  // Age-based retention window for uploaded source maps. Invalid or missing values fall back to 30.
+  MINIMAPS_RETENTION_DAYS: optionalCount(30, 1),
+  // Keep only the N most recent releases per project. 0 disables the release-count policy.
+  MINIMAPS_KEEP_RELEASES: optionalCount(10, 0),
   GITHUB_TOKEN: z.string().default(""),
   GITHUB_API_URL: z.string().url().default("https://api.github.com"),
 });

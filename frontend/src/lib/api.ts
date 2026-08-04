@@ -85,7 +85,7 @@ export const api = {
       total: number;
       limit: number;
       offset: number;
-      olderThanThirtyDays: number;
+      retentionEligible: number;
     }>(`/api/minimaps${suffix}`);
   },
   uploadMinimap: (payload: FormData) =>

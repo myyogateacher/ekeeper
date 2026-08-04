@@ -72,5 +72,7 @@ export function getServerSettings(): ServerSettings {
     ekeeperOrg: config.EKEEPER_ORG,
     ekeeperUrl: getEkeeperUrl(),
     ekeeperAuthToken: getServerAuthToken(),
+    minimapsRetentionDays: config.MINIMAPS_RETENTION_DAYS,
+    minimapsKeepReleases: config.MINIMAPS_KEEP_RELEASES,
   };
 }

@@ -1,7 +1,7 @@
 import type { SQLQueryBindings } from "bun:sqlite";
 import { createHash } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
-import { rm } from "node:fs/promises";
+import { readdir, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import { SourceMapConsumer, type RawSourceMap } from "source-map-js";
 import { config } from "../config";
@@ -30,10 +30,36 @@ interface DeobfuscationResult {
   release: string | null;
 }
 
-const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+const DAY_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_PAGE_SIZE = 25;
 const MAX_PAGE_SIZE = 100;
 const CLEANUP_BATCH_SIZE = 25;
+const SCHEDULED_CLEANUP_DELAY_MS = 60 * 1000;
+const SCHEDULED_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
+// Orphan files younger than this are left alone: their row may still be in flight.
+const ORPHAN_MIN_AGE_MS = 10 * 60 * 1000;
+
+// Ranks each project's releases by recency, where release recency is the newest
+// upload inside that release. Must sit at the top of the statement using it.
+const RANKED_RELEASES_CTE = `
+  ranked_releases AS (
+    SELECT project_id, release,
+      ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY MAX(uploaded_at) DESC) AS release_rank
+    FROM minimap_artifacts
+    GROUP BY project_id, release
+  )
+`;
+
+// Artifacts whose (project_id, release) falls outside the N most recent releases.
+// Takes one binding: the number of releases to keep.
+function overReleaseLimitSelect(columns: string) {
+  return `
+    SELECT ${columns}
+    FROM minimap_artifacts a
+    JOIN ranked_releases r ON r.project_id = a.project_id AND r.release = a.release
+    WHERE r.release_rank > ?
+  `;
+}
 
 let cleanupRunning = false;
 
@@ -45,8 +71,16 @@ function ensureStorageRoot() {
   mkdirSync(storageRoot, { recursive: true });
 }
 
+function retentionMs() {
+  return config.MINIMAPS_RETENTION_DAYS * DAY_MS;
+}
+
 function retentionCutoff() {
-  return new Date(Date.now() - RETENTION_MS).toISOString();
+  return new Date(Date.now() - retentionMs()).toISOString();
+}
+
+function keepReleases() {
+  return config.MINIMAPS_KEEP_RELEASES;
 }
 
 function clampLimit(value: unknown) {
@@ -334,15 +368,35 @@ export function listMinimapArtifacts(
 
   // Retention cleanup is workspace-wide, so this count is deliberately unfiltered:
   // it must match the number of artifacts the cleanup action would actually delete.
-  const olderThanThirtyDays = countExpiredMinimaps();
+  const retentionEligible = countExpiredMinimaps();
 
-  return { artifacts, total, limit, offset, olderThanThirtyDays };
+  return { artifacts, total, limit, offset, retentionEligible };
 }
 
+/**
+ * Number of artifacts a cleanup run would delete: the union of the age-expired set
+ * and the set beyond the per-project release limit. Kept to a single query so the
+ * list endpoint stays cheap.
+ */
 export function countExpiredMinimaps() {
+  const keep = keepReleases();
+  if (keep <= 0) {
+    return one<{ total: number }>(
+      "SELECT COUNT(*) as total FROM minimap_artifacts WHERE uploaded_at < ?",
+      [retentionCutoff()],
+    )?.total ?? 0;
+  }
+
   return one<{ total: number }>(
-    "SELECT COUNT(*) as total FROM minimap_artifacts WHERE uploaded_at < ?",
-    [retentionCutoff()],
+    `
+      WITH ${RANKED_RELEASES_CTE}
+      SELECT COUNT(*) as total FROM (
+        SELECT id FROM minimap_artifacts WHERE uploaded_at < ?
+        UNION
+        ${overReleaseLimitSelect("a.id AS id")}
+      )
+    `,
+    [retentionCutoff(), keep],
   )?.total ?? 0;
 }
 
@@ -390,7 +444,7 @@ export function saveMinimapArtifact(input: {
   const extension = path.extname(artifactName) || ".map";
   const filePath = path.join(storageRoot, `${id}${extension}`);
   const uploadedAt = new Date().toISOString();
-  const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(Date.now() + retentionMs()).toISOString();
 
   writeFileSync(filePath, input.buffer);
   console.log("[minimaps] saving artifact", {
@@ -445,6 +499,85 @@ export function isMinimapCleanupRunning() {
 }
 
 /**
+ * Collects everything a cleanup run should delete: artifacts past the age-based
+ * retention window merged with artifacts belonging to releases beyond the
+ * per-project keep limit. Deduped by artifact id.
+ */
+function collectCleanupCandidates() {
+  const candidates = new Map<string, string>();
+
+  for (const artifact of all<{ id: string; filePath: string }>(
+    "SELECT id, file_path as filePath FROM minimap_artifacts WHERE uploaded_at < ?",
+    [retentionCutoff()],
+  )) {
+    candidates.set(artifact.id, artifact.filePath);
+  }
+
+  const keep = keepReleases();
+  if (keep > 0) {
+    for (const artifact of all<{ id: string; filePath: string }>(
+      `WITH ${RANKED_RELEASES_CTE} ${overReleaseLimitSelect("a.id AS id, a.file_path AS filePath")}`,
+      [keep],
+    )) {
+      candidates.set(artifact.id, artifact.filePath);
+    }
+  }
+
+  return [...candidates].map(([id, filePath]) => ({ id, filePath }));
+}
+
+/**
+ * Removes files under the storage root that no artifact row references any more.
+ * Comparison is by basename because every stored file is written directly into
+ * the storage root as `<artifact id><ext>`.
+ *
+ * Ordering matters: the directory listing is taken first and the referenced set is
+ * read synchronously afterwards. Doing it the other way round would let an upload
+ * that lands during the readdir await appear in the listing but not in the set,
+ * and the sweep would delete a file whose row exists. The mtime guard below is a
+ * second line of defence for writes that race the sweep itself.
+ */
+async function sweepOrphanFiles() {
+  const entries = await readdir(storageRoot, { withFileTypes: true });
+
+  // Read after the listing so the set can only ever be a superset of what was listed.
+  const referenced = new Set(
+    all<{ filePath: string }>("SELECT file_path as filePath FROM minimap_artifacts")
+      .map((row) => path.basename(row.filePath)),
+  );
+
+  const resolvedRoot = path.resolve(storageRoot);
+  const candidates = entries
+    .filter((entry) => entry.isFile() && !referenced.has(entry.name))
+    .map((entry) => path.join(storageRoot, entry.name))
+    // Defensive: never touch anything that resolved outside the storage root.
+    .filter((filePath) => path.dirname(path.resolve(filePath)) === resolvedRoot);
+
+  const minAge = Date.now() - ORPHAN_MIN_AGE_MS;
+  let removed = 0;
+
+  for (let index = 0; index < candidates.length; index += CLEANUP_BATCH_SIZE) {
+    for (const filePath of candidates.slice(index, index + CLEANUP_BATCH_SIZE)) {
+      try {
+        // Skip freshly written files: an upload may have created the file and not
+        // yet committed its row.
+        const stats = await stat(filePath);
+        if (stats.mtimeMs > minAge) {
+          continue;
+        }
+        await rm(filePath, { force: true });
+        removed += 1;
+      } catch (error) {
+        console.error("[minimaps] failed to delete orphan file", { filePath, error });
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+
+  return removed;
+}
+
+/**
  * Deletes expired artifacts off the request path. Files are removed with the
  * promise-based fs API and rows are deleted in small batches so a large cleanup
  * never blocks the event loop.
@@ -460,10 +593,7 @@ export async function cleanupExpiredMinimapsAsync() {
 
   try {
     ensureStorageRoot();
-    const expired = all<{ id: string; filePath: string }>(
-      "SELECT id, file_path as filePath FROM minimap_artifacts WHERE uploaded_at < ?",
-      [retentionCutoff()],
-    );
+    const expired = collectCleanupCandidates();
 
     for (let index = 0; index < expired.length; index += CLEANUP_BATCH_SIZE) {
       const batch = expired.slice(index, index + CLEANUP_BATCH_SIZE);
@@ -485,11 +615,41 @@ export async function cleanupExpiredMinimapsAsync() {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
-    console.log("[minimaps] async cleanup finished", { deleted, failed, eligible: expired.length });
+    const orphansRemoved = await sweepOrphanFiles();
+
+    console.log("[minimaps] async cleanup finished", {
+      deleted,
+      failed,
+      eligible: expired.length,
+      orphansRemoved,
+    });
     return { started: true, deleted };
   } finally {
     cleanupRunning = false;
   }
+}
+
+/**
+ * Runs retention cleanup shortly after boot and then once a day. The
+ * `cleanupRunning` guard inside the cleanup makes overlapping ticks a no-op.
+ */
+export function startMinimapRetentionScheduler() {
+  console.log("[minimaps] scheduling retention cleanup", {
+    retentionDays: config.MINIMAPS_RETENTION_DAYS,
+    keepReleases: config.MINIMAPS_KEEP_RELEASES,
+    initialDelayMs: SCHEDULED_CLEANUP_DELAY_MS,
+    intervalMs: SCHEDULED_CLEANUP_INTERVAL_MS,
+  });
+
+  const runScheduledCleanup = () => {
+    console.log("[minimaps] scheduled cleanup starting");
+    void cleanupExpiredMinimapsAsync().catch((error) => {
+      console.error("[minimaps] scheduled cleanup failed", error);
+    });
+  };
+
+  setTimeout(runScheduledCleanup, SCHEDULED_CLEANUP_DELAY_MS);
+  return setInterval(runScheduledCleanup, SCHEDULED_CLEANUP_INTERVAL_MS);
 }
 
 export function deobfuscateEvent(input: {

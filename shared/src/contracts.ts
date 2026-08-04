@@ -108,6 +108,8 @@ export interface ServerSettings {
   ekeeperOrg: string;
   ekeeperUrl: string;
   ekeeperAuthToken: string;
+  minimapsRetentionDays: number;
+  minimapsKeepReleases: number;
 }
 
 export interface ErrorEventDetail {

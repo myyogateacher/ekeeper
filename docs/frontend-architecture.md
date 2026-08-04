@@ -120,7 +120,11 @@ File:
 
 - project-scoped source map uploads
 - artifact listing
-- manual cleanup for artifacts older than 30 days
+- retention: artifacts are removed once they fall outside the configurable window
+  (`MINIMAPS_RETENTION_DAYS`, default 30) or beyond the most recent releases per project
+  (`MINIMAPS_KEEP_RELEASES`, default 10, 0 disables). Admins can trigger this manually, and
+  the backend also runs it on a daily schedule. Retention values come from the server
+  settings endpoint, so roles without access to it see generic copy.
 
 File:
 - [frontend/src/pages/MinimapsPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/MinimapsPage.tsx)

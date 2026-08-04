@@ -32,6 +32,10 @@ INGEST_SECRET_SEED=stub-ingest-secret-seed
 
 EKEEPER_ORG=myyogateacher
 MINIMAPS_STORAGE_PATH=./backend/data/minimaps
+# Delete uploaded source maps older than this many days. Invalid values fall back to 30.
+MINIMAPS_RETENTION_DAYS=30
+# Also keep only the N most recent releases per project. Set to 0 to disable.
+MINIMAPS_KEEP_RELEASES=10
 
 # GitHub issue sync. Use a classic PAT with `repo` scope authorized for the org via SSO.
 GITHUB_TOKEN=
