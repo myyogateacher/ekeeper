@@ -121,7 +121,7 @@ export function MinimapsPage() {
   };
 
   const cleanupMutation = useMutation({
-    mutationFn: api.cleanupOldMinimaps,
+    mutationFn: () => api.cleanupOldMinimaps(selectedProjectId || undefined),
     onSuccess: (result) => {
       setCleanupStatus(
         result.started
@@ -179,9 +179,10 @@ export function MinimapsPage() {
           <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-5 text-sm text-slate-300">
             <p className="font-medium text-white">Retention</p>
             <p className="mt-2 leading-6">
-              {retentionPolicy} can be removed in one action, and a scheduled cleanup applies the same policy daily.
-              This applies across all projects, not just the one selected above. Right now{" "}
-              {data?.retentionEligible ?? 0} uploaded minimaps are eligible.
+              {retentionPolicy} can be removed in one action. That action only touches{" "}
+              {selectedProject?.name ?? "the selected project"}; the scheduled cleanup applies the same policy daily
+              across all projects. Right now {data?.retentionEligible ?? 0} uploaded minimaps are eligible in this
+              project.
             </p>
             {isAdmin ? (
               <>

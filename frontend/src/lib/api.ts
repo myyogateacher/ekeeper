@@ -94,10 +94,11 @@ export const api = {
       method: "POST",
       body: payload,
     }),
-  cleanupOldMinimaps: () =>
-    request<{ started: boolean; eligible: number }>("/api/minimaps/cleanup-old", {
-      method: "POST",
-    }),
+  cleanupOldMinimaps: (projectId?: string) =>
+    request<{ started: boolean; eligible: number }>(
+      projectId ? `/api/minimaps/cleanup-old?projectId=${projectId}` : "/api/minimaps/cleanup-old",
+      { method: "POST" },
+    ),
   errors: (
     projectId?: string,
     filters?: {

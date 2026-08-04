@@ -40,15 +40,26 @@ const SCHEDULED_CLEANUP_INTERVAL_MS = 24 * 60 * 60 * 1000;
 const ORPHAN_MIN_AGE_MS = 10 * 60 * 1000;
 
 // Ranks each project's releases by recency, where release recency is the newest
-// upload inside that release. Must sit at the top of the statement using it.
-const RANKED_RELEASES_CTE = `
+// upload inside that release. When a projectId is given only that project's releases
+// are ranked, and the CTE takes one leading binding: the project id.
+// Must sit at the top of the statement using it.
+function rankedReleasesCte(projectId?: string) {
+  return `
   ranked_releases AS (
     SELECT project_id, release,
       ROW_NUMBER() OVER (PARTITION BY project_id ORDER BY MAX(uploaded_at) DESC) AS release_rank
     FROM minimap_artifacts
+    ${projectId ? "WHERE project_id = ?" : ""}
     GROUP BY project_id, release
   )
 `;
+}
+
+// Age-based half of the retention policy, optionally scoped to a project.
+// Takes the retention cutoff, then the project id when one is given.
+function ageExpiredWhere(projectId?: string) {
+  return `WHERE uploaded_at < ?${projectId ? " AND project_id = ?" : ""}`;
+}
 
 // Artifacts whose (project_id, release) falls outside the N most recent releases.
 // Takes one binding: the number of releases to keep.
@@ -366,9 +377,9 @@ export function listMinimapArtifacts(
     filterParams,
   )?.total ?? 0;
 
-  // Retention cleanup is workspace-wide, so this count is deliberately unfiltered:
-  // it must match the number of artifacts the cleanup action would actually delete.
-  const retentionEligible = countExpiredMinimaps();
+  // Scoped the same way as the listing: the cleanup action on this page runs against
+  // the selected project, so this count must match what that action would delete.
+  const retentionEligible = countExpiredMinimaps(projectId);
 
   return { artifacts, total, limit, offset, retentionEligible };
 }
@@ -376,27 +387,29 @@ export function listMinimapArtifacts(
 /**
  * Number of artifacts a cleanup run would delete: the union of the age-expired set
  * and the set beyond the per-project release limit. Kept to a single query so the
- * list endpoint stays cheap.
+ * list endpoint stays cheap. Pass a projectId to count only that project's artifacts,
+ * matching what a project-scoped cleanup run removes.
  */
-export function countExpiredMinimaps() {
+export function countExpiredMinimaps(projectId?: string) {
   const keep = keepReleases();
+  const scopeParams: SQLQueryBindings[] = projectId ? [projectId] : [];
   if (keep <= 0) {
     return one<{ total: number }>(
-      "SELECT COUNT(*) as total FROM minimap_artifacts WHERE uploaded_at < ?",
-      [retentionCutoff()],
+      `SELECT COUNT(*) as total FROM minimap_artifacts ${ageExpiredWhere(projectId)}`,
+      [retentionCutoff(), ...scopeParams],
     )?.total ?? 0;
   }
 
   return one<{ total: number }>(
     `
-      WITH ${RANKED_RELEASES_CTE}
+      WITH ${rankedReleasesCte(projectId)}
       SELECT COUNT(*) as total FROM (
-        SELECT id FROM minimap_artifacts WHERE uploaded_at < ?
+        SELECT id FROM minimap_artifacts ${ageExpiredWhere(projectId)}
         UNION
         ${overReleaseLimitSelect("a.id AS id")}
       )
     `,
-    [retentionCutoff(), keep],
+    [...scopeParams, retentionCutoff(), ...scopeParams, keep],
   )?.total ?? 0;
 }
 
@@ -501,14 +514,16 @@ export function isMinimapCleanupRunning() {
 /**
  * Collects everything a cleanup run should delete: artifacts past the age-based
  * retention window merged with artifacts belonging to releases beyond the
- * per-project keep limit. Deduped by artifact id.
+ * per-project keep limit. Deduped by artifact id. Mirrors `countExpiredMinimaps`,
+ * including the optional project scope, so the count and the deletion agree.
  */
-function collectCleanupCandidates() {
+function collectCleanupCandidates(projectId?: string) {
   const candidates = new Map<string, string>();
+  const scopeParams: SQLQueryBindings[] = projectId ? [projectId] : [];
 
   for (const artifact of all<{ id: string; filePath: string }>(
-    "SELECT id, file_path as filePath FROM minimap_artifacts WHERE uploaded_at < ?",
-    [retentionCutoff()],
+    `SELECT id, file_path as filePath FROM minimap_artifacts ${ageExpiredWhere(projectId)}`,
+    [retentionCutoff(), ...scopeParams],
   )) {
     candidates.set(artifact.id, artifact.filePath);
   }
@@ -516,8 +531,8 @@ function collectCleanupCandidates() {
   const keep = keepReleases();
   if (keep > 0) {
     for (const artifact of all<{ id: string; filePath: string }>(
-      `WITH ${RANKED_RELEASES_CTE} ${overReleaseLimitSelect("a.id AS id, a.file_path AS filePath")}`,
-      [keep],
+      `WITH ${rankedReleasesCte(projectId)} ${overReleaseLimitSelect("a.id AS id, a.file_path AS filePath")}`,
+      [...scopeParams, keep],
     )) {
       candidates.set(artifact.id, artifact.filePath);
     }
@@ -580,9 +595,11 @@ async function sweepOrphanFiles() {
 /**
  * Deletes expired artifacts off the request path. Files are removed with the
  * promise-based fs API and rows are deleted in small batches so a large cleanup
- * never blocks the event loop.
+ * never blocks the event loop. With a projectId only that project's artifacts are
+ * removed; the orphan sweep is skipped in that mode because a file with no row
+ * cannot be attributed to a project.
  */
-export async function cleanupExpiredMinimapsAsync() {
+export async function cleanupExpiredMinimapsAsync(projectId?: string) {
   if (cleanupRunning) {
     return { started: false, deleted: 0 };
   }
@@ -593,7 +610,7 @@ export async function cleanupExpiredMinimapsAsync() {
 
   try {
     ensureStorageRoot();
-    const expired = collectCleanupCandidates();
+    const expired = collectCleanupCandidates(projectId);
 
     for (let index = 0; index < expired.length; index += CLEANUP_BATCH_SIZE) {
       const batch = expired.slice(index, index + CLEANUP_BATCH_SIZE);
@@ -615,9 +632,11 @@ export async function cleanupExpiredMinimapsAsync() {
       await new Promise((resolve) => setTimeout(resolve, 0));
     }
 
-    const orphansRemoved = await sweepOrphanFiles();
+    // Orphans belong to no project, so only a global run is allowed to sweep them.
+    const orphansRemoved = projectId ? 0 : await sweepOrphanFiles();
 
     console.log("[minimaps] async cleanup finished", {
+      projectId: projectId ?? null,
       deleted,
       failed,
       eligible: expired.length,

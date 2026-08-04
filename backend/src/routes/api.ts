@@ -738,13 +738,15 @@ apiRouter.post("/minimaps/upload", async (ctx) => {
 
 apiRouter.post("/minimaps/cleanup-old", (ctx) => {
   requireWorkspaceRole(ctx, ["admin"]);
-  const eligible = countExpiredMinimaps();
+  // Optional scope: without it the run covers every project, like the daily scheduler.
+  const projectId = ctx.req.query("projectId") ?? undefined;
+  const eligible = countExpiredMinimaps(projectId);
   if (isMinimapCleanupRunning()) {
     return ctx.json({ started: false, eligible }, 202);
   }
 
   // Fire and forget: deletion continues in the background so the request returns immediately.
-  void cleanupExpiredMinimapsAsync().catch((error) => {
+  void cleanupExpiredMinimapsAsync(projectId).catch((error) => {
     console.error("[minimaps] async cleanup failed", error);
   });
   return ctx.json({ started: true, eligible }, 202);
