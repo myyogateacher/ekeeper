@@ -1,6 +1,11 @@
 {
   "name": "ekeeper",
   "private": true,
+  "version": "1.2.0",
+  "author": {
+    "email": "pankaj@myyogateacher.com",
+    "name": "Pankaj Soni"
+  },
   "workspaces": [
     "frontend",
     "backend",
