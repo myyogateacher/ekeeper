@@ -9,8 +9,10 @@ import { saveMinimapArtifact } from "./minimaps";
 // These tests run the real MCP handlers against a real ClickHouse, because SQL asserted as text proves
 // nothing: the alias bug in top_issues parsed fine as a string and failed only in the engine (defect register
 // entry 20, and ClickHouse resolves aliases differently across versions). They need CLICKHOUSE_URL reachable,
-// the same way the oauth tests need Redis, and they write nothing there: each query is prefixed with
+// the same way the oauth tests need Redis. They write nothing to ClickHouse: each query is prefixed with
 // `WITH events AS (<rows below>), breadcrumbs AS (...)`, which shadows the real tables for that one query.
+// They do write one project row and one minimap row to the configured SQLite and one source map file under
+// MINIMAPS_STORAGE_PATH (deobfuscateEvent reads all three), and afterAll removes them.
 // The ClickHouse module is mocked only to add that prefix; the handlers, `q` and the SQL under test are real.
 
 const realClickHouse = await import("../db/clickhouse");
@@ -143,6 +145,15 @@ describe("top_issues", () => {
 
     expect(Number(result.find((row) => row.group_id === "g1")?.events)).toBe(2);
     expect(await callTool("top_issues", {}, [projectOther])).toHaveLength(1);
+  });
+});
+
+describe("top_issues across projects", () => {
+  test("a group_id shared by two projects is one row per project, each with its own count and project_id", async () => {
+    const result = await callTool<Array<Record<string, unknown>>>("top_issues", { message_contains: "boom home" }, [projectWeb, projectOther]);
+
+    const rows = result.map((row) => [row.group_id, row.project_id, Number(row.events)]).sort();
+    expect(rows).toEqual([["g1", projectOther, 1], ["g1", projectWeb, 2]].sort());
   });
 });
 

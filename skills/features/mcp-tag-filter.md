@@ -31,4 +31,7 @@ MCP `search_events`, `top_issues`, `error_trend` and `project_info` accept
 ## Tests
 
 `backend/src/lib/mcp-tools-clickhouse.test.ts` runs the real handlers on a real
-ClickHouse (needs `CLICKHOUSE_URL` reachable, writes nothing).
+ClickHouse (needs `CLICKHOUSE_URL` reachable). It writes nothing to ClickHouse:
+each query shadows `events` and `breadcrumbs` with inline rows. It does write one
+project row and one minimap row to the configured SQLite and one source map file
+under `MINIMAPS_STORAGE_PATH`, which `afterAll` removes.

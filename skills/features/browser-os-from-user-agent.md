@@ -22,8 +22,10 @@ falls back to the request's User-Agent for each field the contexts left empty.
   Firefox, Android WebView, Chrome, Safari. OS: iOS, Android, Windows, macOS, Linux.
 - Chrome on iOS (CriOS) and Firefox on iOS (FxiOS) are labelled Chrome and
   Firefox; the OS column says iOS.
-- `device` is filled only for iPhone, iPad and an Android model. Chrome 110+ on
-  Android sends the placeholder model `K`, which is stored as blank.
+- `device` is filled only for iPhone, iPad and an Android model. The tokens
+  that sit where a model would but name no device are stored as blank: `K`
+  from Chrome 110+ on Android, and `Mobile` or `Tablet` from Firefox for
+  Android.
 - Android WebViews (the `; wv)` marker) are not Chrome. An iOS WKWebView has
   no marker and no Safari token, so its browser stays blank.
 - iPadOS 13+ Safari sends a Macintosh User-Agent and is reported as macOS.

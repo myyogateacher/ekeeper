@@ -16,6 +16,8 @@ const cases: Array<[label: string, ua: string, expected: { browser: string | nul
   ["Opera, not Chrome", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36 OPR/110.0.0.0", { browser: "Opera", os: "Windows", device: null }],
   ["Firefox on Windows", "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:125.0) Gecko/20100101 Firefox/125.0", { browser: "Firefox", os: "Windows", device: null }],
   ["Firefox on Linux", "Mozilla/5.0 (X11; Linux x86_64; rv:125.0) Gecko/20100101 Firefox/125.0", { browser: "Firefox", os: "Linux", device: null }],
+  ["Firefox on Android puts Mobile where a model would be, which is not a device", "Mozilla/5.0 (Android 14; Mobile; rv:125.0) Gecko/125.0 Firefox/125.0", { browser: "Firefox", os: "Android", device: null }],
+  ["Firefox on an Android tablet puts Tablet there, which is not a device", "Mozilla/5.0 (Android 14; Tablet; rv:125.0) Gecko/125.0 Firefox/125.0", { browser: "Firefox", os: "Android", device: null }],
   ["Firefox on iOS (FxiOS), not Safari", "Mozilla/5.0 (iPhone; CPU iPhone OS 17_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) FxiOS/125.0 Mobile/15E148 Safari/605.1.15", { browser: "Firefox", os: "iOS", device: "iPhone" }],
   ["Android WebView (the wv marker), not Chrome", "Mozilla/5.0 (Linux; Android 13; SM-G991B Build/TP1A.220624.014; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/120.0.6099.144 Mobile Safari/537.36", { browser: "Android WebView", os: "Android", device: "SM-G991B" }],
   ["Android WebView with the reduced model K", "Mozilla/5.0 (Linux; Android 10; K; wv) AppleWebKit/537.36 (KHTML, like Gecko) Version/4.0 Chrome/124.0.0.0 Mobile Safari/537.36", { browser: "Android WebView", os: "Android", device: null }],

@@ -30,8 +30,20 @@ function normalizeUrl(value: string): string {
   }
 }
 
+// Ingest is public to anyone holding a DSN and normalizeEvent runs on the single Bun event loop inside the
+// buffer flush, so a crafted event must not cost more than a bounded amount of work. Two steps are quadratic
+// in the length of what they read: HASHED_ASSET_PATTERN below (a 40k+40k character value took 2.4 s) and the
+// nested-brace loop in normalizeExceptionValue, which runs on this function's output and is therefore bounded
+// by it too (20k nested braces took 1.0 s). At 2048 characters the worst input costs a few milliseconds.
+// Why 2048: the longest message among the 500 newest stored events across all projects was 255 characters
+// (p99 114), so no real value is cut and no existing group splits. A value or frame filename that differs only
+// after this point now shares a group, and its stored message and title are cut here. Same idea as the
+// `.slice(-4)` on frames in computeGroupFingerprint, which already bounds what the fingerprint reads.
+const MAX_NORMALIZED_TEXT_LENGTH = 2048;
+
 function normalizeVolatileText(raw: string): string {
   return raw
+    .slice(0, MAX_NORMALIZED_TEXT_LENGTH)
     .replace(POINTER_PATTERN, "0x_")
     .replace(URL_PATTERN, (url) => normalizeUrl(url))
     .replace(UUID_PATTERN, "_uuid_")

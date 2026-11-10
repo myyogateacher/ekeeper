@@ -62,16 +62,19 @@ function firstMatch(patterns: ReadonlyArray<readonly [RegExp, string]>, userAgen
   return null;
 }
 
+const NOT_A_MODEL: ReadonlySet<string> = new Set(["K", "Mobile", "Tablet"]);
+
 function deviceFrom(userAgent: string): string | null {
   const apple = userAgent.match(/iPhone|iPad/);
   if (apple) {
     return apple[0];
   }
   // "Android 13; SM-S918B" or "Android 13; SM-G991B Build/TP1A.220624.014; wv": the model is the token after
-  // the version, with any " Build/..." suffix removed. Chrome 110+ on Android sends the literal "K" in that
-  // slot (User-Agent reduction), which says nothing about the device, so it is treated as unknown.
+  // the version, with any " Build/..." suffix removed. Two kinds of token sit in that slot without naming a
+  // device: Chrome 110+ on Android sends the literal "K" (User-Agent reduction), and Firefox for Android sends
+  // its form factor, "Mobile" or "Tablet". Those are treated as unknown.
   const model = userAgent.match(/Android [\d.]+; ([^;)]+)/)?.[1]?.replace(/\s+Build\/.*$/, "").trim();
-  return model && model !== "K" ? model : null;
+  return model && !NOT_A_MODEL.has(model) ? model : null;
 }
 
 // Ingest is public to anyone holding a DSN (DSNs ship in the frontend bundles) and the app sets no body cap,

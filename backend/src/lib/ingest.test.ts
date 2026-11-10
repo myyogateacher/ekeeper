@@ -136,6 +136,66 @@ describe("ingest helpers", () => {
     expect(event.userUsername).toBe("shubhangi");
   });
 
+  // Golden strings below were produced by the normalisation code before the length cap existed. They pin the
+  // invariant that a value of normal length groups exactly as it did, so existing groups do not split.
+  test.each([
+    ["a Zoom join message with a session uuid", "Zoom Meeting-Join Stalled | stage=connecting | session=3c0b6d23-33c0-4851-bbfb-22e4889c0b1a", "Zoom Meeting-Join Stalled | stage=connecting | session=_uuid_"],
+    ["an iOS NSError with pointers and nested braces", 'Error Domain=NSCocoaErrorDomain Code=640 "out of space" UserInfo={NSUnderlyingError=0x303ae6bb0 {Error Domain=NSPOSIXErrorDomain Code=28 "No space left on device"}, NSURL=file:///x/manifest.json, NSUserStringVariant=Folder}', 'Error Domain=NSCocoaErrorDomain Code=640 "out of space" UserInfo={NSURL=file:///x/manifest.json, NSUnderlyingError=0x_ {Error Domain=NSPOSIXErrorDomain Code=28 "No space left on device"}, NSUserStringVariant=Folder}'],
+    ["a dynamic import failure with a deploy uuid and hashed asset", "Failed to fetch dynamically imported module: https://myyogateacher.com/web-app-ssr/507d4605-d747-479e-9d6d-dd87e574bd26/assets/index-4a57cbf6.js", "Failed to fetch dynamically imported module: https://myyogateacher.com/web-app-ssr/_uuid_/assets/index-_hash_.js"],
+    ["an API URL with a recording uuid", "Token expected but missing for URL: https://gapi.myyogateacher.com/v2/sessions/recording/6b7f08df-30c6-47fc-9280-4e4e39f6b934", "Token expected but missing for URL: https://gapi.myyogateacher.com/v2/sessions/recording/_uuid_"],
+  ])("a real-shaped value of normal length normalises exactly as before the cap: %s", (_label, raw, expected) => {
+    expect(normalizeExceptionValue(raw)).toBe(expected);
+  });
+
+  test("the group fingerprint of a real-shaped payload is unchanged by the cap", () => {
+    const payload = {
+      exception: {
+        values: [
+          {
+            type: "TypeError",
+            value: "Failed to fetch dynamically imported module: https://myyogateacher.com/web-app-ssr/507d4605-d747-479e-9d6d-dd87e574bd26/assets/index-4a57cbf6.js",
+            stacktrace: {
+              frames: [
+                { filename: "https://myyogateacher.com/web-zoom/assets/index-DoLlnhss.js", function: "kt.withScope", lineno: 3 },
+                { filename: "https://myyogateacher.com/web-zoom/assets/Zoom-D9aLBtGk.js", function: "run", lineno: 589 },
+              ],
+            },
+          },
+        ],
+      },
+    };
+
+    expect(computeGroupFingerprint(payload)).toBe("63cd16705fe9a466d97c6f62907a6c73");
+  });
+
+  // Ingest is public to anyone holding a DSN and normalizeEvent runs on the single event loop in the buffer flush.
+  // Before the cap, a 40k+40k hashed-asset value took 2.4 s and 20k nested braces 1.0 s (both quadratic),
+  // and the time grows with the square of the length, so one crafted event froze ingest, the UI and MCP.
+  const bounded = (ms: number) => expect(ms).toBeLessThan(50);
+  // The second and fourth values keep their first 2048 characters in the worst shape for the quadratic steps, so
+  // they exercise the work left inside the cap, not only the cheap truncation of an all-"a" prefix.
+  const adversarial = {
+    "an 80k+80k hashed-asset-shaped run": "a".repeat(80_000) + "-" + "b".repeat(80_000),
+    "a hashed-asset-shaped run that fills the cap, then 160k more": "a".repeat(1024) + "-" + "b".repeat(160_000),
+    "80k nested braces": "{".repeat(80_000) + "}".repeat(80_000),
+    "braces nested to the cap, then 160k more": "{".repeat(1024) + "}".repeat(160_000),
+  };
+
+  test.each(Object.entries(adversarial))("normalising %s takes under 50 ms", (_label, value) => {
+    const started = performance.now();
+    normalizeExceptionValue(value);
+    bounded(performance.now() - started);
+  });
+
+  test("normalizeEvent bounds an adversarial value plus four adversarial frame filenames", () => {
+    const hostile = adversarial["a hashed-asset-shaped run that fills the cap, then 160k more"];
+    const started = performance.now();
+    normalizeEvent("project_1", {
+      exception: { values: [{ type: "Error", value: hostile, stacktrace: { frames: Array.from({ length: 4 }, () => ({ filename: hostile, function: "f" })) } }] },
+    });
+    bounded(performance.now() - started);
+  });
+
   // Shape copied from a stored student-web-app event (sentry.javascript.react 8.55.2): contexts holds only
   // trace and react, so the browser, os and device columns were '' until the User-Agent fallback existed.
   // Identifiers and the user block are replaced with placeholders; nothing else is hand-made.
