@@ -69,11 +69,21 @@ function deviceFrom(userAgent: string): string | null {
   return model && model !== "K" ? model : null;
 }
 
+// Ingest is public to anyone holding a DSN (DSNs ship in the frontend bundles) and the app sets no body cap,
+// while normalizeEvent runs on the single Bun event loop inside the buffer flush. The " Build/..." strip in
+// deviceFrom backtracks quadratically on a long run of spaces or of " Build/" tokens (measured: 160k
+// characters 3.6 s, 320k 14 s), which would stall ingest, the UI and MCP at once. Every pattern above is
+// fed through this function, so the bound lives here and not in each regex. The longest real User-Agent in
+// user-agent.test.ts is 270 characters; 512 leaves room for in-app WebViews that append tokens, the same
+// order of bound as the clampInt caps on MCP arguments in mcp-tools.ts.
+const MAX_USER_AGENT_LENGTH = 512;
+
 export function parseUserAgent(userAgent: string): ParsedUserAgent {
+  const bounded = userAgent.slice(0, MAX_USER_AGENT_LENGTH);
   return {
-    browser: firstMatch(BROWSER_PATTERNS, userAgent),
-    os: firstMatch(OS_PATTERNS, userAgent),
-    device: deviceFrom(userAgent),
+    browser: firstMatch(BROWSER_PATTERNS, bounded),
+    os: firstMatch(OS_PATTERNS, bounded),
+    device: deviceFrom(bounded),
   };
 }
 

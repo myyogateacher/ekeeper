@@ -35,6 +35,28 @@ describe("parseUserAgent", () => {
   });
 });
 
+// Ingest is public to anyone holding a DSN and runs on the single event loop, so the invariant is a bound on
+// work per event, whatever the header holds. Before the cap, the first input took 3.6 s at 160k characters and
+// 14 s at 320k (quadratic backtracking in the Build/ strip), stalling ingest, the UI and MCP.
+describe("parseUserAgent work bound", () => {
+  const adversarial: Array<[label: string, ua: string]> = [
+    ["a long run of spaces after the Android model", "Android 1; x" + " ".repeat(320_000) + "x"],
+    ["a long run of Build/ tokens ending in a newline", "Android 1; x" + " Build/".repeat(45_000) + "\nx"],
+  ];
+
+  test.each(adversarial)("a 320k character header with %s parses in under 50 ms", (_label, ua) => {
+    const started = performance.now();
+    parseUserAgent(ua);
+    expect(performance.now() - started).toBeLessThan(50);
+  });
+
+  test("the longest real User-Agent in the table is well inside the cap, so the cap never changes a real label", () => {
+    const longest = cases.reduce((a, b) => (b[1].length > a[1].length ? b : a));
+    expect(longest[1].length).toBeLessThan(512);
+    expect(parseUserAgent(longest[1])).toEqual(longest[2]);
+  });
+});
+
 describe("userAgentOf", () => {
   test("reads the browser SDK's User-Agent header", () => {
     expect(userAgentOf({ headers: { "User-Agent": "UA-1" } })).toBe("UA-1");
