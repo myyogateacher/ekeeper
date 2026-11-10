@@ -123,6 +123,8 @@ When issue detail is requested:
 
 This keeps ingest fast and makes source map uploads retroactively useful for older events.
 
+The MCP `get_event` tool calls the same `deobfuscateEvent`, so it returns the same readable frames as the UI.
+
 ## Migration Strategy
 
 Boot-time migrations are coordinated from:
