@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Breadcrumb, NormalizedIngestEvent } from "@ekeeper/shared";
+import { parseUserAgent, userAgentOf } from "./user-agent";
 
 function hashString(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -157,6 +158,8 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
   const osContext = (contexts.os as Record<string, unknown>) ?? {};
   const runtimeContext = (contexts.runtime as Record<string, unknown>) ?? {};
   const breadcrumbs = normalizeBreadcrumbs(payload.breadcrumbs);
+  // Per field, not all or nothing: an event that sends only `contexts.os` still gets its browser from the UA.
+  const fromUserAgent = parseUserAgent(userAgentOf(payload.request));
 
   return {
     eventId: String(payload.event_id ?? crypto.randomUUID().replace(/-/g, "")),
@@ -172,9 +175,9 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
     userId: user.id ? String(user.id) : null,
     userEmail: user.email ? String(user.email) : null,
     userUsername: user.username ? String(user.username) : null,
-    browser: browserContext.name ? String(browserContext.name) : null,
-    device: deviceContext.model ? String(deviceContext.model) : deviceContext.family ? String(deviceContext.family) : null,
-    os: osContext.name ? String(osContext.name) : null,
+    browser: browserContext.name ? String(browserContext.name) : fromUserAgent.browser,
+    device: deviceContext.model ? String(deviceContext.model) : deviceContext.family ? String(deviceContext.family) : fromUserAgent.device,
+    os: osContext.name ? String(osContext.name) : fromUserAgent.os,
     runtime: runtimeContext.name ? String(runtimeContext.name) : null,
     tags: Object.fromEntries(
       Object.entries((payload.tags as Record<string, unknown>) ?? {}).map(([key, value]) => [key, String(value)]),

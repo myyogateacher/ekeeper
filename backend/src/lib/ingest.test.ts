@@ -136,6 +136,56 @@ describe("ingest helpers", () => {
     expect(event.userUsername).toBe("shubhangi");
   });
 
+  // Shape copied from a stored student-web-app event (sentry.javascript.react 8.55.2): contexts holds only
+  // trace and react, so the browser, os and device columns were '' until the User-Agent fallback existed.
+  // Identifiers and the user block are replaced with placeholders; nothing else is hand-made.
+  const webEventPayload = () => ({
+    event_id: "00000000000000000000000000000001",
+    level: "error",
+    platform: "javascript",
+    environment: "production",
+    timestamp: 1794312359.1,
+    request: {
+      url: "https://myyogateacher.com/zmeeting?session=00000000-0000-0000-0000-000000000000&entry=web",
+      headers: {
+        "User-Agent":
+          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/149.0.0.0 Safari/537.36",
+      },
+    },
+    sdk: { name: "sentry.javascript.react", version: "8.55.2" },
+    tags: { app: "web-zoom", "join.stage": "connecting" },
+    user: { id: "00000000-0000-0000-0000-000000000000", username: "placeholder", role: "student" },
+    contexts: { trace: { trace_id: "0".repeat(32), span_id: "0".repeat(16) }, react: { version: "18.3.1" } },
+    fingerprint: ["Zoom Meeting-Join Stalled", "connecting"],
+    exception: { values: [{ type: "ZoomMeetingJoinStalled", value: "stalled", mechanism: { type: "generic", handled: true } }] },
+  });
+
+  test("a web event that sends no browser, os or device contexts takes them from its User-Agent", () => {
+    const event = normalizeEvent("project_web", webEventPayload());
+
+    expect(event.browser).toBe("Chrome");
+    expect(event.os).toBe("Windows");
+    expect(event.device).toBeNull();
+  });
+
+  test("a context value wins over the User-Agent, field by field", () => {
+    const payload = webEventPayload();
+    payload.contexts = { ...payload.contexts, os: { name: "Windows 11" } } as typeof payload.contexts;
+
+    const event = normalizeEvent("project_web", payload);
+
+    expect(event.os).toBe("Windows 11");
+    expect(event.browser).toBe("Chrome");
+  });
+
+  test("an event with no request leaves browser, os and device null", () => {
+    const { request: _request, ...withoutRequest } = webEventPayload();
+
+    const event = normalizeEvent("project_web", withoutRequest);
+
+    expect([event.browser, event.os, event.device]).toEqual([null, null, null]);
+  });
+
   test("parse envelope extracts event items", () => {
     const raw = [
       JSON.stringify({ event_id: "env_1" }),
