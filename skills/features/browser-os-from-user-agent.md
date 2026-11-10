@@ -19,11 +19,13 @@ falls back to the request's User-Agent for each field the contexts left empty.
 - New events only. Events stored before this change keep blank browser, os
   and device; there is no backfill.
 - Labels: Facebook, Instagram, HeadlessChrome, Samsung Internet, Edge, Opera,
-  Firefox, Chrome, Safari. OS: iOS, Android, Windows, macOS, Linux.
+  Firefox, Android WebView, Chrome, Safari. OS: iOS, Android, Windows, macOS, Linux.
 - Chrome on iOS (CriOS) and Firefox on iOS (FxiOS) are labelled Chrome and
   Firefox; the OS column says iOS.
 - `device` is filled only for iPhone, iPad and an Android model. Chrome 110+ on
   Android sends the placeholder model `K`, which is stored as blank.
+- Android WebViews (the `; wv)` marker) are not Chrome. An iOS WKWebView has
+  no marker and no Safari token, so its browser stays blank.
 - iPadOS 13+ Safari sends a Macintosh User-Agent and is reported as macOS.
 - The MCP `browser` filter is an exact match on these labels.
 

@@ -30,6 +30,11 @@ const BROWSER_PATTERNS: ReadonlyArray<readonly [RegExp, string]> = [
   [/\bOPR\//, "Opera"],
   // FxiOS/ is Firefox on iOS, which also carries Safari/ and no Firefox/ token.
   [/(?:Firefox|FxiOS)\//, "Firefox"],
+  // Android adds "; wv)" to the User-Agent of any WebView. It still carries Chrome/ and Version/4.0, so without
+  // this row the pages MYT's React Native app opens in a WebView would count as Chrome. It sits below the
+  // named in-app browsers (Facebook, Instagram, which are also "; wv)") so they keep their own label, and
+  // above Chrome. iOS has no such marker: an iOS WKWebView has no Safari/ token and stays null below.
+  [/; wv\)/, "Android WebView"],
   // CriOS/ is Chrome on iOS, which carries Safari/ and no Chrome/ token.
   [/(?:Chrome|CriOS)\//, "Chrome"],
   // Safari proper has Version/<n> directly before Safari/ (iOS slots Mobile/<build> between them); every
