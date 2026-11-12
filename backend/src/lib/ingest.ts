@@ -130,6 +130,61 @@ function safeString<F extends string | null>(value: unknown, fallback: F): strin
   }
 }
 
+// How a timestamp string is written into ClickHouse: the T of an ISO-8601 string becomes a space and the Z is dropped.
+// Shared here, not kept in ingest-buffer.ts, because normalizeTimestamp has to judge the text that will actually be sent.
+export function toClickHouseDateTime(value: string): string {
+  return value.replace("T", " ").replace("Z", "");
+}
+
+// The shapes of toClickHouseDateTime output that ClickHouse 24.8 reads into events.timestamp and breadcrumbs.timestamp
+// (DateTime64(3, 'UTC')) from a JSONEachRow insert, each measured on a real server. Anything else makes ClickHouse refuse
+// the whole INSERT, so one event with a timestamp of "garbage" kept its bucket from ever being deleted (PROD-10530).
+// ClickHouse also accepts some irregular shapes, such as a negative number, 14 or more digits (stored as year 2299) or
+// 2026/11/13, and they are left out on purpose: they only ever produce a wrong date, and the pattern list is the one place
+// that has to be exact, because a pattern that is too wide lets a rejected string through.
+const CLICKHOUSE_ACCEPTED_TIMESTAMPS: readonly RegExp[] = [
+  // A date, or a date and time with up to 9 fraction digits (ClickHouse keeps the first 3). The digits are not range
+  // checked, and ClickHouse accepts "2026-13-45 10:00:00" too, so a nonsense date that parses today still parses.
+  /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2}(\.\d{1,9})?)?$/,
+  // Unix seconds with an optional fraction, which is what the Sentry JS and mobile SDKs send: 1731400000.123.
+  /^\d{9,10}(\.\d{1,9})?$/,
+  // Unix milliseconds. ClickHouse reads 11 to 13 digits as milliseconds, but only 13 are a date this century.
+  /^\d{13}$/,
+];
+
+// ISO-8601 with a numeric offset. ClickHouse refuses it, but JavaScript reads it exactly, so it is rewritten to UTC
+// instead of being replaced by the receive time.
+const ISO_WITH_OFFSET = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?)([+-]\d{2}:\d{2})$/;
+
+// A timestamp text that ClickHouse stores correctly. A shape ClickHouse already reads keeps the instant it has today, so
+// the input is returned unchanged and ClickHouse's own reading stays in charge: it truncates a fraction to milliseconds
+// (measured: 1731400000.9999 is stored as .999), which re-deriving the Sentry float seconds through a JavaScript Date
+// would have to reproduce exactly. A text with an offset is converted to UTC. Everything else, including an object, an
+// empty string and anything that is not a date, becomes `now`, the time the event was received. Losing the event's own
+// time is the cost, and it is far smaller than a rejected INSERT, which stalls the whole bucket and loses it after 48
+// hours.
+export function normalizeTimestamp(raw: unknown, now: string): string {
+  const text = typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
+  const accepted = (candidate: string) =>
+    CLICKHOUSE_ACCEPTED_TIMESTAMPS.some((pattern) => pattern.test(toClickHouseDateTime(candidate)));
+  if (accepted(text)) {
+    return text;
+  }
+  const offset = ISO_WITH_OFFSET.exec(text);
+  if (offset) {
+    const instant = Date.parse(`${offset[1]}T${offset[2]}${offset[3]}`);
+    // Date.parse is NaN for a date that does not exist (month 13), and an offset can push 9999-12-31 into year 10000,
+    // which toISOString prints with a sign and six digits that ClickHouse refuses, so the result is checked again.
+    if (Number.isFinite(instant)) {
+      const iso = new Date(instant).toISOString();
+      if (accepted(iso)) {
+        return iso;
+      }
+    }
+  }
+  return now;
+}
+
 function normalizeBreadcrumbs(value: unknown): Breadcrumb[] {
   const source = Array.isArray(value)
     ? value
@@ -141,7 +196,7 @@ function normalizeBreadcrumbs(value: unknown): Breadcrumb[] {
     const entry = (item ?? {}) as Record<string, unknown>;
     const now = new Date().toISOString();
     return {
-      timestamp: safeString(entry.timestamp ?? now, now),
+      timestamp: normalizeTimestamp(entry.timestamp, now),
       category: safeString(entry.category ?? "default", "default"),
       level: safeString(entry.level ?? "info", "info"),
       message: safeString(entry.message ?? "", ""),
@@ -233,7 +288,7 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
     title,
     message,
     severity: safeString(payload.level ?? "error", "error"),
-    timestamp: safeString(payload.timestamp ?? now, now),
+    timestamp: normalizeTimestamp(payload.timestamp, now),
     release: payload.release ? safeString(payload.release, null) : null,
     environment: payload.environment ? safeString(payload.environment, null) : null,
     userId: user.id ? safeString(user.id, null) : null,

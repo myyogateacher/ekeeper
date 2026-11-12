@@ -3,6 +3,7 @@ import {
   computeGroupFingerprint,
   normalizeEvent,
   normalizeExceptionValue,
+  normalizeTimestamp,
   parseEnvelope,
 } from "./ingest";
 
@@ -349,6 +350,87 @@ describe("ingest helpers", () => {
     expect(withFrames([{ filename: "a.js", function: "f" }, null])).toBe(
       withFrames([{ filename: "a.js", function: "f" }, {}]),
     );
+  });
+
+  // ClickHouse refuses a whole INSERT when one row's timestamp does not parse into events.timestamp DateTime64(3, 'UTC'), so
+  // one event with timestamp "garbage" kept its bucket from ever being deleted (PROD-10530). The table below is what
+  // ClickHouse 24.8 did with each shape in a JSONEachRow insert, measured on a real server through the app's own insert and
+  // toClickHouseDateTime (T to a space, Z dropped); the live block at the end of ingest-buffer.test.ts re-checks the shapes
+  // that matter, and mutations of them, against an engine. "kept" returns the input unchanged because ClickHouse already stores the right instant; "reread" is
+  // the one shape ClickHouse rejects that is still a real instant (an ISO offset); "now" is a fallback to the receive time.
+  const NOW = "2026-11-13T12:00:00.000Z";
+  test.each<[string, unknown, string]>([
+    // kept: ISO-8601 as Sentry SDKs send it, with and without milliseconds, microseconds or a zone
+    ["ISO with Z and milliseconds", "2026-11-13T10:00:00.123Z", "2026-11-13T10:00:00.123Z"],
+    ["ISO with Z and no fraction", "2026-11-13T10:00:00Z", "2026-11-13T10:00:00Z"],
+    ["ISO with Z and microseconds", "2026-11-13T10:00:00.123456Z", "2026-11-13T10:00:00.123456Z"],
+    ["ISO with no zone", "2026-11-13T10:00:00.123", "2026-11-13T10:00:00.123"],
+    ["a date with no time", "2026-11-13", "2026-11-13"],
+    ["a space instead of the T", "2026-11-13 10:00:00.123", "2026-11-13 10:00:00.123"],
+    // kept: Unix seconds, which the Sentry JS and mobile SDKs send as a float. The instant must not move.
+    ["float seconds as a number", 1731400000.123, "1731400000.123"],
+    ["float seconds as a string", "1731400000.123", "1731400000.123"],
+    ["float seconds with six decimals", "1731400000.123456", "1731400000.123456"],
+    ["integer seconds as a number", 1731400000, "1731400000"],
+    ["integer seconds as a string", "1731400000", "1731400000"],
+    ["milliseconds as a number", 1731400000123, "1731400000123"],
+    ["milliseconds as a string", "1731400000123", "1731400000123"],
+    // kept although meaningless: ClickHouse accepts these and clamps or wraps them, and an accepted shape must keep the
+    // instant it has today, so they are not rewritten
+    ["a year past 2299", "9999-12-31T23:59:59.999Z", "9999-12-31T23:59:59.999Z"],
+    ["a year before 1900", "1800-01-01T00:00:00.000Z", "1800-01-01T00:00:00.000Z"],
+    ["year 0000", "0000-01-01T00:00:00.000Z", "0000-01-01T00:00:00.000Z"],
+    ["month 13", "2026-13-45T10:00:00.000Z", "2026-13-45T10:00:00.000Z"],
+    // reread: ClickHouse rejects an offset, JavaScript reads it exactly
+    ["ISO with a positive offset", "2026-11-13T15:30:00.123+05:30", "2026-11-13T10:00:00.123Z"],
+    ["ISO with a zero offset", "2026-11-13T10:00:00.123+00:00", "2026-11-13T10:00:00.123Z"],
+    ["ISO with a negative offset and no fraction", "2026-11-13T05:00:00-05:00", "2026-11-13T10:00:00.000Z"],
+    ["a space and an offset", "2026-11-13 15:30:00.123+05:30", "2026-11-13T10:00:00.123Z"],
+    // now: ClickHouse rejects all of these
+    ["an empty string", "", NOW],
+    ["garbage", "garbage", NOW],
+    ["the word null", "null", NOW],
+    ["NaN", "NaN", NOW],
+    ["zero", 0, NOW],
+    ["an object", {}, NOW],
+    ["an object with a non-callable toString", { toString: 1 }, NOW],
+    ["an array", [1, 2], NOW],
+    ["true", true, NOW],
+    ["a number that prints with an exponent", 1e21, NOW],
+    ["a lowercase z", "2026-11-13t10:00:00z", NOW],
+    ["an offset without a colon", "2026-11-13T10:00:00.123+0530", NOW],
+    ["a time with no seconds", "2026-11-13 10:00", NOW],
+    ["a trailing space", "2026-11-13 10:00:00 ", NOW],
+    ["a leading space on seconds", " 1731400000", NOW],
+    ["a text date", "Fri Nov 13 2026 10:00:00 GMT+0000", NOW],
+    ["an offset that is not a date", "2026-13-45T10:00:00+05:30", NOW],
+    ["an offset that carries the year past 9999", "9999-12-31T23:00:00-05:00", NOW],
+    // now although ClickHouse accepts them: each is stored there as a wrong date (year 2299, 1900, 1969 or 1970), so the
+    // receive time is closer to the truth, and no SDK sends them
+    ["microseconds as a number", 1731400000123456, NOW],
+    ["a negative number", -1, NOW],
+    ["a compact date as digits", "20261113", NOW],
+    ["a date with slashes", "2026/11/13 10:00:00", NOW],
+    ["milliseconds with a fraction", "1731400000123.5", NOW],
+    // absent
+    ["undefined", undefined, NOW],
+    ["null", null, NOW],
+  ])("normalizeTimestamp turns %s into a value ClickHouse stores correctly", (_label, raw, expected) => {
+    expect(normalizeTimestamp(raw, NOW)).toBe(expected);
+  });
+
+  test("an event and its breadcrumbs with unparseable timestamps are stamped with the receive time", () => {
+    const before = Date.now();
+    const event = normalizeEvent("project_1", {
+      timestamp: "garbage",
+      breadcrumbs: [{ message: "a", timestamp: "garbage" }, { message: "b", timestamp: 1731400000.5 }, { message: "c" }],
+    });
+
+    for (const stamp of [event.timestamp, event.breadcrumbs[0].timestamp, event.breadcrumbs[2].timestamp]) {
+      expect(Date.parse(stamp)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(stamp)).toBeLessThan(before + 60_000);
+    }
+    expect(event.breadcrumbs[1].timestamp).toBe("1731400000.5");
   });
 
   test("parse envelope extracts event items", () => {

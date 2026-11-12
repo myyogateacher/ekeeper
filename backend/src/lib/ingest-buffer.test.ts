@@ -1,5 +1,9 @@
-import { afterAll, afterEach, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
+import { createClient, type ClickHouseClient } from "@clickhouse/client";
+import { readdirSync, readFileSync } from "node:fs";
+import path from "node:path";
 import { Hono } from "hono";
+import { normalizeTimestamp, toClickHouseDateTime } from "./ingest";
 
 // These tests run the real enqueueBufferedIngest, flushBufferedIngest and ingest routes against an in-memory Redis and
 // a recording ClickHouse client, so they need no Redis or ClickHouse. They do need the app environment set, like the
@@ -23,6 +27,9 @@ const BUCKET = "ekeeper:ingest-buffer:2020-01-01T00:00:00.000Z";
 let buckets = new Map<string, string[]>();
 let inserts: Array<{ table: string; values: Array<Record<string, unknown>> }> = [];
 let failNextInsert = false;
+// Set only by the opt-in live block at the bottom: the client for a scratch ClickHouse database. While it is null the
+// recording fake below stands in for ClickHouse.
+let liveClient: ClickHouseClient | null = null;
 let githubIntegration: object | null = null;
 let issueCalls: Array<Record<string, unknown>> = [];
 
@@ -45,17 +52,16 @@ const fakeRedis = {
 };
 
 mock.module("./redis", () => ({ connectRedis: async () => fakeRedis }));
-mock.module("../db/clickhouse", () => ({
-  getClickHouseClient: () => ({
-    insert: async (options: { table: string; values: Array<Record<string, unknown>> }) => {
-      if (failNextInsert) {
-        failNextInsert = false;
-        throw new Error("ClickHouse unavailable");
-      }
-      inserts.push({ table: options.table, values: options.values });
-    },
-  }),
-}));
+const recordingClickHouse = {
+  insert: async (options: { table: string; values: Array<Record<string, unknown>> }) => {
+    if (failNextInsert) {
+      failNextInsert = false;
+      throw new Error("ClickHouse unavailable");
+    }
+    inserts.push({ table: options.table, values: options.values });
+  },
+};
+mock.module("../db/clickhouse", () => ({ getClickHouseClient: () => liveClient ?? recordingClickHouse }));
 // `one` answers two call sites: the project-key lookup in routes/ingest.ts (only "key_a" exists) and the project-name
 // read before a GitHub issue is created. `run` reopens closed issues and `all` reads existing GitHub links.
 mock.module("../db/sqlite", () => ({
@@ -361,4 +367,162 @@ describe("ingest routes", () => {
     expect(response.status).toBe(200);
     expect(bufferedCount()).toBe(1);
   });
+});
+
+// Opt-in: runs the real insert against a real ClickHouse, because whether ClickHouse accepts a timestamp string is a
+// property of the engine, and a recording fake would pass any string. Skipped unless EKEEPER_CLICKHOUSE_LIVE_TEST=1 and
+// CLICKHOUSE_URL answers /ping, so a plain `bun test` never writes to a ClickHouse server. It creates a scratch database
+// from the real migrations, writes only there, and drops it afterwards. Written against ClickHouse 24.8 (the version in
+// docker-compose.sample.yml); the shape table in ingest.test.ts records what that version accepted.
+async function reachableClickHouse(): Promise<boolean> {
+  const url = process.env.CLICKHOUSE_URL;
+  if (process.env.EKEEPER_CLICKHOUSE_LIVE_TEST !== "1" || !url) {
+    return false;
+  }
+  try {
+    return (await fetch(`${url}/ping`, { signal: AbortSignal.timeout(2000) })).ok;
+  } catch {
+    return false;
+  }
+}
+const describeLive = (await reachableClickHouse()) ? describe : describe.skip;
+
+describeLive("flushBufferedIngest against a real ClickHouse", () => {
+  const scratchDatabase = `ekeeper_ingest_test_${Math.random().toString(36).slice(2, 10)}`;
+  const connection = {
+    url: process.env.CLICKHOUSE_URL,
+    username: process.env.CLICKHOUSE_USER,
+    password: process.env.CLICKHOUSE_PASSWORD,
+  };
+  const admin = createClient(connection);
+
+  beforeAll(async () => {
+    await admin.command({ query: `CREATE DATABASE ${scratchDatabase}` });
+    // The statements the app itself runs (lib/migrations.ts splits on ";" at a line end and substitutes the database).
+    const directory = path.resolve(import.meta.dir, "../migrations/clickhouse");
+    for (const file of readdirSync(directory).filter((name) => name.endsWith(".sql")).sort()) {
+      const sql = readFileSync(path.join(directory, file), "utf8").replaceAll("__CLICKHOUSE_DATABASE__", scratchDatabase);
+      for (const statement of sql.split(/;\s*\n/g).map((part) => part.trim()).filter(Boolean)) {
+        await admin.command({ query: statement });
+      }
+    }
+    liveClient = createClient({ ...connection, database: scratchDatabase });
+  });
+
+  afterAll(async () => {
+    await liveClient?.close();
+    liveClient = null;
+    await admin.command({ query: `DROP DATABASE IF EXISTS ${scratchDatabase}` });
+    await admin.close();
+  });
+
+  const rowsOf = async (table: string) =>
+    (await (await admin.query({
+      query: `SELECT event_id, toUnixTimestamp64Milli(timestamp) AS ms FROM ${scratchDatabase}.${table} ORDER BY event_id`,
+      format: "JSONEachRow",
+    })).json()) as Array<{ event_id: string; ms: string }>;
+
+  // The same stall as a thrown normalizeEvent, one layer down: ClickHouse refuses the whole INSERT when one row's
+  // timestamp does not parse, insertEvents throws, flushBucket keeps the bucket, and the next flush inserts the projects
+  // before the bad one again while the ones after it are never stored.
+  test("an event with a timestamp ClickHouse cannot parse is stored with the events around it, each exactly once", async () => {
+    const withTimestamp = (eventId: string, timestamp: unknown) => ({
+      ...goodEvent(eventId),
+      timestamp,
+      breadcrumbs: [{ category: "ui.click", message: "clicked save", timestamp }],
+    });
+    buckets.set(BUCKET, [
+      entry("project_a", withTimestamp("evt_a", "2026-11-13T10:00:00.123Z")),
+      entry("project_m", withTimestamp("evt_garbage", "garbage")),
+      entry("project_m", withTimestamp("evt_object", { toString: 1 })),
+      entry("project_b", withTimestamp("evt_b", 1731400000.123)),
+    ]);
+    const receivedAfter = Date.now();
+
+    await flushBufferedIngest();
+    await flushBufferedIngest();
+
+    const events = await rowsOf("events");
+    expect(events.map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_garbage", "evt_object"]);
+    expect((await rowsOf("breadcrumbs")).map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_garbage", "evt_object"]);
+    expect(buckets.has(BUCKET)).toBe(false);
+    // Valid timestamps keep their instant; an unparseable one is stored at the time the event was received.
+    const msOf = (eventId: string) => Number(events.find((row) => row.event_id === eventId)?.ms);
+    expect(msOf("evt_a")).toBe(Date.parse("2026-11-13T10:00:00.123Z"));
+    expect(msOf("evt_b")).toBe(1731400000123);
+    expect(Math.abs(msOf("evt_garbage") - receivedAfter)).toBeLessThan(60_000);
+  });
+
+  // The engine is the oracle for normalizeTimestamp's pattern list: a pattern that is too wide lets a string through that
+  // ClickHouse refuses, which is the stall again. Every text goes through a real single-row INSERT, the same JSONEachRow
+  // path as the flush. The mutants are made from valid shapes by deleting, inserting, replacing and repeating characters,
+  // seeded so a failure reproduces; they land on and around the edges of each pattern.
+  const NOW = "2026-11-13T12:00:00.000Z";
+  let counter = 0;
+  const storedMs = async (text: string): Promise<number | null> => {
+    const id = `ts_${(counter += 1)}`;
+    try {
+      await liveClient!.insert({ table: "events", values: [{ event_id: id, project_id: "ts", group_id: "g", timestamp: text }], format: "JSONEachRow" });
+    } catch {
+      return null;
+    }
+    const rows = (await (await liveClient!.query({
+      query: "SELECT toUnixTimestamp64Milli(timestamp) AS ms FROM events WHERE event_id = {id:String}",
+      query_params: { id },
+      format: "JSONEachRow",
+    })).json()) as Array<{ ms: string }>;
+    return Number(rows[0].ms);
+  };
+
+  // [input, instant ClickHouse must store for it]. The float seconds rows are the ones that must not shift.
+  test.each<[string, unknown, number]>([
+    ["ISO with Z and milliseconds", "2026-11-13T10:00:00.123Z", Date.parse("2026-11-13T10:00:00.123Z")],
+    ["ISO with Z and microseconds", "2026-11-13T10:00:00.123456Z", Date.parse("2026-11-13T10:00:00.123Z")],
+    ["ISO with no zone", "2026-11-13T10:00:00.123", Date.parse("2026-11-13T10:00:00.123Z")],
+    ["a date with no time", "2026-11-13", Date.parse("2026-11-13T00:00:00Z")],
+    ["float seconds as a number", 1731400000.123, 1731400000123],
+    ["float seconds as a string", "1731400000.123", 1731400000123],
+    ["float seconds with six decimals", "1731400000.123456", 1731400000123],
+    ["integer seconds", 1731400000, 1731400000000],
+    ["milliseconds", 1731400000123, 1731400000123],
+    ["ISO with a positive offset", "2026-11-13T15:30:00.123+05:30", Date.parse("2026-11-13T10:00:00.123Z")],
+    ["ISO with a negative offset", "2026-11-13T05:00:00-05:00", Date.parse("2026-11-13T10:00:00Z")],
+    ["garbage", "garbage", Date.parse(NOW)],
+    ["an object", { toString: 1 }, Date.parse(NOW)],
+    ["an empty string", "", Date.parse(NOW)],
+  ])("ClickHouse stores %s at the right instant", async (_label, raw, expectedMs) => {
+    expect(await storedMs(toClickHouseDateTime(normalizeTimestamp(raw, NOW)))).toBe(expectedMs);
+  }, 20_000);
+
+  test("no mutation of a valid timestamp comes out as text ClickHouse refuses", async () => {
+    let seed = 20261113;
+    const random = (below: number) => {
+      seed = (Math.imul(seed ^ (seed >>> 15), 2246822507) + 0x9e3779b9) >>> 0;
+      return seed % below;
+    };
+    const pool = "0123456789-/: .TZz+,e";
+    const bases = ["2026-11-13T10:00:00.123Z", "1731400000.123", "1731400000123", "2026-11-13", "2026-11-13T15:30:00.123+05:30"];
+    const mutants = bases.flatMap((base) =>
+      Array.from({ length: 80 }, () => {
+        const at = random(base.length);
+        const char = pool[random(pool.length)];
+        return [
+          base.slice(0, at) + base.slice(at + 1),
+          base.slice(0, at) + char + base.slice(at),
+          base.slice(0, at) + char + base.slice(at + 1),
+          base.slice(0, at + 1) + base.slice(at, at + 1) + base.slice(at + 1),
+          base.slice(0, at),
+        ][random(5)];
+      }),
+    );
+
+    const refused: string[] = [];
+    for (const mutant of mutants) {
+      const text = normalizeTimestamp(mutant, NOW);
+      if ((await storedMs(toClickHouseDateTime(text))) === null) {
+        refused.push(`${JSON.stringify(mutant)} -> ${JSON.stringify(text)}`);
+      }
+    }
+    expect(refused).toEqual([]);
+  }, 120_000);
 });

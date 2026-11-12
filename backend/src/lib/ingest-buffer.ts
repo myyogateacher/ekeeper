@@ -2,7 +2,7 @@ import { getClickHouseClient } from "../db/clickhouse";
 import { all, one, run } from "../db/sqlite";
 import { HttpError } from "./http";
 import { ensureGithubIssueForGroup, getGithubIntegration } from "./issue-sync";
-import { normalizeEvent } from "./ingest";
+import { normalizeEvent, toClickHouseDateTime } from "./ingest";
 import { connectRedis } from "./redis";
 
 interface BufferedIngestEntry {
@@ -22,10 +22,6 @@ function logIngestBuffer(message: string, details?: Record<string, unknown>) {
   }
 
   console.log(`[ingest-buffer] ${message}`);
-}
-
-function toClickHouseDateTime(value: string): string {
-  return value.replace("T", " ").replace("Z", "");
 }
 
 function extractExceptionType(exception: Record<string, unknown> | null | undefined): string | null {
