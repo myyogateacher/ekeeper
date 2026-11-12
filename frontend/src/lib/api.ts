@@ -16,7 +16,7 @@ import type {
 } from "@ekeeper/shared";
 import { ApiError } from "@/lib/api-error";
 import { path } from "@/lib/url";
-import { userOrSignedOut } from "@/lib/session";
+import { SESSION_KEY, userOrSignedOut } from "@/lib/session";
 import {
   ISSUE_LIST_PAGE_SIZE,
   mergePages,
@@ -185,6 +185,9 @@ export const api = {
   loginUrl: () => request<{ url: string }>("/auth/google/start", { method: "POST" }),
   logout: () => request<{ success: boolean }>("/auth/logout", { method: "POST" }),
 };
+
+/** The session query's options, shared by the layout, the login route and the cross-tab sync so the three cannot drift. */
+export const meQuery = { queryKey: SESSION_KEY, queryFn: api.me, retry: false } as const;
 
 export const roleOptions: UserRole[] = ["admin", "manager", "viewer"];
 

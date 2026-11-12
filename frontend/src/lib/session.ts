@@ -1,4 +1,11 @@
+import type { QueryClient } from "@tanstack/react-query";
 import { isApiStatus } from "./api-error.ts";
+
+/** The cache key of the session query ("who am I"); everything else cached belongs to that one user. */
+export const SESSION_KEY = ["me"] as const;
+
+/** BroadcastChannel name the tabs of this app use to tell each other who is signed in. */
+export const SESSION_CHANNEL = "ekeeper:session";
 
 /**
  * Runs the "who am I" request and turns a 401 into `null`, so signed out is a value the query cache holds
@@ -25,4 +32,46 @@ export async function userOrSignedOut<T>(fetchMe: () => Promise<T>): Promise<T |
     }
     throw error;
   }
+}
+
+const isNotSession = (query: { queryKey: readonly unknown[] }) => query.queryKey[0] !== SESSION_KEY[0];
+
+/**
+ * The session is over (logout, or a 401 on any request): drop every cached query except the session's own and
+ * set that one to null, so the next signed-in user in this tab never sees this user's data (shared browsers:
+ * tab A, admin, went Back to a cached list after tab B signed in as someone else). The session query is
+ * written, not removed or invalidated: ProtectedLayout has it mounted, and either one refetches it at once,
+ * which is how a signed-out user used to loop on the loader.
+ */
+export function endSession(client: QueryClient): void {
+  client.removeQueries({ predicate: isNotSession });
+  client.setQueryData(SESSION_KEY, null);
+}
+
+/**
+ * Another tab reports a different user. Reset every cached query but the session's: their data goes at once
+ * (a mounted page shows its loading state instead of the previous user's rows) and the active ones refetch
+ * under the cookie this tab now has. The session query is refetched, not reset, so the shell keeps rendering
+ * until it learns who the user is now, and a null answer then sends the tab to /login.
+ */
+export async function dropCachedQueries(client: QueryClient): Promise<void> {
+  const reset = client.resetQueries({ predicate: isNotSession });
+  await Promise.all([reset, client.refetchQueries({ queryKey: SESSION_KEY })]);
+}
+
+/** What a tab tells the others: the id of the user it is signed in as, or null when it is signed out. */
+export interface SessionMessage {
+  userId: string | null;
+}
+
+/** Only a message that names a user id or null is read; anything else (another version's shape) is ignored. */
+export function parseSessionMessage(data: unknown): SessionMessage | null {
+  if (data === null || typeof data !== "object" || !("userId" in data)) return null;
+  const { userId } = data;
+  return userId === null || typeof userId === "string" ? { userId } : null;
+}
+
+/** True when this tab holds data for a different user than the one the message names, signed out included. */
+export function mustDropCache(ownUserId: string | null, message: SessionMessage): boolean {
+  return message.userId !== ownUserId;
 }

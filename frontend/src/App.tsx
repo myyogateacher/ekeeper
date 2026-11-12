@@ -4,7 +4,9 @@ import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react
 import { AppShell } from "@/components/AppShell";
 import { EmptyState } from "@/components/EmptyState";
 import { RouteErrorBoundary } from "@/components/RouteErrorBoundary";
-import { api } from "@/lib/api";
+import { api, meQuery } from "@/lib/api";
+import { endSession } from "@/lib/session";
+import { useSessionSync } from "@/components/useSessionSync";
 import { clearPathAfterLogin, peekPathAfterLogin, rememberPathForLogin } from "@/lib/after-login";
 import { ErrorDetailPage } from "@/pages/ErrorDetailPage";
 import { ErrorsPage } from "@/pages/ErrorsPage";
@@ -15,11 +17,7 @@ function ProtectedLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
-  const { data, isLoading, isError, isFetching, refetch } = useQuery({
-    queryKey: ["me"],
-    queryFn: api.me,
-    retry: false,
-  });
+  const { data, isLoading, isError, isFetching, refetch } = useQuery(meQuery);
 
   if (isLoading) {
     return (
@@ -59,8 +57,12 @@ function ProtectedLayout() {
       user={data.user}
       onLogout={async () => {
         await api.logout();
-        await queryClient.cancelQueries({ queryKey: ["me"] });
-        queryClient.removeQueries({ queryKey: ["me"], exact: true });
+        // In-flight requests are cancelled first so a late response cannot repopulate the cache endSession
+        // just emptied. An explicit logout also forgets the remembered page: unlike an expiry, whoever signs in
+        // next on this browser is not coming back to it.
+        await queryClient.cancelQueries();
+        endSession(queryClient);
+        clearPathAfterLogin();
         navigate("/login", { replace: true });
       }}
     >
@@ -74,11 +76,7 @@ function ProtectedLayout() {
 function LoginRoute() {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
-  const { data } = useQuery({
-    queryKey: ["me"],
-    queryFn: api.me,
-    retry: false,
-  });
+  const { data } = useQuery(meQuery);
 
   if (data) {
     return <RedirectAfterLogin />;
@@ -113,6 +111,7 @@ function RedirectAfterLogin() {
 // /errors and /errors/:projectId/:groupId stay the canonical URLs: GitHub issue bodies link to the latter
 // (backend/src/lib/issue-sync.ts:181), so renaming them would need a redirect kept forever.
 export default function App() {
+  useSessionSync();
   return (
     <Routes>
       <Route path="/login" element={<LoginRoute />} />

@@ -51,6 +51,10 @@ Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.
   it mounted and refetches it at once, which looped a signed-out user on the loader.
   A failure of `/api/me` that is not a 401 (a 5xx, no network) shows "Couldn't reach eKeeper" with Try again
   and does not redirect.
+  The cache belongs to one user: logout and a 401 call `endSession` (`lib/session.ts`), which removes every cached
+  query except `["me"]` and sets that to `null`. Tabs share one cookie jar, so `useSessionSync` posts the signed
+  in user's id (or `null`) on a `BroadcastChannel` and a tab holding a different user drops its cache and
+  refetches `["me"]`; without that, Back in a second tab rendered the previous user's cached list.
 - Ids in URLs: ids are data, and a group id is a sender's fingerprint verbatim, so it can hold `/`, `..` or `?`.
   Build request paths with the `path` tag and issue routes with `issuePath` (`lib/url.ts`); never interpolate an
   id raw. `url.test.ts` fails on a raw interpolation in `api.ts`.
