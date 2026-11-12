@@ -212,6 +212,21 @@ describe("queryAffectedUsers", () => {
     expect(await queryAffectedUsers([{ projectId: "pA", groupId: "a'b" }])).toBe(1);
   });
 
+  test("ids with non-ASCII text, a NUL and a lone quote-and-backslash mix are matched exactly through the base64 body", async () => {
+    const ids = ["caf\u00e9 \u4e2d\u6587 \u{1F4A5}", "nul\u0000inside", "\\'\"; DROP TABLE events; --", "tab\there", "\u2028line\u2029sep"];
+    shadow([...ids.map((id) => ({ project: "pA", group: id, user: id })), { project: "pA", group: "not-asked", user: "someone" }]);
+
+    expect(await queryAffectedUsers(ids.map((groupId) => ({ projectId: "pA", groupId })))).toBe(ids.length);
+    expect(await queryAffectedUsers([{ projectId: "pA", groupId: ids[2]! }])).toBe(1);
+  });
+
+  test("500 pairs of 40 and 2000 character ids, the size that failed as a URL parameter, reach the engine through the function itself", async () => {
+    const groups = Array.from({ length: 500 }, (_, index) => ({ projectId: `project_${index}`.padEnd(40, "p"), groupId: `legacy-${index}`.padEnd(2000, "g") }));
+    shadow(groups.slice(0, 3).map((entry, index) => ({ project: entry.projectId, group: entry.groupId, user: `u${index}` })));
+
+    expect(await queryAffectedUsers(groups)).toBe(3);
+  });
+
   test("500 groups in one call, the most a request may carry", async () => {
     const groups = Array.from({ length: 500 }, (_, index) => ({ projectId: "pA", groupId: `group-${index}` }));
     shadow(groups.map((group, index) => ({ project: group.projectId, group: group.groupId, user: `user-${index % 40}` })));
@@ -638,37 +653,22 @@ describe("POST /api/errors/affected-users", () => {
     expect(((await tooMany.json()) as { message: string }).message).toContain("groups");
   });
 
-  // ClickHouse refuses a query parameter over 131072 URL encoded bytes, and the pairs are one parameter
-  // (clickhouse-params.ts). The two lengths below straddle the 100,000 byte budget; a 40 character project id is
-  // what createId("project") makes, and 200 characters is the longest id the S4 allowlist keeps verbatim.
-  test("500 pairs of 40 character project ids and 130 character group ids are served by the engine end to end", async () => {
-    const groups = Array.from({ length: 500 }, (_, index) => group(`project_${index}`.padEnd(40, "p"), `legacy-${index}`.padEnd(130, "g")));
-    // Only 9 of the 500 groups have events: ClickHouse caps the query text at max_query_size (262144 bytes), which
-    // 500 shadow rows of every column would pass; the long parameter is the point of this test, not the table.
+  // The pairs travel in the request body as base64 JSON (queryAffectedUsers). As a URL parameter ClickHouse
+  // refused 500 pairs of 40 and 200 character ids ("Field value too long", 131072 bytes), so these sizes are the
+  // regression: 200 characters is the longest id the S4 allowlist keeps verbatim, 2000 stands for an explicit
+  // fingerprint stored before it (nothing capped one), and 4096 is the schema's per id maximum. A 40 character
+  // project id is what createId("project") makes. Only 9 of the 500 groups have events: the engine caps the query
+  // text at max_query_size, and the long ids in the request are what is under test, not the shadow table.
+  const longIds = (groupLength: number) =>
+    Array.from({ length: 500 }, (_, index) => group(`project_${index}`.padEnd(40, "p"), `legacy-${index}`.padEnd(groupLength, "g")));
+
+  test.each([32, 130, 200, 2000, 4096])("500 pairs of 40 character project ids and %d character group ids are served end to end", async (groupLength) => {
+    const groups = longIds(groupLength);
     shadow(groups.slice(0, 9).map((entry, index) => ({ project: entry.projectId, group: entry.groupId, user: `u${index}` })));
 
     const response = await post({ groups });
 
     expect([response.status, await response.json()]).toEqual([200, { affectedUsers: 9 }]);
-  });
-
-  test("500 pairs of 40 character project ids and 200 character group ids are a 400 before any query, not the engine's 500", async () => {
-    noQueryMayRun();
-    const groups = Array.from({ length: 500 }, (_, index) => group(`project_${index}`.padEnd(40, "p"), `legacy-${index}`.padEnd(200, "g")));
-
-    const response = await post({ groups });
-
-    expect(response.status).toBe(400);
-    expect(((await response.json()) as { message: string }).message).toContain("too long");
-  });
-
-  test("500 pairs of the 40 and 32 character ids a real list has are served", async () => {
-    const groups = Array.from({ length: 500 }, (_, index) => group(`project_${index}`.padEnd(40, "p"), `${index}`.padStart(32, "0")));
-    shadow(groups.slice(0, 4).map((entry, index) => ({ project: entry.projectId, group: entry.groupId, user: `u${index}` })));
-
-    const response = await post({ groups });
-
-    expect([response.status, await response.json()]).toEqual([200, { affectedUsers: 4 }]);
   });
 
   test("a body that is not the schema is a 400 before any query: not JSON, no groups, wrong types, empty ids", async () => {

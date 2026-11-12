@@ -1,4 +1,3 @@
-import { TupleParam } from "@clickhouse/client";
 import { Hono } from "hono";
 import { z } from "zod";
 import { config } from "../config";
@@ -27,7 +26,7 @@ import {
   parseLabels,
   syncGithubIssueState,
 } from "../lib/issue-sync";
-import { MAX_QUERY_PARAM_BYTES, pairsParamBytes } from "../lib/clickhouse-params";
+import { chunkPairs } from "../lib/pair-chunks";
 import { EVENTS_24H_SQL, EVENTS_7D_SQL, buildEventNavigation, buildIssueStats, hourlyColumnsSql, isoFromEpochMs, type NavigationRow, type StatsRow } from "../lib/issue-stats";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
@@ -91,10 +90,9 @@ const minimapUploadSchema = z.object({
 });
 
 // The issues list shows at most this many rows (ISSUE_LIST_MAX_ROWS in frontend/src/lib/issue-list.ts), and the
-// header total covers the rows on screen, so a request never needs more. It is also the bound on the tuple set
-// handed to ClickHouse as one query parameter, which travels in the URL. The id caps are generous on purpose:
+// header total covers the rows on screen, so a request never needs more. The id caps are generous on purpose:
 // events.group_id is unbounded for an explicit fingerprint stored before PROD-10529, and a cap that rejected a
-// real group would fail the whole header, but a bounded body keeps one request from carrying megabytes.
+// real group would fail the whole header, but a bounded body keeps one request from carrying much more than 2 MB.
 const AFFECTED_USERS_MAX_GROUPS = 500;
 const affectedUsersSchema = z.object({
   groups: z
@@ -107,26 +105,49 @@ const affectedUsersSchema = z.object({
 // '' in events) is not a user. Interpolated into SQL as a constant, never built from input.
 const AFFECTED_USERS_SQL = "uniqIf(user_id, user_id != '')";
 
+// ClickHouse's default max_query_size, 256 KiB: a longer query text is "Max query size exceeded".
+const DEFAULT_MAX_QUERY_SIZE = 262_144;
+
+// Base64 of a JSON array of [project_id, group_id] pairs. Base64's alphabet (A-Z a-z 0-9 + / =) cannot contain a
+// quote, a backslash or a newline, so the value cannot end the SQL string literal it is put in and nothing is
+// escaped by hand; the engine decodes it as data. Built only from Buffer.toString("base64"), never from input.
+const pairsConstant = (pairs: ReadonlyArray<readonly [string, string]>) =>
+  `JSONExtract(base64Decode('${Buffer.from(JSON.stringify(pairs)).toString("base64")}'), 'Array(Tuple(String, String))')`;
+
 /**
  * Distinct users over the union of the given groups, all time. One user hitting two groups counts once, so this
- * is the only correct way to total several groups (summing per group counts overcounts). The tuple IN is a
- * constant set, so ClickHouse prunes by the sort key (project_id, group_id, ...) and reads only these groups'
- * rows and only user_id; a set built by a subquery over arrayZip was measured to skip that pruning and read
- * every granule. The issue page passes one group, the list header up to 500.
+ * is the only correct way to total several groups (summing per group counts overcounts). The issue page passes
+ * one group, the list header up to 500.
+ *
+ * The pairs travel in the request BODY, inside the SQL text, not as a query parameter. @clickhouse/client sends
+ * parameters in the URL and ClickHouse refuses a parameter over http_max_field_value_size (131072 URL encoded
+ * bytes), so 500 pairs of 40 and 200 character ids were a 500 (measured on 24.8.14.39, PROD-10537), and an
+ * explicit fingerprint stored before PROD-10529 can be any length. See pairsConstant for how they are carried.
+ *
+ * `(project_id, group_id) IN <constant array>` is a constant set, so ClickHouse prunes by the sort key and reads
+ * only these groups' rows and only user_id (EXPLAIN indexes = 1: Granules 1/5 on a harness table); a set built by
+ * a subquery over arrayZip was measured to skip that pruning and read every granule. ClickHouse stops folding the
+ * JSON into a constant near 1 MiB, so a big set is several constants ORed (pair-chunks.ts), still one query and one
+ * exact union. A big text needs a higher max_query_size, set only for those requests so the common ones do not
+ * depend on the profile letting a query change it (readonly = 1 refuses it); half of the default is the line where
+ * a request starts setting it.
  */
 export async function queryAffectedUsers(groups: Array<{ projectId: string; groupId: string }>): Promise<number> {
   if (groups.length === 0) {
     return 0;
   }
 
-  const client = getClickHouseClient();
-  const result = await client.query({
-    query: `
+  const sets = chunkPairs(groups.map(({ projectId, groupId }) => [projectId, groupId] as const));
+  const query = `
       SELECT ${AFFECTED_USERS_SQL} AS affectedUsers
       FROM events
-      WHERE (project_id, group_id) IN {groups:Array(Tuple(String, String))}
-    `,
-    query_params: { groups: groups.map(({ projectId, groupId }) => new TupleParam([projectId, groupId])) },
+      WHERE ${sets.map((pairs) => `(project_id, group_id) IN ${pairsConstant(pairs)}`).join(" OR ")}
+    `;
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query,
+    // Twice the text leaves room for whatever a caller puts in front of it (the engine tests prefix shadow tables).
+    clickhouse_settings: query.length > DEFAULT_MAX_QUERY_SIZE / 2 ? { max_query_size: String(query.length * 2) } : undefined,
     format: "JSONEachRow",
   });
   const [row] = (await result.json()) as Array<{ affectedUsers: string | number }>;
@@ -935,11 +956,6 @@ apiRouter.post("/errors/affected-users", async (ctx) => {
   }
 
   const { groups } = parsed.data;
-  // The pairs reach ClickHouse as one URL parameter, which it refuses past 128 KiB (clickhouse-params.ts). 500
-  // ordinary pairs are about 48 KB, so this only turns away a list of very long ids, as a 400 and not a 500.
-  if (pairsParamBytes(groups.map((group) => [group.projectId, group.groupId] as const)) > MAX_QUERY_PARAM_BYTES) {
-    throw new HttpError(400, "Invalid request: groups: the ids are too long to total in one request");
-  }
   for (const projectId of new Set(groups.map((group) => group.projectId))) {
     requireProjectAccess(ctx, projectId, false);
   }

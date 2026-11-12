@@ -193,9 +193,7 @@ export interface ErrorDetailResponse {
 
 // POST /api/errors/affected-users: distinct users over the union of the listed groups, so the issues list
 // header can show "N users affected" for the visible rows. Per-group counts cannot be summed (one user can
-// hit several groups). At most 500 groups, and the ids together must stay under about 100 KB URL encoded
-// (ClickHouse refuses a longer query parameter): 500 ordinary pairs, a 40 character project id and a 32 character
-// hash group id, are about 48 KB. Over that is a 400, as are malformed bodies.
+// hit several groups). At most 500 groups, each id at most 4096 characters; anything else is a 400.
 export interface AffectedUsersRequest {
   groups: Array<{ projectId: string; groupId: string }>;
 }
