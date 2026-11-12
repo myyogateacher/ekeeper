@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from "bun:test";
-import { buildWhere, MCP_TOOLS, getTool, accessibleProjectIds } from "./mcp-tools";
+import { buildWhere, MCP_TOOLS, getTool, accessibleProjectIds, parseTagFilter } from "./mcp-tools";
 import { run, all } from "../db/sqlite";
 import { HttpError } from "./http";
 
@@ -22,6 +22,18 @@ test("buildWhere ignores project arg not in allowed set", () => {
 test("buildWhere applies project arg when in allowed set", () => {
   const { params } = buildWhere(["pA"], { project: "pA" });
   expect((params as Record<string, unknown>).project).toBe("pA");
+});
+test("buildWhere without a tag adds no tag clause", () => {
+  const { clause, params } = buildWhere(["pA"], {});
+  expect(clause).not.toContain("JSONExtractString");
+  expect(params.tag_key).toBeUndefined();
+});
+test("a tag filter splits on the first colon, so a value may itself contain colons", () => {
+  expect(parseTagFilter("app:web_home")).toEqual({ key: "app", value: "web_home" });
+  expect(parseTagFilter("url:https://example.com:8080/a")).toEqual({ key: "url", value: "https://example.com:8080/a" });
+});
+test.each(["web_home", ":web_home", "app:"])("a malformed tag filter %p throws instead of widening the result to every event", (tag) => {
+  expect(() => buildWhere(["pA"], { tag })).toThrow('tag must be "key:value"');
 });
 test("six tools incl list_projects", () => {
   expect(MCP_TOOLS.map((t) => t.name).sort()).toEqual(

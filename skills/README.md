@@ -11,6 +11,11 @@ common ways it breaks. Read the relevant file before editing that area.
 - [`features/github-issue-sync.md`](features/github-issue-sync.md) —
   per-project GitHub integration: auto-create issues for new error groups,
   mirror state changes both ways, and backfill existing groups.
+- [`features/browser-os-from-user-agent.md`](features/browser-os-from-user-agent.md):
+  browser, OS and device parsed from the User-Agent when the SDK sends no
+  contexts.
+- [`features/mcp-tag-filter.md`](features/mcp-tag-filter.md): filter MCP event
+  tools by tag, and the tags returned in results.
 
 ## Architecture overview pointers
 
