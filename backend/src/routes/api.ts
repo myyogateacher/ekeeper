@@ -1,3 +1,4 @@
+import { TupleParam } from "@clickhouse/client";
 import { Hono } from "hono";
 import { z } from "zod";
 import { config } from "../config";
@@ -80,6 +81,37 @@ const minimapUploadSchema = z.object({
   dist: z.string().min(1).nullable().optional(),
   artifactName: z.string().min(1),
 });
+
+// One definition of "users affected" for every screen that shows it: the issues list, its header total, the
+// issue page and the similar issues rows must agree for the same group, and a user who sent no id (user_id is
+// '' in events) is not a user. Interpolated into SQL as a constant, never built from input.
+const AFFECTED_USERS_SQL = "uniqIf(user_id, user_id != '')";
+
+/**
+ * Distinct users over the union of the given groups, all time. One user hitting two groups counts once, so this
+ * is the only correct way to total several groups (summing per group counts overcounts). The tuple IN is a
+ * constant set, so ClickHouse prunes by the sort key (project_id, group_id, ...) and reads only these groups'
+ * rows and only user_id; a set built by a subquery over arrayZip was measured to skip that pruning and read
+ * every granule. The issue page passes one group, the list header up to 500.
+ */
+export async function queryAffectedUsers(groups: Array<{ projectId: string; groupId: string }>): Promise<number> {
+  if (groups.length === 0) {
+    return 0;
+  }
+
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query: `
+      SELECT ${AFFECTED_USERS_SQL} AS affectedUsers
+      FROM events
+      WHERE (project_id, group_id) IN {groups:Array(Tuple(String, String))}
+    `,
+    query_params: { groups: groups.map(({ projectId, groupId }) => new TupleParam([projectId, groupId])) },
+    format: "JSONEachRow",
+  });
+  const [row] = (await result.json()) as Array<{ affectedUsers: string | number }>;
+  return Number(row?.affectedUsers ?? 0);
+}
 
 const DUPLICATE_URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/;
 const DUPLICATE_UUID_PATTERN = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/;
@@ -345,7 +377,7 @@ async function queryErrorGroups(
         min(timestamp) AS firstSeen,
         max(timestamp) AS lastSeen,
         any(severity) AS severity,
-        uniqIf(user_id, user_id != '') AS affectedUsers
+        ${AFFECTED_USERS_SQL} AS affectedUsers
       FROM events
       WHERE project_id IN (${filter})
       GROUP BY project_id, group_id
@@ -908,9 +940,12 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
       })
     : null;
   const githubLink = getGithubLink(projectId, groupId);
-  const duplicateGroups = latestEvent
-    ? await safeQueryDuplicateIssueGroups(projectId, groupId, latestEvent.message)
-    : [];
+  const [affectedUsers, duplicateGroups] = latestEvent
+    ? await Promise.all([
+        queryAffectedUsers([{ projectId, groupId }]),
+        safeQueryDuplicateIssueGroups(projectId, groupId, latestEvent.message),
+      ])
+    : [0, [] as DuplicateIssueGroup[]];
   const error = latestEvent
     ? {
         ...latestEvent,
@@ -925,6 +960,7 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         sourceMapRelease: deobfuscated?.release ?? null,
         githubIssueNumber: githubLink?.githubIssueNumber ?? null,
         githubIssueUrl: githubLink?.githubIssueUrl ?? null,
+        affectedUsers,
       }
     : null;
   return ctx.json({ error, occurrences, duplicateGroups });
