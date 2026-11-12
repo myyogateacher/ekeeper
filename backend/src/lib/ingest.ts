@@ -112,7 +112,8 @@ export function normalizeExceptionValue(raw: string): string {
     });
   }
 
-  return s.replaceAll(BRACE_OPEN_PLACEHOLDER, "{").replaceAll(BRACE_CLOSE_PLACEHOLDER, "}");
+  // The cap in normalizeVolatileText can cut an emoji in half, and this text becomes the message and title columns.
+  return s.replaceAll(BRACE_OPEN_PLACEHOLDER, "{").replaceAll(BRACE_CLOSE_PLACEHOLDER, "}").toWellFormed();
 }
 
 // String(value) that cannot throw. Every field of an event is attacker-controlled JSON (ingest is public to anyone
@@ -121,10 +122,20 @@ export function normalizeExceptionValue(raw: string): string {
 // Array#toString (measured on bun 1.4.2: 2000 levels pass, 5000 throw). JSON.parse and JSON.stringify both still
 // succeed at 20000 levels, so such a value gets past enqueue. A throw in normalizeEvent aborts the whole project batch
 // in the buffer flush (PROD-10530), so one unusable field must cost only that field. The result for every value that
-// did not throw is exactly String(value): this must not change any stored title or group, so no existing group splits.
+// did not throw is String(value) with any lone surrogate replaced by U+FFFD (see below), so for well-formed text it is
+// exactly String(value): this must not change any stored title or group, so no existing group splits.
+//
+// toWellFormed(): ClickHouse refuses a whole INSERT when a String column holds a lone high surrogate ("missing second
+// part of surrogate pair", measured on 24.8), which stalls the bucket the same way an unparseable timestamp does.
+// JSON.parse produces one from "\ud800", and so do the length caps (MAX_NORMALIZED_TEXT_LENGTH, MAX_USER_AGENT_LENGTH)
+// when they cut valid text between the two halves of an emoji. Every direct String column comes through here, through
+// normalizeExceptionValue or through the fingerprint join below. A hash was already computed from UTF-8 bytes, which
+// encode a lone surrogate as U+FFFD, so cleaning the text first changes no fingerprint; an explicit fingerprint is stored
+// as the group id itself, and an event carrying a lone surrogate there was refused by ClickHouse and never stored, so no
+// stored group can split either. Columns written as JSON.stringify output need nothing: it escapes a lone surrogate.
 function safeString<F extends string | null>(value: unknown, fallback: F): string | F {
   try {
-    return String(value);
+    return String(value).toWellFormed();
   } catch {
     return fallback;
   }
@@ -226,7 +237,8 @@ export function computeGroupFingerprint(payload: Record<string, unknown>): strin
     : [];
 
   if (explicitFingerprint.length > 0) {
-    return explicitFingerprint.join(":");
+    // Stored as the group id and fingerprint columns, so it must be well-formed (see safeString).
+    return explicitFingerprint.join(":").toWellFormed();
   }
 
   const exceptionValues = Array.isArray((payload.exception as Record<string, unknown> | undefined)?.values)

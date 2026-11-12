@@ -1,4 +1,5 @@
 import { describe, expect, test } from "bun:test";
+import type { NormalizedIngestEvent } from "@ekeeper/shared";
 import {
   computeGroupFingerprint,
   normalizeEvent,
@@ -431,6 +432,73 @@ describe("ingest helpers", () => {
       expect(Date.parse(stamp)).toBeLessThan(before + 60_000);
     }
     expect(event.breadcrumbs[1].timestamp).toBe("1731400000.5");
+  });
+
+  // ClickHouse refuses the whole INSERT when a String column holds a lone high surrogate (measured on 24.8: "Cannot parse
+  // escape sequence: missing second part of surrogate pair"), the same stall as an unparseable timestamp. JSON.parse
+  // produces one from "\ud800", and the length caps can make one out of valid text by cutting an emoji in half. Columns
+  // written as JSON.stringify output are not affected, because JSON.stringify escapes a lone surrogate; the live block in
+  // ingest-buffer.test.ts checks that on the engine. So the invariant is on the String columns insertEvents writes directly.
+  const loneSurrogate = "a\ud800b";
+  const stringColumns = (event: NormalizedIngestEvent) =>
+    [
+      event.eventId, event.groupId, event.fingerprint, event.title, event.message, event.severity, event.timestamp,
+      event.release, event.environment, event.userId, event.userEmail, event.userUsername, event.browser, event.device,
+      event.os, event.runtime,
+      ...event.breadcrumbs.flatMap((crumb) => [crumb.timestamp, crumb.category, crumb.level, crumb.message, crumb.type]),
+    ].filter((column): column is string => typeof column === "string");
+  // 2047 characters, then an emoji (two UTF-16 units) that MAX_NORMALIZED_TEXT_LENGTH cuts between its halves.
+  const emojiAtTheCap = `${"x".repeat(2047)}\u{1F600}yy`;
+  // The User-Agent is cut at 512 characters, and "Android 13; " plus 499 characters puts the emoji across that cut.
+  const emojiAtTheUserAgentCap = `Android 13; ${"m".repeat(499)}\u{1F600}yy`;
+  test.each<[string, Record<string, unknown>]>([
+    ["event_id", { event_id: loneSurrogate }],
+    ["level", { level: loneSurrogate }],
+    ["release", { release: loneSurrogate }],
+    ["environment", { environment: loneSurrogate }],
+    ["user.id", { user: { id: loneSurrogate } }],
+    ["user.email", { user: { email: loneSurrogate } }],
+    ["user.username", { user: { username: loneSurrogate } }],
+    ["the exception type", exceptionWith({ type: loneSurrogate, value: "v" })],
+    ["the exception value", exceptionWith({ type: "Error", value: loneSurrogate })],
+    ["a message with no exception", { message: loneSurrogate }],
+    ["an explicit fingerprint", { fingerprint: [loneSurrogate] }],
+    ["contexts.browser.name", { contexts: { browser: { name: loneSurrogate } } }],
+    ["contexts.device.model", { contexts: { device: { model: loneSurrogate } } }],
+    ["contexts.device.family", { contexts: { device: { family: loneSurrogate } } }],
+    ["contexts.os.name", { contexts: { os: { name: loneSurrogate } } }],
+    ["contexts.runtime.name", { contexts: { runtime: { name: loneSurrogate } } }],
+    ["a breadcrumb category", { breadcrumbs: [{ category: loneSurrogate }] }],
+    ["a breadcrumb level", { breadcrumbs: [{ level: loneSurrogate }] }],
+    ["a breadcrumb message", { breadcrumbs: [{ message: loneSurrogate }] }],
+    ["a breadcrumb type", { breadcrumbs: [{ type: loneSurrogate }] }],
+    ["a device model in the User-Agent", { request: { headers: { "User-Agent": `Mozilla/5.0 (Linux; Android 13; SM-${loneSurrogate} Build/TP1A; wv)` } } }],
+    ["an emoji the User-Agent cap cuts in half", { request: { headers: { "User-Agent": emojiAtTheUserAgentCap } } }],
+    ["an exception value with an emoji the length cap cuts in half", exceptionWith({ type: "Error", value: emojiAtTheCap })],
+    ["a message with an emoji the length cap cuts in half", { message: emojiAtTheCap }],
+  ])("a lone surrogate from %s is not written to a String column", (_label, payload) => {
+    const event = normalizeEvent("project_1", payload);
+
+    expect(stringColumns(event).filter((column) => !column.isWellFormed())).toEqual([]);
+  });
+
+  test("a lone surrogate is replaced with U+FFFD and a valid string comes back byte-identical", () => {
+    const event = normalizeEvent("project_1", {
+      user: { id: loneSurrogate, email: "caf\u00e9 \u{1F600}@example.com" },
+    });
+
+    expect(event.userId).toBe("a\ufffdb");
+    expect(event.userEmail).toBe("caf\u00e9 \u{1F600}@example.com");
+  });
+
+  // The fingerprint hash was already computed from UTF-8 bytes, which encode a lone surrogate as U+FFFD, so cleaning the
+  // text first changes no hash. An explicit fingerprint is stored as the group id itself, and an event carrying a lone
+  // surrogate there was refused by ClickHouse, so no stored group can split.
+  test("the group fingerprint is the same for a lone surrogate and for the U+FFFD it is replaced with", () => {
+    const fingerprintOf = (value: string) => computeGroupFingerprint(exceptionWith({ type: "Error", value }));
+
+    expect(fingerprintOf(loneSurrogate)).toBe(fingerprintOf("a\ufffdb"));
+    expect(computeGroupFingerprint({ fingerprint: [loneSurrogate] })).toBe("a\ufffdb");
   });
 
   test("parse envelope extracts event items", () => {

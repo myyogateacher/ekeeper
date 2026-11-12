@@ -416,6 +416,12 @@ describeLive("flushBufferedIngest against a real ClickHouse", () => {
     await admin.close();
   });
 
+  // Each test reads whole tables, so it starts from empty ones.
+  beforeEach(async () => {
+    await admin.command({ query: `TRUNCATE TABLE ${scratchDatabase}.events` });
+    await admin.command({ query: `TRUNCATE TABLE ${scratchDatabase}.breadcrumbs` });
+  });
+
   const rowsOf = async (table: string) =>
     (await (await admin.query({
       query: `SELECT event_id, toUnixTimestamp64Milli(timestamp) AS ms FROM ${scratchDatabase}.${table} ORDER BY event_id`,
@@ -451,6 +457,63 @@ describeLive("flushBufferedIngest against a real ClickHouse", () => {
     expect(msOf("evt_a")).toBe(Date.parse("2026-11-13T10:00:00.123Z"));
     expect(msOf("evt_b")).toBe(1731400000123);
     expect(Math.abs(msOf("evt_garbage") - receivedAfter)).toBeLessThan(60_000);
+  });
+
+  // The other String-column failure on the engine: ClickHouse refuses a lone high surrogate ("missing second part of
+  // surrogate pair"). One event carries it in every field that becomes a column, one more reaches it through a message and a
+  // device model, and one is valid text that the 2048 character cap cuts through an emoji. The columns written as
+  // JSON.stringify output must be accepted as they are, because JSON.stringify escapes a lone surrogate: the last
+  // assertions read them back from the engine to show it.
+  test("events with a lone surrogate in any field are stored with the events around them, each exactly once", async () => {
+    const lone = "a\ud800b";
+    const surrogates = {
+      event_id: "evt_surrogates",
+      level: lone,
+      release: lone,
+      environment: lone,
+      user: { id: lone, email: lone, username: lone },
+      exception: { values: [{ type: lone, value: lone, stacktrace: { frames: [{ filename: lone, function: lone }] } }] },
+      fingerprint: [lone],
+      tags: { [lone]: lone },
+      contexts: { browser: { name: lone }, device: { model: lone }, os: { name: lone }, runtime: { name: lone } },
+      breadcrumbs: [{ category: lone, level: lone, message: lone, type: lone, data: { [lone]: lone } }],
+    };
+    const throughMessageAndUserAgent = {
+      event_id: "evt_surr_message",
+      message: lone,
+      request: { headers: { "User-Agent": `Mozilla/5.0 (Linux; Android 13; SM-${lone} Build/TP1A; wv)` } },
+    };
+    const cutThroughAnEmoji = {
+      event_id: "evt_cap",
+      exception: { values: [{ type: "Error", value: `${"x".repeat(2047)}\u{1F600}yy` }] },
+    };
+    buckets.set(BUCKET, [
+      entry("project_a", goodEvent("evt_a")),
+      entry("project_m", surrogates),
+      entry("project_m", throughMessageAndUserAgent),
+      entry("project_m", cutThroughAnEmoji),
+      entry("project_b", goodEvent("evt_b")),
+    ]);
+
+    await flushBufferedIngest();
+    await flushBufferedIngest();
+
+    expect((await rowsOf("events")).map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_cap", "evt_surr_message", "evt_surrogates"]);
+    expect(buckets.has(BUCKET)).toBe(false);
+    const stored = (await (await admin.query({
+      query: `SELECT user_id, group_id, title, tags, contexts, exception, stacktrace, raw_payload FROM ${scratchDatabase}.events WHERE event_id = 'evt_surrogates'`,
+      format: "JSONEachRow",
+    })).json()) as Array<Record<string, string>>;
+    expect(stored[0].user_id).toBe("a\ufffdb");
+    expect(stored[0].group_id).toBe("a\ufffdb");
+    for (const column of ["tags", "contexts", "exception", "stacktrace", "raw_payload"]) {
+      expect(stored[0][column]).toContain("\\ud800");
+    }
+    const crumbs = (await (await admin.query({
+      query: `SELECT data FROM ${scratchDatabase}.breadcrumbs WHERE event_id = 'evt_surrogates'`,
+      format: "JSONEachRow",
+    })).json()) as Array<{ data: string }>;
+    expect(crumbs[0].data).toContain("\\ud800");
   });
 
   // The engine is the oracle for normalizeTimestamp's pattern list: a pattern that is too wide lets a string through that
