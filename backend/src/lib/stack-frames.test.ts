@@ -143,6 +143,12 @@ describe("replaceSourceContext", () => {
     expect(replaceSourceContext({ filename: "src/a.ts", lineno: 2, ...sdkLines }, null, 2)).toEqual({ filename: "src/a.ts", lineno: 2 });
   });
 
+  test("source text that is not a string, as a malformed map can hold, leaves a header only frame instead of throwing", () => {
+    for (const content of [5, {}, [], true, undefined]) {
+      expect(replaceSourceContext({ filename: "x", ...sdkLines }, content, 2)).toEqual({ filename: "x" });
+    }
+  });
+
   test("a line that is not in the text, or not a number, leaves a header only frame", () => {
     expect(replaceSourceContext({ filename: "x", ...sdkLines }, "a\nb", 9)).toEqual({ filename: "x" });
     expect(replaceSourceContext({ filename: "x", ...sdkLines }, "a\nb", "2")).toEqual({ filename: "x" });

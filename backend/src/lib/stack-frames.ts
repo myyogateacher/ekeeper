@@ -105,9 +105,11 @@ export function contextAround(content: string, line: number): SourceContext | nu
  * be wrong, so they are always dropped; without source text the frame is a header row. `line` is the mapped
  * (original) line number.
  */
-export function replaceSourceContext(frame: UnknownRecord, content: string | null, line: unknown): UnknownRecord {
+export function replaceSourceContext(frame: UnknownRecord, content: unknown, line: unknown): UnknownRecord {
   const { pre_context: _pre, context_line: _line, post_context: _post, ...rest } = frame;
-  const context = content !== null && typeof line === "number" ? contextAround(content, line) : null;
+  // `content` is an entry of the uploaded map's sourcesContent, parsed from JSON, so it is a string only when the
+  // build wrote one: null for a source without text, and anything at all in a malformed map.
+  const context = typeof content === "string" && typeof line === "number" ? contextAround(content, line) : null;
   return context ? { ...rest, ...context } : rest;
 }
 
