@@ -465,7 +465,11 @@ async function assembleArtifactBundle(ctx: Context) {
       checksum: payload.checksum,
       missingChunks,
     });
-    return ctx.json({ state: "not_found", missingChunks }, 409);
+    // 200, not 409. The sentry CLI that @sentry/vite-plugin 11.9.0 drives treats any non-2xx answer as a failed
+    // request ("API request failed: 409 Conflict") and stops, so with 409 it never reached the step that
+    // uploads the chunks named here. This is the answer to the first assemble call, made before any chunk is
+    // uploaded: the client uploads exactly missingChunks and then calls assemble again.
+    return ctx.json({ state: "not_found", missingChunks });
   }
 
   const chunkBuffers = payload.chunks.map((checksum) => new Uint8Array(readFileSync(chunkPath(checksum))));
@@ -517,8 +521,14 @@ async function assembleArtifactBundle(ctx: Context) {
     }
   }
 
+  // "ok", not "created": the bundle is fully assembled and its maps are saved before this response goes out.
+  // That client ends on "ok" in every mode, but on "created" only when it was not asked to wait (waitForOk /
+  // --wait). When it was, it keeps calling assemble until "ok", and the next call would answer not_found
+  // because assembling consumed the chunks, so it would spin until its own 5 minute deadline. missingChunks is
+  // always present because the client's response schema is state, missingChunks, detail.
   return ctx.json({
-    state: "created",
+    state: "ok",
+    missingChunks: [],
     artifactBundle: {
       checksum: payload.checksum,
       release: payload.version ?? null,
