@@ -168,6 +168,46 @@ describe("ingest helpers", () => {
     expect(computeGroupFingerprint(payload)).toBe("63cd16705fe9a466d97c6f62907a6c73");
   });
 
+  // The cap must not split a token that starts within MAX_TOKEN_SCAN_BACK (256) characters of it. A UUID cut in half
+  // by the cap is no longer a UUID, so two events that differ only in it would hash to two groups where, before the
+  // cap, they were one.
+  // Each case starts the volatile token itself at character 2040, so the cap at 2048 lands inside it; the indexOf
+  // assertion pins that, because a token starting after the cap would pass without exercising anything.
+  const fingerprintOf = (value: string) => computeGroupFingerprint({ exception: { values: [{ type: "Error", value }] } });
+  // Exactly `length` characters ending in a space, so whatever follows starts a new token.
+  const padTo = (length: number) => `${"word ".repeat(Math.ceil(length / 5)).slice(0, length - 1)} `;
+  const uuidA = "507d4605-d747-479e-9d6d-dd87e574bd26";
+  const uuidB = "43523cee-aae1-4305-9ec3-afdbb43affb8";
+  test.each([
+    ["a bare UUID", "", uuidA, uuidB, " then"],
+    ["a UUID inside a URL path", "https://myyogateacher.com/web-app-ssr/", uuidA, uuidB, "/assets/index.js then"],
+    ["a 32 character hex path segment", "https://myyogateacher.com/files/", "a".repeat(32), "b".repeat(32), "/page then"],
+  ])("two values over the cap that differ only in %s across the cap share one fingerprint", (_label, prefix, a, b, suffix) => {
+    const build = (token: string) => `${padTo(2040 - prefix.length)}${prefix}${token}${suffix} ${"x".repeat(500)}`;
+    expect(build(a).indexOf(a)).toBe(2040);
+    expect(fingerprintOf(build(a))).toBe(fingerprintOf(build(b)));
+  });
+
+  // The other side of the boundary: a token that is complete at the cap must be kept, not dropped with the next one.
+  test("a UUID that ends exactly at the cap is kept and replaced", () => {
+    const value = `${padTo(2048 - uuidA.length)}${uuidA} then ${"x".repeat(500)}`;
+    expect(value.indexOf(uuidA) + uuidA.length).toBe(2048);
+    expect(normalizeExceptionValue(value)).toEndWith("_uuid_");
+  });
+
+  // The scan back is bounded: a short lead-in followed by a long run with no spaces (a JSON body, a long URL) keeps
+  // the run, or every such error collapses into one group whose title is the lead-in alone.
+  test("a short lead-in followed by a long run with no spaces keeps the run, so different bodies stay apart", () => {
+    const body = (id: number) => `Unexpected response: ${JSON.stringify({ id, rows: "r".repeat(3000) })}`;
+    expect(normalizeExceptionValue(body(1))).toHaveLength(2048);
+    expect(fingerprintOf(body(1))).not.toBe(fingerprintOf(body(2)));
+  });
+
+  // "z", not a hex letter: LONG_HEX_SEGMENT_PATTERN would turn an all-hex value into "_hash_" and hide the length.
+  test("a value with no whitespace in the first 2048 characters is cut at the cap, not emptied", () => {
+    expect(normalizeExceptionValue("z".repeat(5000))).toHaveLength(2048);
+  });
+
   // Ingest is public to anyone holding a DSN and normalizeEvent runs on the single event loop in the buffer flush.
   // Before the cap, a 40k+40k hashed-asset value took 2.4 s and 20k nested braces 1.0 s (both quadratic),
   // and the time grows with the square of the length, so one crafted event froze ingest, the UI and MCP.

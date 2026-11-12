@@ -37,13 +37,40 @@ function normalizeUrl(value: string): string {
 // by it too (20k nested braces took 1.0 s). At 2048 characters the worst input costs a few milliseconds.
 // Why 2048: the longest message among the 500 newest stored events across all projects was 255 characters
 // (p99 114), so no real value is cut and no existing group splits. A value or frame filename that differs only
-// after this point now shares a group, and its stored message and title are cut here. Same idea as the
-// `.slice(-4)` on frames in computeGroupFingerprint, which already bounds what the fingerprint reads.
+// after the cut (see capAtTokenBoundary) now shares a group, and its stored message and title are cut there. Same
+// idea as the `.slice(-4)` on frames in computeGroupFingerprint, which already bounds what the fingerprint reads.
 const MAX_NORMALIZED_TEXT_LENGTH = 2048;
 
+// How far back from the cap capAtTokenBoundary looks for whitespace. Covers every token the patterns replace in
+// practice: a UUID is 36 characters, a hex segment or hashed asset name well under 100, a URL path rarely over 256.
+// A run with no spaces longer than this is far more likely a body (JSON, a URL query) than one token, and keeping
+// its text separates errors that a cut back to the last space would merge.
+const MAX_TOKEN_SCAN_BACK = 256;
+
+// Cuts before the token that crosses the cap instead of through it. A UUID, hex segment or URL cut in half no
+// longer matches the patterns in normalizeVolatileText, so two events differing only in that token would land in
+// two groups where, uncut, they share one. Whitespace marks the token boundary because none of those patterns
+// matches across it (URL_PATTERN stops at \s). With no whitespace in the last MAX_TOKEN_SCAN_BACK characters the
+// value is cut at the cap: an unbounded scan would cut "Unexpected response: <JSON body with no spaces>" down to
+// "Unexpected response:" and merge every such error into one group with no detail left. The cut position still
+// moves when a volatile token before it varies in length (a query string normalizeUrl drops, a pointer's digit
+// count), so values over the cap can split on that; none are seen today (longest stored value 255 characters).
+// A backwards scan rather than a regex like /\S*$/, which backtracks quadratically on a long run of non-space
+// characters.
+function capAtTokenBoundary(raw: string): string {
+  if (raw.length <= MAX_NORMALIZED_TEXT_LENGTH) {
+    return raw;
+  }
+  const floor = MAX_NORMALIZED_TEXT_LENGTH - MAX_TOKEN_SCAN_BACK;
+  let end = MAX_NORMALIZED_TEXT_LENGTH;
+  while (end > floor && !/\s/.test(raw[end])) {
+    end -= 1;
+  }
+  return raw.slice(0, /\s/.test(raw[end]) ? end : MAX_NORMALIZED_TEXT_LENGTH);
+}
+
 function normalizeVolatileText(raw: string): string {
-  return raw
-    .slice(0, MAX_NORMALIZED_TEXT_LENGTH)
+  return capAtTokenBoundary(raw)
     .replace(POINTER_PATTERN, "0x_")
     .replace(URL_PATTERN, (url) => normalizeUrl(url))
     .replace(UUID_PATTERN, "_uuid_")
