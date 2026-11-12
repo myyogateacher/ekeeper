@@ -1,26 +1,30 @@
 // Issue detail. Follows the shape of ErrorsPage.tsx (the canonical page): rules live in lib/issue-detail.ts
 // with tests, the selected event lives in the URL (?event=), and writes go through useIssueWorkflow.
 import { useMemo, useState, type ReactNode } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useLocation, useSearchParams } from "react-router-dom";
-import { ChevronLeft, Download, Link as LinkIcon } from "lucide-react";
-import type { ErrorEventDetail } from "@ekeeper/shared";
+import { ChevronDown, ChevronLeft, ChevronRight, ChevronUp, Download, Link as LinkIcon } from "lucide-react";
+import type { DuplicateIssueGroup, ErrorEventDetail, EventNavigation, IssueStats } from "@ekeeper/shared";
 import { api } from "@/lib/api";
 import { isApiStatus } from "@/lib/api-error";
 import {
   BREADCRUMB_PREVIEW,
   breadcrumbOffset,
   breadcrumbPreview,
+  closedNote,
   displayText,
   eventLevel,
   eventNav,
   exceptionParts,
   framesCrashFirst,
-  occurrenceStats,
+  hourlyChart,
   parseJsonStructure,
   parseMaybeJson,
+  similarSummary,
 } from "@/lib/issue-detail";
+import { applyBrowserFilters, issuePosition, listOriginQuery, type IssuePosition, type IssueSet } from "@/lib/issue-list";
 import { canWriteProject } from "@/lib/permissions";
+import { crashLocation } from "@/lib/stack-trace";
 import { formatAbsolute, formatDayTime, formatRelative } from "@/lib/time";
 import { pluralize } from "@/lib/plural";
 import { idsFromIssuePath, issuePath } from "@/lib/url";
@@ -29,8 +33,10 @@ import { useMe } from "@/components/session";
 import { AssignMenu } from "@/components/AssignMenu";
 import { StatusControl } from "@/components/StatusControl";
 import { useIssueWorkflow } from "@/components/workflow";
+import { issueSetKey } from "@/components/useIssueSet";
 import { EmptyState } from "@/components/EmptyState";
 import { SeverityDot } from "@/components/Severity";
+import { StackTrace } from "@/components/StackTrace";
 import { copyText } from "@/components/clipboard";
 
 type UnknownRecord = Record<string, unknown>;
@@ -46,7 +52,7 @@ export function ErrorDetailPage() {
   // The ids come from the raw pathname, decoded once, not from useParams: the router decodes a %2F in a param
   // twice, so an id with a literal "%2F" in it opened as "isn't available". An unreadable pathname leaves both
   // empty, which disables the query and shows the same "isn't available" state.
-  const { pathname } = useLocation();
+  const { pathname, state } = useLocation();
   const { projectId, groupId } = idsFromIssuePath(pathname) ?? { projectId: "", groupId: "" };
   const [searchParams, setSearchParams] = useSearchParams();
   const eventId = searchParams.get("event") ?? undefined;
@@ -65,16 +71,38 @@ export function ErrorDetailPage() {
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const now = useMemo(() => Date.now(), [data]);
 
+  // "Issue N of M" steps through the list the user came from. The row link left that list's query string in the
+  // router state, and its rows are read back from the query cache, in the order and with the filters the list
+  // drew (applyBrowserFilters is the list's own function). Nothing is fetched: a deep link, or a reload that
+  // emptied the cache, has no list to step through, so the stepper is simply absent. queryClient.getQueryData
+  // is a read of the cache with no subscription, which keeps this page from becoming an observer of a list it
+  // does not own (an observer here would be refetched by the "errors" invalidation after a status change).
+  const queryClient = useQueryClient();
+  const position = useMemo(() => {
+    const origin = listOriginQuery(state);
+    const rows = origin ? queryClient.getQueryData<IssueSet>(issueSetKey(origin))?.rows : undefined;
+    return origin && rows ? issuePosition(applyBrowserFilters(rows, origin, now), projectId, groupId) : null;
+  }, [state, queryClient, now, projectId, groupId]);
+
   const back = (
     <Link to="/errors" className="inline-flex items-center gap-1 text-[13px] text-muted hover:text-fg max-[720px]:min-h-11">
       <ChevronLeft className="h-4 w-4" aria-hidden /> Issues
     </Link>
   );
 
+  // Shown in every state, loading and not-available included: the position does not depend on this issue's data,
+  // and stepping on from an issue that failed to load is the way out of it.
+  const topBar = (
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+      {back}
+      {position ? <IssueStepper position={position} listState={state} /> : null}
+    </div>
+  );
+
   if (isLoading) {
     return (
       <div className="flex flex-col gap-4" aria-busy>
-        {back}
+        {topBar}
         <div className="h-7 w-2/3 rounded bg-raised" />
         <div className="card h-40" />
         <div className="card h-80" />
@@ -86,7 +114,7 @@ export function ErrorDetailPage() {
   if ((isError && isApiStatus(error, 403, 404)) || (!isError && !data?.error)) {
     return (
       <div className="flex flex-col gap-4">
-        {back}
+        {topBar}
         <div className="card">
           <EmptyState title="This issue isn't available" action={<Link className="btn" to="/errors">Back to issues</Link>}>
             It may have been removed, or you may not have access to its project.
@@ -98,7 +126,7 @@ export function ErrorDetailPage() {
   if (isError || !data?.error) {
     return (
       <div className="flex flex-col gap-4">
-        {back}
+        {topBar}
         <div className="card">
           <EmptyState title="Couldn't load this issue" action={<button type="button" className="btn" onClick={() => void refetch()}>Try again</button>} />
         </div>
@@ -117,16 +145,16 @@ export function ErrorDetailPage() {
 
   return (
     <div className={`flex flex-col gap-4 ${isPlaceholderData ? "opacity-70" : ""}`}>
-      {back}
-      <Header event={event} projectId={projectId} projectName={projectName} canWrite={canWriteProject(me, projectId)} meId={me.user.id} loading={isPlaceholderData} />
-      <Stats occurrences={data.occurrences} now={now} />
-      <EventBar event={event} projectId={projectId} occurrences={data.occurrences} onSelect={selectEvent} />
+      {topBar}
+      <Header event={event} projectId={projectId} projectName={projectName} canWrite={canWriteProject(me, projectId)} meId={me.user.id} loading={isPlaceholderData} now={now} />
+      <Stats stats={data.stats} affectedUsers={event.affectedUsers} now={now} />
+      <EventBar event={event} navigation={data.navigation} onSelect={selectEvent} />
       <div className="grid min-w-0 gap-4 [grid-template-columns:minmax(0,1fr)_300px] max-[1100px]:[grid-template-columns:minmax(0,1fr)]">
         <div className="flex min-w-0 flex-col gap-4">
           <StackTrace event={event} />
           <Breadcrumbs event={event} />
         </div>
-        <Rail event={event} similar={data.duplicateGroups} projectId={projectId} />
+        <Rail event={event} similar={data.duplicateGroups} projectId={projectId} listState={state} />
       </div>
     </div>
   );
@@ -139,6 +167,7 @@ function Header({
   canWrite,
   meId,
   loading,
+  now,
 }: {
   event: ErrorEventDetail;
   projectId: string;
@@ -147,12 +176,15 @@ function Header({
   meId: string;
   /** The next event of this issue is loading and the previous one is still shown: writes wait for it. */
   loading: boolean;
+  now: number;
 }) {
   const workflow = useIssueWorkflow();
   // Same "<type>: <message>" the list shows, built from the parts ingest built the title from (ingest.ts:191).
   const titleType = exceptionParts(event.exception).type;
   const titleMessage = event.message;
   const level = eventLevel(event.rawPayload);
+  const closed = closedNote(event.state, event.closedAt, now);
+  const crash = useMemo(() => crashLocation(framesCrashFirst(event.stacktrace, event.exception)), [event.stacktrace, event.exception]);
   const change = (state: typeof event.state) =>
     workflow.mutate({ projectId, groupId: event.groupId, payload: { state }, previousState: event.state });
 
@@ -162,6 +194,8 @@ function Header({
         <span className="font-semibold">{titleType}</span>
         {titleMessage ? <span className="font-normal">: {titleMessage}</span> : null}
       </h1>
+      {closed ? <p className="m-0 text-xs text-muted">{closed}</p> : null}
+      {crash ? <div className="mono break-all text-muted">{crash}</div> : null}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-[13px] text-muted">
         <span className={`tag ${level === "fatal" ? "bg-fatal/10 text-fatal" : "bg-raised text-fg"}`}>
           <SeverityDot level={level} />
@@ -176,7 +210,6 @@ function Header({
         ) : (
           <span>Not on GitHub yet</span>
         )}
-        {event.state === "closed" ? <span>Reopens on its own if a new event arrives.</span> : null}
         <span className="ml-auto flex flex-wrap items-center gap-2 max-[720px]:ml-0">
           {canWrite ? (
             <>
@@ -200,41 +233,76 @@ function Header({
   );
 }
 
-function Stats({ occurrences, now }: { occurrences: Array<{ eventId: string; timestamp: string }>; now: number }) {
-  const stats = occurrenceStats(occurrences, now);
-  const peak = Math.max(0, ...stats.hourly);
+function IssueStepper({ position, listState }: { position: IssuePosition; listState: unknown }) {
+  // The neighbour was already filtered to ids a URL can carry (issuePosition), so a target always has a path.
+  // The router state is carried on, so stepping on keeps stepping through the same list.
+  const step = (target: IssuePosition["previous"], label: string, icon: ReactNode) => {
+    const href = target && issuePath(target.projectId, target.groupId);
+    return href ? (
+      <Link className="btn btn-icon" to={href} state={listState} aria-label={label}>
+        {icon}
+      </Link>
+    ) : (
+      <button type="button" className="btn btn-icon" disabled aria-label={label}>
+        {icon}
+      </button>
+    );
+  };
+  return (
+    <span className="ml-auto flex items-center gap-1.5">
+      <span className="text-[13px] text-muted max-[720px]:hidden">
+        Issue {formatNumber(position.position)} of {formatNumber(position.total)}
+      </span>
+      {step(position.previous, "Previous issue", <ChevronUp className="h-4 w-4" aria-hidden />)}
+      {step(position.next, "Next issue", <ChevronDown className="h-4 w-4" aria-hidden />)}
+    </span>
+  );
+}
+
+function Stats({ stats, affectedUsers, now }: { stats: IssueStats; affectedUsers: number; now: number }) {
+  // The bars are the server's own hourly counts, so they add up to the Events 24h figure beside them.
+  const chart = hourlyChart(stats.hourly24h);
   return (
     <section className="card overflow-hidden" aria-label="Issue stats">
-      <div className="grid gap-px border-b border-line bg-line [grid-template-columns:repeat(4,minmax(0,1fr))] max-[860px]:[grid-template-columns:repeat(2,minmax(0,1fr))]">
-        <Stat label="Last 24h" value={formatNumber(stats.count24h)} />
-        <Stat label="Last 7 days" value={formatNumber(stats.count7d)} />
+      {/* Five cells: Users affected is the third. Under 860px it is two columns and the last cell spans both,
+          so the odd cell never leaves a hole that shows the grid's line colour. */}
+      <div className="grid gap-px border-b border-line bg-line [grid-template-columns:repeat(5,minmax(0,1fr))] max-[860px]:[grid-template-columns:repeat(2,minmax(0,1fr))] max-[860px]:[&>:last-child]:col-span-2">
+        <Stat label="Events 24h" value={formatNumber(stats.events24h)} />
+        <Stat label="Events 7d" value={formatNumber(stats.events7d)} />
+        <Stat label="Users affected" value={formatNumber(affectedUsers)} />
         <Stat label="First seen" value={formatRelative(stats.firstSeen, now)} detail={formatAbsolute(stats.firstSeen)} />
         <Stat label="Last seen" value={formatRelative(stats.lastSeen, now)} detail={formatAbsolute(stats.lastSeen)} />
       </div>
       <div className="px-4 pb-2.5 pt-3">
         <div className="flex flex-wrap justify-between gap-x-3 gap-y-1 text-xs text-muted">
           <span>Events per hour, last 24h</span>
-          <span>{peak > 0 ? `Peak ${formatNumber(peak)} per hour` : "No events in the last 24 hours"}</span>
+          {chart ? <span>{chart.peak > 0 ? `Peak ${formatNumber(chart.peak)} per hour` : "No events in the last 24 hours"}</span> : null}
         </div>
-        <div
-          className="mt-2 flex h-14 items-end gap-[3px] border-b border-line"
-          role="img"
-          aria-label={`Events per hour over the last 24 hours, ${peak > 0 ? `peak ${peak}` : "none"}`}
-        >
-          {stats.hourly.map((count, index) => (
-            <span
-              key={index}
-              title={`${count} ${pluralize(count, "event")}, ${23 - index}h ago`}
-              className={`min-w-[2px] flex-1 rounded-t-sm ${count ? "bg-muted" : "bg-line"}`}
-              style={{ height: `${count ? Math.max(8, (count / peak) * 100) : 4}%` }}
-            />
-          ))}
-        </div>
-        {/* The first bar starts 24 hours before now: occurrenceStats buckets by whole hours counted back from now. */}
-        <div className="mt-1 flex justify-between text-[11px] text-muted">
-          <span>{formatDayTime(now - 24 * 3_600_000)}</span>
-          <span>now</span>
-        </div>
+        {chart ? (
+          <>
+            <div
+              className="mt-2 flex h-14 items-end gap-[3px] border-b border-line"
+              role="img"
+              aria-label={`Events per hour over the last 24 hours, ${chart.peak > 0 ? `peak ${chart.peak}` : "none"}`}
+            >
+              {chart.bars.map((count, index) => (
+                <span
+                  key={index}
+                  title={`${count} ${pluralize(count, "event")}, ${23 - index}h ago`}
+                  className={`min-w-[2px] flex-1 rounded-t-sm ${count ? "bg-muted" : "bg-line"}`}
+                  style={{ height: `${count ? Math.max(8, (count / chart.peak) * 100) : 4}%` }}
+                />
+              ))}
+            </div>
+            {/* Bar i covers the hour from (24 - i) to (23 - i) hours before the response, so the first bar starts 24 hours back. */}
+            <div className="mt-1 flex justify-between text-[11px] text-muted">
+              <span>{formatDayTime(now - 24 * 3_600_000)}</span>
+              <span>now</span>
+            </div>
+          </>
+        ) : (
+          <p className="m-0 mt-2 text-[13px] text-muted">Hourly counts are unavailable for this issue.</p>
+        )}
       </div>
     </section>
   );
@@ -252,16 +320,14 @@ function Stat({ label, value, detail }: { label: string; value: string; detail?:
 
 function EventBar({
   event,
-  projectId,
-  occurrences,
+  navigation,
   onSelect,
 }: {
   event: ErrorEventDetail;
-  projectId: string;
-  occurrences: Array<{ eventId: string; timestamp: string }>;
+  navigation: EventNavigation | null;
   onSelect: (eventId: string | null) => void;
 }) {
-  const nav = eventNav(occurrences, event.eventId);
+  const nav = eventNav(navigation, event.eventId);
   const download = () => {
     const blob = new Blob([JSON.stringify(parseMaybeJson(event.rawPayload, {}), null, 2)], { type: "application/json" });
     const url = URL.createObjectURL(blob);
@@ -276,13 +342,18 @@ function EventBar({
   const eventUrl = `${window.location.origin}${window.location.pathname}?${new URLSearchParams({ event: event.eventId })}`;
 
   return (
-    <div className="flex flex-wrap items-center gap-2 text-[13px]">
+    <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-[13px]">
       <span className="text-muted">
-        Event {nav.index >= 0 ? formatNumber(nav.index + 1) : "?"} of {formatNumber(nav.total)}
+        Event {nav.position !== null ? formatNumber(nav.position) : "?"} of {nav.total !== null ? formatNumber(nav.total) : "?"}
         <span aria-hidden> · </span>
         {formatAbsolute(event.timestamp)}
       </span>
-      <span className="flex gap-1">
+      {/* The first 8 characters of the event id, enough to tell two events apart in a chat. The full id is the
+          tooltip and is in Copy link. An SDK can send any string as an id, so nothing here assumes its length. */}
+      <span className="mono text-muted" title={event.eventId}>
+        {event.eventId.slice(0, 8)}
+      </span>
+      <span className="flex gap-1 max-[720px]:basis-full">
         {(
           [
             ["Latest", nav.latest],
@@ -291,8 +362,10 @@ function EventBar({
             ["Oldest", nav.oldest],
           ] as const
         ).map(([label, target]) => (
-          <button key={label} type="button" className="btn btn-sm" disabled={!target} onClick={() => onSelect(target)}>
+          <button key={label} type="button" className="btn btn-sm max-[720px]:flex-1" disabled={!target} onClick={() => onSelect(target)}>
+            {label === "Newer" ? <ChevronLeft className="h-3.5 w-3.5" aria-hidden /> : null}
             {label}
+            {label === "Older" ? <ChevronRight className="h-3.5 w-3.5" aria-hidden /> : null}
           </button>
         ))}
       </span>
@@ -305,41 +378,6 @@ function EventBar({
         </button>
       </span>
     </div>
-  );
-}
-
-function StackTrace({ event }: { event: ErrorEventDetail }) {
-  const frames = framesCrashFirst(event.stacktrace, event.exception);
-  return (
-    <section className="card" aria-labelledby="stacktrace-title">
-      <div className="card-head">
-        <h2 id="stacktrace-title" className="m-0 text-sm font-semibold">Stack trace</h2>
-        <span className="text-xs text-muted">crash site first</span>
-        {event.sourceMapApplied ? <span className="ml-auto text-xs text-muted">Source mapped, release {event.sourceMapRelease ?? "unknown"}</span> : null}
-      </div>
-      {!event.sourceMapApplied && frames.length > 0 ? (
-        <p className="warn-box m-3">
-          No source map matched this event, so frames show the minified file and position. Upload source maps for this release in Settings.
-        </p>
-      ) : null}
-      {frames.length === 0 ? (
-        <p className="px-4 py-6 text-[13px] text-muted">This event has no stack trace.</p>
-      ) : (
-        <ol className="m-0 list-none p-0">
-          {frames.map((frame, index) => (
-            <li key={index} className={`flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-b border-line px-4 py-2 last:border-b-0 ${index === 0 ? "bg-raised" : ""}`}>
-              <span className="mono min-w-0 break-all font-semibold">{displayText(frame.function) || "?"}</span>
-              <span className="mono min-w-0 flex-1 break-all text-muted">
-                {displayText(frame.filename) || "unknown file"}
-                {frame.lineno !== undefined ? `:${displayText(frame.lineno)}` : ""}
-                {frame.colno !== undefined ? `:${displayText(frame.colno)}` : ""}
-              </span>
-              {frame.deobfuscated ? <span className="tag bg-closed/10 text-closed">mapped</span> : null}
-            </li>
-          ))}
-        </ol>
-      )}
-    </section>
   );
 }
 
@@ -384,10 +422,13 @@ function Rail({
   event,
   similar,
   projectId,
+  listState,
 }: {
   event: ErrorEventDetail;
-  similar: Array<{ groupId: string; message: string; events: number; lastSeen: string }>;
+  similar: DuplicateIssueGroup[];
   projectId: string;
+  /** Router state of the list the user came from, carried onto a similar issue's link so Issue N of M keeps working. */
+  listState: unknown;
 }) {
   const raw = parseMaybeJson<UnknownRecord>(event.rawPayload, {});
   const user = parseMaybeJson<UnknownRecord>(raw.user, {});
@@ -421,22 +462,23 @@ function Rail({
         {Object.keys(tags).length ? <KeyValues record={tags} /> : <p className="m-0 text-[13px] text-muted">No tags.</p>}
       </RailCard>
       {similar.length ? (
-        <RailCard title="Similar issues">
+        <RailCard title="Similar issues" note={`${formatNumber(similar.length)} with the same message`}>
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {similar.map((group) => {
               const href = issuePath(projectId, group.groupId);
+              // The title, not the message: the backend returns groups whose message is equal once ids and URLs
+              // are normalized (queryDuplicateIssueGroups), so the messages read alike row after row. The title
+              // adds the exception type, which is what tells them apart.
               return (
                 <li key={group.groupId} className="text-[13px]">
                   {href ? (
-                    <Link className="block break-words hover:text-accent max-[720px]:min-h-11" to={href}>
-                      {group.message}
+                    <Link className="block break-words hover:text-accent max-[720px]:min-h-11" to={href} state={listState}>
+                      {group.title}
                     </Link>
                   ) : (
-                    <span className="block break-words">{group.message}</span>
+                    <span className="block break-words">{group.title}</span>
                   )}
-                  <span className="text-xs text-muted">
-                    {formatNumber(group.events)} {pluralize(group.events, "event")} · last {formatRelative(group.lastSeen, Date.now())}
-                  </span>
+                  <span className="break-words text-xs text-muted">{similarSummary(group)}</span>
                 </li>
               );
             })}
@@ -450,10 +492,13 @@ function Rail({
   );
 }
 
-function RailCard({ title, children }: { title: string; children: ReactNode }) {
+function RailCard({ title, note, children }: { title: string; note?: string; children: ReactNode }) {
   return (
     <section className="card p-4">
-      <h2 className="m-0 mb-2.5 text-xs font-semibold text-muted">{title}</h2>
+      <div className="mb-2.5 flex flex-wrap items-baseline gap-x-2">
+        <h2 className="m-0 text-xs font-semibold text-muted">{title}</h2>
+        {note ? <span className="text-xs text-muted">{note}</span> : null}
+      </div>
       {children}
     </section>
   );

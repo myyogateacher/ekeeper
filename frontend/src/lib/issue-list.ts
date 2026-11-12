@@ -1,5 +1,6 @@
 import type { ErrorGroupSummary } from "@ekeeper/shared";
 import { ageMs, localDayRange, parseServerTime } from "./time.ts";
+import { issuePath } from "./url.ts";
 
 // Pure logic behind the issues list: URL state, saved views, what goes to the API versus the browser,
 // paging, merging and the sidebar counts. The page and the shell are thin readers of this module.
@@ -286,7 +287,7 @@ export interface ListStats {
   events7d: number;
 }
 
-/** Users affected is left out on purpose: distinct users cannot be summed across groups. */
+/** Users affected is left out on purpose: distinct users cannot be summed across groups (see affectedUsersScope). */
 export function listStats(rows: ErrorGroupSummary[], now: number): ListStats {
   return {
     issues: rows.length,
@@ -384,4 +385,60 @@ export function stepRow(current: number, delta: 1 | -1, length: number): number 
   if (length === 0) return -1;
   if (current < 0) return delta === 1 ? 0 : length - 1;
   return Math.min(length - 1, Math.max(0, current + delta));
+}
+
+export interface IssueKey {
+  projectId: string;
+  groupId: string;
+}
+
+/**
+ * The issues the list header's "N users affected" is asked about: exactly the rows on screen, or null when the
+ * figure must not be shown. Distinct users cannot be summed across groups (one user can hit several), so the
+ * count comes from the server over this set (POST /api/errors/affected-users) and the client never adds
+ * per-row counts. Null while the list is loading (`set` undefined), when it holds only the busiest 500 of a
+ * longer list (`truncated`, so the figure would count a different set than the title promises), when its pages
+ * disagreed (`complete` false), and when no row is left to ask about.
+ */
+export function affectedUsersScope(set: IssueSet | undefined, rows: ErrorGroupSummary[]): IssueKey[] | null {
+  if (!set || set.truncated || !set.complete || rows.length === 0) return null;
+  return rows.map(({ projectId, groupId }) => ({ projectId, groupId }));
+}
+
+/**
+ * What a list row's link carries in its router state, so the issue page can step through the list the user
+ * came from. The state is the list's own query string, not the rows: the rows are read back from the query
+ * cache, which keeps the order and filters exactly what the list drew. A deep link has no state, so the issue
+ * page shows no "Issue N of M".
+ */
+export function listOriginState(query: ListQuery): { list: string } {
+  return { list: serializeListQuery(query).toString() };
+}
+
+/** The list query a link's router state names, or null when it carries none (a deep link, a reload before any list). */
+export function listOriginQuery(state: unknown): ListQuery | null {
+  const list = typeof state === "object" && state !== null ? (state as { list?: unknown }).list : undefined;
+  return typeof list === "string" ? parseListQuery(new URLSearchParams(list)) : null;
+}
+
+export interface IssuePosition {
+  /** 1 is the first row. */
+  position: number;
+  total: number;
+  previous: IssueKey | null;
+  next: IssueKey | null;
+}
+
+/**
+ * Where an issue sits in the rows the list showed, or null when it is not among them (it was filtered out, or
+ * the cache holds another list). Rows whose id no URL path can carry ("." and "..", see issuePath) are left
+ * out first: they render without a link in the list, and keeping one as a neighbour would put a disabled
+ * Next in the middle of the list, so stepping would stop there.
+ */
+export function issuePosition(rows: ErrorGroupSummary[], projectId: string, groupId: string): IssuePosition | null {
+  const steppable = rows.filter((row) => issuePath(row.projectId, row.groupId) !== null);
+  const index = steppable.findIndex((row) => row.projectId === projectId && row.groupId === groupId);
+  if (index < 0) return null;
+  const key = (row: ErrorGroupSummary | undefined): IssueKey | null => (row ? { projectId: row.projectId, groupId: row.groupId } : null);
+  return { position: index + 1, total: steppable.length, previous: key(steppable[index - 1]), next: key(steppable[index + 1]) };
 }
