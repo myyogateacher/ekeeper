@@ -3,6 +3,7 @@ import type {
   AffectedUsersResponse,
   ErrorDetailResponse,
   ErrorGroupSummary,
+  IngestStatus,
   IssueState,
   MeResponse,
   MinimapArtifact,
@@ -183,6 +184,7 @@ export const api = {
       method: "POST",
       body: JSON.stringify({ groups } satisfies AffectedUsersRequest),
     }),
+  ingestStatus: (projectId: string) => request<IngestStatus>(path`/api/projects/${projectId}/ingest-status`),
   updateIssueWorkflow: (projectId: string, groupId: string, payload: { state?: IssueState; assignedUserId?: string | null }) =>
     request<{ issue: ErrorGroupSummary | undefined }>(path`/api/projects/${projectId}/errors/${groupId}/workflow`, {
       method: "PATCH",
