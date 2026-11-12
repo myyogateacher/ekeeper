@@ -59,16 +59,22 @@ export async function dropCachedQueries(client: QueryClient): Promise<void> {
   await Promise.all([reset, client.refetchQueries({ queryKey: SESSION_KEY })]);
 }
 
-/** What a tab tells the others: the id of the user it is signed in as, or null when it is signed out. */
+/**
+ * What a tab tells the others: the id of the user it is signed in as, or null when it is signed out.
+ * `loggedOut` is set only by the Log out button, so a tab that hears it forgets its remembered page; a
+ * session that merely expired also reads as userId null, and must keep its page.
+ */
 export interface SessionMessage {
   userId: string | null;
+  loggedOut?: true;
 }
 
 /** Only a message that names a user id or null is read; anything else (another version's shape) is ignored. */
 export function parseSessionMessage(data: unknown): SessionMessage | null {
   if (data === null || typeof data !== "object" || !("userId" in data)) return null;
   const { userId } = data;
-  return userId === null || typeof userId === "string" ? { userId } : null;
+  if (userId !== null && typeof userId !== "string") return null;
+  return "loggedOut" in data && data.loggedOut === true ? { userId, loggedOut: true } : { userId };
 }
 
 /** True when this tab holds data for a different user than the one the message names, signed out included. */

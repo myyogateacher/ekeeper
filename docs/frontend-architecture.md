@@ -25,7 +25,7 @@ Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.
 | `/errors` | Issues list, the home page. Filters, search, sort and range live in the query string. |
 | `/errors/:projectId/:groupId` | Issue detail. `?event=<eventId>` selects an event. GitHub issue bodies link here, so the path is fixed. |
 | `/settings/:section` | `projects`, `members`, `source-maps`, `github`, `mcp`, `server` |
-| `/`, `/dashboard`, unknown | Redirect to `/errors`. The backend lands every sign-in on `/dashboard`, which restores the page the user was sent away from. |
+| `/`, `/dashboard`, unknown | Redirect to `/errors`. The backend lands every sign-in on `/dashboard`, which restores the page the user was sent away from when their session expired; Log out, here or in another tab, forgets it. |
 | `/projects`, `/users`, `/minimaps`, `/settings` | Redirect to their Settings section. |
 
 ## Theme and styles

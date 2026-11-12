@@ -6,8 +6,8 @@ import { EmptyState } from "@/components/EmptyState";
 import { RouteErrorBoundary } from "@/components/RouteErrorBoundary";
 import { api, meQuery } from "@/lib/api";
 import { endSession } from "@/lib/session";
-import { useSessionSync } from "@/components/useSessionSync";
-import { clearPathAfterLogin, peekPathAfterLogin, rememberPathForLogin } from "@/lib/after-login";
+import { announceLogout, useSessionSync } from "@/components/useSessionSync";
+import { clearPathAfterLogin, forgetPathAfterLogout, peekPathAfterLogin, rememberPathForLogin } from "@/lib/after-login";
 import { ErrorDetailPage } from "@/pages/ErrorDetailPage";
 import { ErrorsPage } from "@/pages/ErrorsPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -57,12 +57,15 @@ function ProtectedLayout() {
       user={data.user}
       onLogout={async () => {
         await api.logout();
-        // In-flight requests are cancelled first so a late response cannot repopulate the cache endSession
-        // just emptied. An explicit logout also forgets the remembered page: unlike an expiry, whoever signs in
-        // next on this browser is not coming back to it.
+        // The page is forgotten first, and stays forgotten: endSession below makes the layout re-render on
+        // this page before the navigation lands, and that render used to remember it again. An explicit logout
+        // is not an expiry, so whoever signs in next on this browser is not coming back to it; other tabs are
+        // told so they forget theirs. In-flight requests are cancelled so a late response cannot repopulate the
+        // cache endSession empties.
+        forgetPathAfterLogout();
+        announceLogout();
         await queryClient.cancelQueries();
         endSession(queryClient);
-        clearPathAfterLogin();
         navigate("/login", { replace: true });
       }}
     >

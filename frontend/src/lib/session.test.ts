@@ -58,6 +58,9 @@ test("a session message from another tab drops the cache unless it names the sam
 test("a malformed session message is ignored, not read as a sign out", () => {
   assert.deepEqual(parseSessionMessage({ userId: "u1" }), { userId: "u1" });
   assert.deepEqual(parseSessionMessage({ userId: null }), { userId: null });
+  assert.deepEqual(parseSessionMessage({ userId: null, loggedOut: true }), { userId: null, loggedOut: true });
+  // Only an explicit true marks a logout; a sign out that merely looks like one stays a plain expiry.
+  assert.deepEqual(parseSessionMessage({ userId: null, loggedOut: "yes" }), { userId: null });
   for (const junk of [null, undefined, "u1", 7, [], {}, { userId: 7 }, { userId: undefined }]) {
     assert.equal(parseSessionMessage(junk), null, JSON.stringify(junk));
   }

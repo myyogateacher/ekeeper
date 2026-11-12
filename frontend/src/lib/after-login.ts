@@ -15,8 +15,26 @@ export function isLandingPath(path: string): boolean {
   return pathname === "/dashboard" || pathname === "/login";
 }
 
+// Set once this tab's user signs out on purpose, here or in another tab. Module state and not sessionStorage:
+// it has to end when the page reloads, and Google sign-in is a full page load, so the next sign-in starts
+// clean; sessionStorage would survive that reload and block the remembering it is meant to allow.
+let signedOutOnPurpose = false;
+
+/**
+ * An explicit logout: forget the remembered page and refuse to remember another until the page reloads.
+ * The block matters because ProtectedLayout remembers the page while rendering: logging out sets the session
+ * to null, the layout re-renders on the old page before the /login navigation lands, and without the block
+ * that render wrote the page back right after it was cleared. The same happened in an idle tab that learned of
+ * another tab's logout, and the next user to sign in followed it to the previous user's last page. An expired
+ * session (a 401) never calls this, so it still remembers the page, which is the point of remembering.
+ */
+export function forgetPathAfterLogout(): void {
+  signedOutOnPurpose = true;
+  clearPathAfterLogin();
+}
+
 export function rememberPathForLogin(path: string): void {
-  if (!isAppPath(path) || isLandingPath(path)) {
+  if (signedOutOnPurpose || !isAppPath(path) || isLandingPath(path)) {
     return;
   }
   try {

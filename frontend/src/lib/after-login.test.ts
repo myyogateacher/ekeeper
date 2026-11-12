@@ -76,3 +76,34 @@ test("a route that itself redirects after login is never remembered as the page 
     assert.equal(store.size, 1, page);
   }
 });
+
+// The block is module state, so each case loads its own copy of the module: one test's logout must not stop the
+// next test's expiry from remembering. (A page reload gives the real app the same fresh copy.)
+type AfterLogin = typeof import("./after-login.ts");
+let copies = 0;
+const freshAfterLogin = (): Promise<AfterLogin> => import(`./after-login.ts?copy=${++copies}`);
+
+// ProtectedLayout calls rememberPathForLogin while rendering. On Log out, endSession sets the session to null,
+// the layout re-renders on the old page before the /login navigation lands, and that render wrote the page
+// back after the logout had cleared it (PROD-10519 review); tab B's logout did the same in an idle tab A, and
+// the next user signing in followed A to the previous user's last page. An explicit logout, here or received
+// from another tab, forgets the page and keeps it forgotten until the page reloads (Google sign-in is a full
+// page load, so the block ends by itself).
+test("a page is never remembered after a logout in this tab or another, however many renders follow", async () => {
+  const store = withSessionStorage({ "ekeeper:after-login": "/settings/github" });
+  const login = await freshAfterLogin();
+  login.forgetPathAfterLogout();
+  assert.equal(store.size, 0, "the remembered page is cleared");
+  login.rememberPathForLogin("/errors/p1/busy");
+  login.rememberPathForLogin("/errors/p1/busy?event=e1");
+  assert.equal(store.size, 0, "renders after the logout cannot write it back");
+  assert.equal(login.peekPathAfterLogin(), null);
+});
+
+test("an expired session still remembers the page it was on", async () => {
+  const store = withSessionStorage();
+  const login = await freshAfterLogin();
+  login.rememberPathForLogin("/errors/p1/busy");
+  assert.equal(login.peekPathAfterLogin(), "/errors/p1/busy");
+  assert.equal(store.size, 1);
+});

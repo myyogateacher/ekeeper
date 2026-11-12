@@ -1,6 +1,7 @@
 import { useEffect, useRef } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { meQuery } from "@/lib/api";
+import { forgetPathAfterLogout } from "@/lib/after-login";
 import { SESSION_CHANNEL, dropCachedQueries, mustDropCache, parseSessionMessage } from "@/lib/session";
 
 /**
@@ -32,6 +33,8 @@ export function useSessionSync(): void {
     channel.current = opened;
     opened.onmessage = (event: MessageEvent<unknown>) => {
       const message = parseSessionMessage(event.data);
+      // Before the drop below: the drop signs this tab out, and the layout would remember the page as it did.
+      if (message?.loggedOut) forgetPathAfterLogout();
       // A tab still waiting for its first answer has nothing cached from another user, and will ask anyway.
       if (message && own.current !== undefined && mustDropCache(own.current, message)) {
         void dropCachedQueries(queryClient);
@@ -46,4 +49,16 @@ export function useSessionSync(): void {
   useEffect(() => {
     if (userId !== undefined) channel.current?.postMessage({ userId });
   }, [userId]);
+}
+
+/**
+ * Tells the other tabs the user pressed Log out, as opposed to a session that expired. Opens its own channel
+ * for the one message, because the hook's channel is private to a mounted component; without BroadcastChannel
+ * (see above) there is nobody to tell.
+ */
+export function announceLogout(): void {
+  if (typeof BroadcastChannel === "undefined") return;
+  const once = new BroadcastChannel(SESSION_CHANNEL);
+  once.postMessage({ userId: null, loggedOut: true });
+  once.close();
 }
