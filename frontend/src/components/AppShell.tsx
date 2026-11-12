@@ -16,6 +16,7 @@ import {
 } from "@/lib/issue-list";
 import { useIssueSet } from "@/components/useIssueSet";
 import { ThemeSwitch } from "@/components/ThemeSwitch";
+import { initials } from "@/components/AssignMenu";
 
 interface AppShellProps extends PropsWithChildren {
   user: User;
@@ -147,9 +148,4 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
       </main>
     </div>
   );
-}
-
-function initials(name: string): string {
-  const parts = name.trim().split(/\s+/).filter(Boolean);
-  return ((parts[0]?.[0] ?? "") + (parts[1]?.[0] ?? "")).toUpperCase() || "?";
 }
