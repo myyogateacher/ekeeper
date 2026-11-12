@@ -57,7 +57,8 @@ Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.
   refetches `["me"]`; without that, Back in a second tab rendered the previous user's cached list.
 - Ids in URLs: ids are data, and a group id is a sender's fingerprint verbatim, so it can hold `/`, `..` or `?`.
   Build request paths with the `path` tag and issue routes with `issuePath` (`lib/url.ts`); never interpolate an
-  id raw. `url.test.ts` fails on a raw interpolation in `api.ts`.
+  id raw. `url.test.ts` fails on a raw interpolation in `api.ts`. The detail page reads its ids back with
+  `idsFromIssuePath(location.pathname)`, not `useParams`: the router decodes `%2F` in a param twice.
 - `RouteErrorBoundary` wraps the routed content (and the issue detail again): a render error shows a message with
   a way back and is logged, instead of blanking the app. Parse payload JSON with `parseMaybeJson`, which only
   returns the shape the caller reads.

@@ -37,3 +37,21 @@ export function path(strings: TemplateStringsArray, ...values: string[]): string
 export function issuePath(projectId: string, groupId: string): string | null {
   return isAddressable(projectId) && isAddressable(groupId) ? path`/errors/${projectId}/${groupId}` : null;
 }
+
+/**
+ * The project and group ids of an issue route, read from the raw pathname and decoded exactly once, or null
+ * when the pathname is not one issue route. The detail page uses this instead of the router's params: React
+ * Router decodes a %2F in a param twice, so an id holding a literal "%2F" (sent as %252F by issuePath) came
+ * back as "/" and named no issue. Here each segment goes through decodeURIComponent once, the inverse of the
+ * encoding issuePath applied, so the id that reaches the API is the id in the link.
+ */
+export function idsFromIssuePath(pathname: string): { projectId: string; groupId: string } | null {
+  const match = /^\/errors\/([^/]+)\/([^/]+)\/?$/.exec(pathname);
+  if (!match) return null;
+  try {
+    return { projectId: decodeURIComponent(match[1]), groupId: decodeURIComponent(match[2]) };
+  } catch {
+    // A broken percent escape ("%" or "%E0%A4%A") cannot have come from issuePath, so it names no issue.
+    return null;
+  }
+}

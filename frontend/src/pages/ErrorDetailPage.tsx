@@ -2,7 +2,7 @@
 // with tests, the selected event lives in the URL (?event=), and writes go through useIssueWorkflow.
 import { useMemo, useState, type ReactNode } from "react";
 import { useQuery } from "@tanstack/react-query";
-import { Link, useParams, useSearchParams } from "react-router-dom";
+import { Link, useLocation, useSearchParams } from "react-router-dom";
 import { ChevronLeft, Download, Link as LinkIcon } from "lucide-react";
 import type { ErrorEventDetail } from "@ekeeper/shared";
 import { api } from "@/lib/api";
@@ -23,7 +23,7 @@ import {
 import { canWriteProject } from "@/lib/permissions";
 import { formatAbsolute, formatDayTime, formatRelative } from "@/lib/time";
 import { pluralize } from "@/lib/plural";
-import { issuePath } from "@/lib/url";
+import { idsFromIssuePath, issuePath } from "@/lib/url";
 import { formatNumber } from "@/lib/utils";
 import { useMe } from "@/components/session";
 import { AssignMenu } from "@/components/AssignMenu";
@@ -43,7 +43,11 @@ const STATE_TAG: Record<string, string> = {
 
 export function ErrorDetailPage() {
   const me = useMe();
-  const { projectId = "", groupId = "" } = useParams();
+  // The ids come from the raw pathname, decoded once, not from useParams: the router decodes a %2F in a param
+  // twice, so an id with a literal "%2F" in it opened as "isn't available". An unreadable pathname leaves both
+  // empty, which disables the query and shows the same "isn't available" state.
+  const { pathname } = useLocation();
+  const { projectId, groupId } = idsFromIssuePath(pathname) ?? { projectId: "", groupId: "" };
   const [searchParams, setSearchParams] = useSearchParams();
   const eventId = searchParams.get("event") ?? undefined;
   // placeholderData keeps the previous event of this issue on screen while the next one loads, so the page

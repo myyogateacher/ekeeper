@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { isAddressable, issuePath, path } from "./url.ts";
+import { idsFromIssuePath, isAddressable, issuePath, path } from "./url.ts";
 
 const BASE = "http://localhost";
 
@@ -25,7 +25,9 @@ test("an id containing /, .. or ? never changes which resource the request names
   }
 });
 
-test("the client route for an issue holds both ids as single segments and round trips them", () => {
+// This checks URL parsing only: the route is three segments whatever the ids hold. Whether the router hands
+// the ids back unchanged is a different question, answered by idsFromIssuePath below.
+test("the client route for an issue holds both ids as single path segments", () => {
   for (const id of HOSTILE_IDS) {
     const href = issuePath("proj/../other", id);
     assert.ok(href);
@@ -34,6 +36,25 @@ test("the client route for an issue holds both ids as single segments and round 
     assert.equal(segments[1], "errors");
     assert.equal(decodeURIComponent(segments[2]), "proj/../other");
     assert.equal(decodeURIComponent(segments[3]), id);
+  }
+});
+
+// React Router decodes a route param twice for a %2F (its matcher decodes the path, then each param), so an id
+// holding a literal "%2F" (sent as %252F) arrived as "/" and the issue opened as "isn't available" (PROD-10519
+// re-review). The detail page reads its ids from the raw pathname through this function instead, which
+// decodes each segment exactly once, so the id that reaches the API is the id in the link.
+test("the ids read back from an issue route equal the ids it was built from, router or not", () => {
+  for (const id of [...HOSTILE_IDS, "a%2Fb", "100%", "%41", "naïve/ü"]) {
+    const href = issuePath("proj/../other", id);
+    assert.ok(href);
+    assert.deepEqual(idsFromIssuePath(href), { projectId: "proj/../other", groupId: id }, id);
+  }
+  assert.deepEqual(idsFromIssuePath("/errors/p1/g1/"), { projectId: "p1", groupId: "g1" });
+});
+
+test("a pathname that is not exactly one issue route, or holds a broken escape, reads as no ids", () => {
+  for (const pathname of ["/errors", "/errors/p1", "/errors/p1/g1/extra", "/settings/members", "/errors//g1", "/errors/p1/%E0%A4%A", "/errors/p1/%"]) {
+    assert.equal(idsFromIssuePath(pathname), null, pathname);
   }
 });
 
