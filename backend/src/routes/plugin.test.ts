@@ -1,11 +1,12 @@
 import { afterAll, describe, expect, test } from "bun:test";
 import { createHash } from "node:crypto";
-import { rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
 import path from "node:path";
 import { strToU8, zipSync } from "fflate";
 import { Hono } from "hono";
 import { config } from "../config";
 import { all, run } from "../db/sqlite";
+import { HttpError } from "../lib/http";
 import { getServerAuthToken } from "../lib/server-settings";
 import { pluginRouter } from "./plugin";
 
@@ -23,6 +24,9 @@ run(`INSERT INTO projects (id, name, slug, environment, active, created_at, upda
 
 const app = new Hono();
 app.route("/api/0", pluginRouter);
+// Same mapping as the onError in src/index.ts, so a refused request reads back as its real status, not 500.
+app.onError((error, ctx) =>
+  ctx.json({ message: error.message }, error instanceof HttpError ? (error.status as 400) : 500));
 const org = config.EKEEPER_ORG;
 const headers = { Authorization: `Bearer ${getServerAuthToken()}` };
 const sha1 = (bytes: Uint8Array) => createHash("sha1").update(bytes).digest("hex");
@@ -59,8 +63,12 @@ const assemble = (body: Record<string, unknown>) =>
     body: JSON.stringify(body),
   });
 
+// Where a "../" chunk name lands if the name reaches the disk path unchecked.
+const escapedFile = path.resolve(import.meta.dir, "../../data", `probe-escape-${suffix}`);
+
 afterAll(() => {
   for (const checksum of uploadedChunks) rmSync(chunkFile(checksum), { force: true });
+  rmSync(escapedFile, { force: true });
   run(`DELETE FROM minimap_artifacts WHERE project_id = ?`, [projectId]);
   run(`DELETE FROM projects WHERE id = ?`, [projectId]);
 });
@@ -96,5 +104,35 @@ describe("artifact bundle assemble", () => {
     expect(all(`SELECT release, artifact_name FROM minimap_artifacts WHERE project_id = ?`, [projectId])).toEqual([
       { release: `rel-${suffix}`, artifact_name: mapName },
     ]);
+  });
+
+  // Two builds of one commit upload the same bundle at once. The first assemble consumes the chunks, and the JS
+  // sentry CLI does not upload again while it polls, so without a remembered result the second build got
+  // not_found on every poll until its 300 s deadline.
+  test("a repeat assemble of a bundle that was just assembled answers ok, so a concurrent build stops polling", async () => {
+    const bytes = bundle();
+    const checksum = await uploadChunk(bytes);
+    const body = { checksum, chunks: [checksum], projects: [projectSlug], version: `rel-repeat-${suffix}` };
+
+    expect(await (await assemble(body)).json()).toMatchObject({ state: "ok" });
+    const repeat = await assemble(body);
+
+    expect(repeat.status).toBe(200);
+    expect(await repeat.json()).toEqual({ state: "ok", missingChunks: [] });
+  });
+
+  // The chunk name is the caller's multipart filename and is joined onto a disk path; anyone with the upload
+  // token (every app's CI) could otherwise write, read or delete files outside the chunk folder.
+  test("a chunk name that is not a SHA-1 is refused before it reaches the disk, on upload and on assemble", async () => {
+    const form = new FormData();
+    form.append("file", new Blob([new Uint8Array(strToU8("escape"))], { type: "application/octet-stream" }), `../probe-escape-${suffix}`);
+    const upload = await app.request(`/api/0/organizations/${org}/chunk-upload/`, { method: "POST", headers, body: form });
+
+    expect(upload.status).toBe(400);
+    expect(existsSync(escapedFile)).toBe(false);
+
+    const res = await assemble({ checksum: sha1(strToU8(`escape ${suffix}`)), chunks: ["../ekeeper.db"], projects: [projectSlug], version: `rel-${suffix}` });
+
+    expect(res.status).toBe(400);
   });
 });
