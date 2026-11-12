@@ -1,5 +1,4 @@
 import type {
-  DashboardProjectCard,
   DuplicateIssueGroup,
   ErrorEventDetail,
   ErrorGroupSummary,
@@ -15,6 +14,16 @@ import type {
   User,
   UserRole,
 } from "@ekeeper/shared";
+import { ApiError } from "@/lib/api-error";
+import { path } from "@/lib/url";
+import { SESSION_KEY, userOrSignedOut } from "@/lib/session";
+import {
+  ISSUE_LIST_PAGE_SIZE,
+  mergePages,
+  remainingPageOffsets,
+  type ApiFilters,
+  type IssueSet,
+} from "@/lib/issue-list";
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
@@ -30,21 +39,23 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ message: "Request failed" }));
-    throw new Error(body.message ?? "Request failed");
+    // A non-JSON error body (a proxy's HTML 502 page) still has to surface as an ApiError with its status.
+    const body = (await response.json().catch(() => ({}))) as { message?: string };
+    throw new ApiError(body.message ?? `Request failed (${response.status})`, response.status);
   }
 
   return response.json() as Promise<T>;
 }
 
 export const api = {
-  me: () => request<MeResponse>("/api/me"),
+  // Signed out resolves to null instead of a 401 error: see lib/session.ts for the loop that prevents.
+  me: () => userOrSignedOut(() => request<MeResponse>("/api/me")),
   users: () => request<{ users: User[] }>("/api/users"),
   createUser: (payload: Pick<User, "email" | "name" | "avatarUrl" | "role" | "status">) =>
     request<{ user: User }>("/api/users", { method: "POST", body: JSON.stringify(payload) }),
   updateUser: (userId: string, payload: Partial<Pick<User, "name" | "avatarUrl" | "role" | "status">>) =>
-    request<{ user: User }>(`/api/users/${userId}`, { method: "PATCH", body: JSON.stringify(payload) }),
-  deleteUser: (userId: string) => request<{ success: boolean }>(`/api/users/${userId}`, { method: "DELETE" }),
+    request<{ user: User }>(path`/api/users/${userId}`, { method: "PATCH", body: JSON.stringify(payload) }),
+  deleteUser: (userId: string) => request<{ success: boolean }>(path`/api/users/${userId}`, { method: "DELETE" }),
   projects: () => request<{ projects: Array<Project & { key: ProjectKey | null }> }>("/api/projects"),
   createProject: (payload: Pick<Project, "name" | "slug" | "environment" | "active">) =>
     request<{ project: Project & { key: ProjectKey | null } }>("/api/projects", {
@@ -52,24 +63,23 @@ export const api = {
       body: JSON.stringify(payload),
     }),
   updateProject: (projectId: string, payload: Partial<Pick<Project, "name" | "slug" | "environment" | "active">>) =>
-    request<{ project: Project & { key: ProjectKey | null } }>(`/api/projects/${projectId}`, {
+    request<{ project: Project & { key: ProjectKey | null } }>(path`/api/projects/${projectId}`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
   deleteProject: (projectId: string) =>
-    request<{ success: boolean }>(`/api/projects/${projectId}`, { method: "DELETE" }),
+    request<{ success: boolean }>(path`/api/projects/${projectId}`, { method: "DELETE" }),
   projectMembers: (projectId: string) =>
-    request<{ memberships: ProjectMembership[] }>(`/api/projects/${projectId}/members`),
+    request<{ memberships: ProjectMembership[] }>(path`/api/projects/${projectId}/members`),
   setProjectMember: (projectId: string, userId: string, role: "manager" | "viewer") =>
-    request<{ success: boolean }>(`/api/projects/${projectId}/members/${userId}`, {
+    request<{ success: boolean }>(path`/api/projects/${projectId}/members/${userId}`, {
       method: "PUT",
       body: JSON.stringify({ role }),
     }),
   removeProjectMember: (projectId: string, userId: string) =>
-    request<{ success: boolean }>(`/api/projects/${projectId}/members/${userId}`, { method: "DELETE" }),
+    request<{ success: boolean }>(path`/api/projects/${projectId}/members/${userId}`, { method: "DELETE" }),
   errorAssignees: (projectId?: string) =>
-    request<{ users: User[] }>(projectId ? `/api/error-assignees?projectId=${projectId}` : "/api/error-assignees"),
-  dashboard: () => request<{ cards: DashboardProjectCard[] }>("/api/dashboard/summary?range=7d"),
+    request<{ users: User[] }>(projectId ? "/api/error-assignees?" + new URLSearchParams({ projectId }) : "/api/error-assignees"),
   serverSettings: () => request<{ settings: ServerSettings }>("/api/settings/server"),
   serverUploadToken: () => request<{ token: string }>("/api/settings/server/token"),
   regenerateServerToken: () => request<{ token: string }>("/api/settings/server/regenerate-token", { method: "POST" }),
@@ -87,7 +97,7 @@ export const api = {
       limit: number;
       offset: number;
       retentionEligible: number;
-    }>(`/api/minimaps${suffix}`);
+    }>("/api/minimaps" + suffix);
   },
   uploadMinimap: (payload: FormData) =>
     request<{ artifact: MinimapArtifact }>("/api/minimaps/upload", {
@@ -96,7 +106,7 @@ export const api = {
     }),
   cleanupOldMinimaps: (projectId?: string) =>
     request<{ started: boolean; eligible: number }>(
-      projectId ? `/api/minimaps/cleanup-old?projectId=${projectId}` : "/api/minimaps/cleanup-old",
+      projectId ? "/api/minimaps/cleanup-old?" + new URLSearchParams({ projectId }) : "/api/minimaps/cleanup-old",
       { method: "POST" },
     ),
   errors: (
@@ -123,12 +133,12 @@ export const api = {
     if (filters?.offset !== undefined) search.set("offset", String(filters.offset));
     const suffix = search.toString() ? `?${search.toString()}` : "";
     return request<{ errors: ErrorGroupSummary[]; total: number; limit: number; offset: number }>(
-      projectId ? `/api/projects/${projectId}/errors${suffix}` : `/api/projects/all/errors${suffix}`,
+      projectId ? path`/api/projects/${projectId}/errors` + suffix : "/api/projects/all/errors" + suffix,
     );
   },
   githubIntegration: (projectId: string) =>
     request<{ integration: ProjectGithubIntegration | null }>(
-      `/api/projects/${projectId}/github-integration`,
+      path`/api/projects/${projectId}/github-integration`,
     ),
   saveGithubIntegration: (
     projectId: string,
@@ -141,11 +151,11 @@ export const api = {
     },
   ) =>
     request<{ integration: ProjectGithubIntegration | null }>(
-      `/api/projects/${projectId}/github-integration`,
+      path`/api/projects/${projectId}/github-integration`,
       { method: "PUT", body: JSON.stringify(payload) },
     ),
   deleteGithubIntegration: (projectId: string) =>
-    request<{ success: boolean }>(`/api/projects/${projectId}/github-integration`, {
+    request<{ success: boolean }>(path`/api/projects/${projectId}/github-integration`, {
       method: "DELETE",
     }),
   backfillGithubIntegration: (projectId: string) =>
@@ -155,20 +165,20 @@ export const api = {
       candidatesProcessed: number;
       created: number;
       failed: number;
-    }>(`/api/projects/${projectId}/github-integration/backfill`, { method: "POST" }),
+    }>(path`/api/projects/${projectId}/github-integration/backfill`, { method: "POST" }),
   cleanupDuplicateGithubIssues: (projectId: string) =>
     request<{
       titlesScanned: number;
       duplicatesClosed: number;
       linksRepaired: number;
       labelsAdded: number;
-    }>(`/api/projects/${projectId}/github-integration/cleanup-duplicates`, { method: "POST" }),
+    }>(path`/api/projects/${projectId}/github-integration/cleanup-duplicates`, { method: "POST" }),
   errorDetail: (projectId: string, groupId: string, eventId?: string) =>
     request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[]; duplicateGroups: DuplicateIssueGroup[] }>(
-      `/api/projects/${projectId}/errors/${groupId}${eventId ? `?eventId=${encodeURIComponent(eventId)}` : ""}`,
+      path`/api/projects/${projectId}/errors/${groupId}` + (eventId ? `?${new URLSearchParams({ eventId })}` : ""),
     ),
   updateIssueWorkflow: (projectId: string, groupId: string, payload: { state?: IssueState; assignedUserId?: string | null }) =>
-    request<{ issue: ErrorGroupSummary | undefined }>(`/api/projects/${projectId}/errors/${groupId}/workflow`, {
+    request<{ issue: ErrorGroupSummary | undefined }>(path`/api/projects/${projectId}/errors/${groupId}/workflow`, {
       method: "PATCH",
       body: JSON.stringify(payload),
     }),
@@ -176,4 +186,27 @@ export const api = {
   logout: () => request<{ success: boolean }>("/auth/logout", { method: "POST" }),
 };
 
+/** The session query's options, shared by the layout, the login route and the cross-tab sync so the three cannot drift. */
+export const meQuery = { queryKey: SESSION_KEY, queryFn: api.me, retry: false } as const;
+
 export const roleOptions: UserRole[] = ["admin", "manager", "viewer"];
+
+/**
+ * Loads a whole issue view up to ISSUE_LIST_MAX_ROWS: the first page, then the rest in parallel. If the
+ * pages disagree (an issue closed or re-ranked between requests, see mergePages) the set is fetched once
+ * more; a second disagreement is returned as incomplete and the page says the list changed while loading.
+ */
+export async function fetchIssueSet(filters: ApiFilters): Promise<IssueSet> {
+  const { projectId, ...rest } = filters;
+  const load = async () => {
+    const first = await api.errors(projectId, { ...rest, limit: ISSUE_LIST_PAGE_SIZE, offset: 0 });
+    const others = await Promise.all(
+      remainingPageOffsets(first.total).map((offset) =>
+        api.errors(projectId, { ...rest, limit: ISSUE_LIST_PAGE_SIZE, offset }),
+      ),
+    );
+    return mergePages([first, ...others]);
+  };
+  const set = await load();
+  return set.complete ? set : load();
+}

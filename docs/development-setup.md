@@ -3,7 +3,7 @@
 ## Prerequisites
 
 - Bun 1.3+
-- Node.js 20+
+- Node.js 22.6+ (the frontend test script runs TypeScript through node's `--experimental-strip-types`, added in 22.6; from 22.18 it is on by default)
 - Docker / Docker Compose
 
 ## Install Dependencies
@@ -94,6 +94,12 @@ bun run build
 bun run typecheck
 bun run test
 bun run migrate
+```
+
+`bun run test` runs the backend suite, then the frontend suite. The frontend suite alone, which needs only Node 22.6 or later:
+
+```bash
+npm test --prefix frontend
 ```
 
 ## Daily Workflow

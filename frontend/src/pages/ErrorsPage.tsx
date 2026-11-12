@@ -1,408 +1,622 @@
-import { useEffect, useMemo, useState } from "react";
-import { keepPreviousData, useQuery } from "@tanstack/react-query";
-import { useNavigate, useSearchParams } from "react-router-dom";
+// Canonical page: the issues list is the exemplar later pages copy (see docs/frontend-architecture.md).
+// Shape: all decision logic in src/lib (issue-list.ts, permissions.ts, time.ts) with tests; the page only
+// reads the URL, calls the hook, and renders. State lives in the URL so back, reload and a shared link all
+// restore the same list.
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Link, useSearchParams } from "react-router-dom";
+import { ArrowDown, Search, X } from "lucide-react";
+import type { ErrorGroupSummary } from "@ekeeper/shared";
 import { api } from "@/lib/api";
-import { DataTable } from "@/components/DataTable";
-import { formatDate, formatNumber } from "@/lib/utils";
+import { isApiStatus } from "@/lib/api-error";
+import {
+  DEFAULT_QUERY,
+  ISSUE_LIST_MAX_ROWS,
+  RANGE_PRESETS,
+  SAVED_VIEWS,
+  SEVERITIES,
+  applyBrowserFilters,
+  applyListPatch,
+  emptyListKind,
+  isNewIssue,
+  listShortcut,
+  listStats,
+  matchSavedView,
+  parseListQuery,
+  serializeListQuery,
+  showAllTimeHref,
+  stepRow,
+  type ListQuery,
+  type SortKey,
+} from "@/lib/issue-list";
+import { splitTitle } from "@/lib/issue-detail";
+import { issuePath } from "@/lib/url";
+import { canWriteProject, isAdmin } from "@/lib/permissions";
+import { formatAbsolute, formatRelative } from "@/lib/time";
+import { pluralize } from "@/lib/plural";
+import { formatNumber } from "@/lib/utils";
+import { useMe } from "@/components/session";
+import { useIssueSet } from "@/components/useIssueSet";
+import { AssignMenu, initials } from "@/components/AssignMenu";
+import { useIssueWorkflow } from "@/components/workflow";
+import { EmptyState } from "@/components/EmptyState";
+import { SeverityDot } from "@/components/Severity";
 
-const PAGE_SIZE = 25;
+const SORT_COLUMNS: Array<{ key: SortKey; label: string; description: string }> = [
+  { key: "24h", label: "24h", description: "Events in the last 24 hours" },
+  { key: "7d", label: "7d", description: "Events in the last 7 days" },
+  { key: "users", label: "Users", description: "Users affected" },
+];
 
-const RANGE_PRESETS = [
-  { id: "24h", label: "24h", hours: 24 },
-  { id: "7d", label: "7d", hours: 24 * 7 },
-  { id: "14d", label: "14d", hours: 24 * 14 },
-  { id: "30d", label: "30d", hours: 24 * 30 },
-  { id: "all", label: "All time", hours: null },
-] as const;
+export function ErrorsPage() {
+  const me = useMe();
+  const [searchParams, setSearchParams] = useSearchParams();
+  const query = useMemo(() => parseListQuery(searchParams), [searchParams]);
+  const { data: set, isLoading, isError, error, isPlaceholderData, refetch } = useIssueSet(query, me.user.id);
+  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  // Ages and "new in 24h" are measured from when the set arrived, not every render: a fresh Date.now() per
+  // render would re-run the browser filter over up to 500 rows on each keystroke and hover.
+  const now = useMemo(() => Date.now(), [set]);
 
-type RangePresetId = (typeof RANGE_PRESETS)[number]["id"];
+  // Built from the live URL, not from `query`: this runs from event handlers and from the search timer, and
+  // the render that created it can be a transition or 200 ms behind. A patch layered on that stale query wrote
+  // old filter values back (Status set to Closed just after a keystroke ended as Open).
+  const update = (patch: Partial<ListQuery>, options?: { replace?: boolean }) =>
+    setSearchParams(applyListPatch(window.location.search, patch), { replace: options?.replace });
 
-const DEFAULT_RANGE_PRESET: RangePresetId = "7d";
+  const rows = useMemo(() => (set ? applyBrowserFilters(set.rows, query, now) : []), [set, query, now]);
+  const stats = listStats(rows, now);
+  const view = matchSavedView(query);
+  const title = SAVED_VIEWS.find((entry) => entry.id === view)?.label ?? "Issues";
+  const projectNames = useMemo(() => new Map((projects?.projects ?? []).map((project) => [project.id, project.name])), [projects]);
+  const projectCount = projects?.projects.length;
 
-/** Returns the ISO `from` boundary for a preset, or "" for the unbounded "All time" preset. */
-function presetFrom(id: RangePresetId): string {
-  const hours = RANGE_PRESETS.find((preset) => preset.id === id)?.hours ?? null;
-  return hours === null ? "" : new Date(Date.now() - hours * 60 * 60 * 1000).toISOString();
+  // Search is a local draft committed to the URL 200 ms after the last key, with replace, so typing never
+  // fights the router and back does not step through every keystroke.
+  //
+  // `committed` is the last text this box wrote to the URL. React Router renders each navigation inside a
+  // transition, so the user can type more keys before their own commit renders; adopting every URL change into
+  // the draft let that late echo of "err" overwrite the newer "erro", and its cleanup then cancelled the timer
+  // for the newer text (letters were lost at 200 to 260 ms per key). Only a URL change this box did not write
+  // (back, a saved view, Clear filters) replaces the draft.
+  const [draft, setDraft] = useState(query.q);
+  const committed = useRef(query.q);
+  const searchRef = useRef<HTMLInputElement>(null);
+  useEffect(() => {
+    if (query.q === committed.current) return;
+    committed.current = query.q;
+    setDraft(query.q);
+  }, [query.q]);
+  useEffect(() => {
+    // Compared with what was last written, not with the URL, which can still show the text before it.
+    if (draft === committed.current) return;
+    const timer = setTimeout(() => {
+      committed.current = draft;
+      update({ q: draft }, { replace: true });
+    }, 200);
+    return () => clearTimeout(timer);
+    // update reads the live URL, so only a new draft needs to restart the timer.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft]);
+
+  const rowLinks = useRef<Array<HTMLAnchorElement | null>>([]);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      const target = event.target as HTMLElement;
+      if (document.querySelector("[data-popover-open]")) return;
+      const action = listShortcut({
+        key: event.key,
+        tagName: target.tagName,
+        isContentEditable: target.isContentEditable,
+        altKey: event.altKey,
+        ctrlKey: event.ctrlKey,
+        metaKey: event.metaKey,
+      });
+      if (!action) return;
+      event.preventDefault();
+      if (action === "search") {
+        searchRef.current?.focus();
+        return;
+      }
+      // Real DOM focus moves between row title links; Enter is the link's own activation. Nothing is
+      // written to the URL, so the router never steals focus back.
+      const links = rowLinks.current.slice(0, rows.length);
+      const current = links.findIndex((link) => link === document.activeElement);
+      const next = stepRow(current, action === "next" ? 1 : -1, links.length);
+      links[next]?.focus();
+      links[next]?.scrollIntoView({ block: "nearest" });
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [rows.length]);
+
+  return (
+    <div className="flex flex-col gap-3.5">
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+        <h1 className="page-title">{title}</h1>
+        {set ? (
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[13px] text-muted">
+            <span>
+              <b className="font-medium text-fg">{formatNumber(stats.issues)}</b> {pluralize(stats.issues, "issue")}
+            </span>
+            <button type="button" className="underline underline-offset-4 hover:text-fg max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center max-[720px]:gap-1" onClick={() => update({ isNew: true })}>
+              <b className="font-medium text-fg">{stats.newIn24h}</b> new in 24h
+            </button>
+            {query.status !== "closed" ? (
+              <Link className="underline underline-offset-4 hover:text-fg max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center max-[720px]:gap-1" to={`/errors?${serializeListQuery({ ...query, assignee: "none" })}`}>
+                <b className="font-medium text-fg">{stats.needTriage}</b> {pluralize(stats.needTriage, "needs", "need")} triage
+              </Link>
+            ) : null}
+            <span>
+              <b className="font-medium text-fg">{formatNumber(stats.events7d)}</b> {pluralize(stats.events7d, "event")} in 7d
+            </span>
+          </div>
+        ) : null}
+        <label className="ml-auto flex h-8 max-w-[360px] flex-[1_1_240px] items-center gap-2 rounded-md border border-line bg-surface px-2.5 text-muted max-[720px]:ml-0 max-[720px]:h-11 max-[720px]:max-w-none max-[720px]:basis-full">
+          <Search className="h-4 w-4 shrink-0" aria-hidden />
+          <input
+            ref={searchRef}
+            type="search"
+            value={draft}
+            onChange={(event) => setDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Escape") event.currentTarget.blur();
+            }}
+            placeholder="Search title or message"
+            aria-label="Search issues by title or message"
+            className="min-w-0 flex-1 border-0 bg-transparent text-[13px] text-fg outline-none placeholder:text-muted"
+          />
+          <span className="kbd max-[720px]:hidden">/</span>
+        </label>
+      </div>
+
+      <Filters query={query} update={update} projects={projects?.projects ?? []} meId={me.user.id} />
+
+      {set?.truncated ? (
+        <p className="warn-box" role="status">
+          Showing the {ISSUE_LIST_MAX_ROWS} busiest of {formatNumber(set.total)} issues by events in 7 days. Search, severity and sorting apply to these.
+          Narrow the project, status or range to see the rest.
+        </p>
+      ) : null}
+      {set && !set.complete ? (
+        <p className="warn-box" role="status">
+          The list changed while loading, so an issue may be missing.{" "}
+          <button type="button" className="font-medium underline" onClick={() => void refetch()}>
+            Refresh
+          </button>
+        </p>
+      ) : null}
+
+      <section className={`card issue-table ${isPlaceholderData ? "opacity-60" : ""}`} aria-busy={isLoading || isPlaceholderData}>
+        <div className="issue-grid h-9 border-b border-line text-xs font-medium text-muted max-[720px]:hidden" role="row">
+          <span>Issue</span>
+          {SORT_COLUMNS.map((column) => (
+            <SortHeader key={column.key} column={column} active={query.sort === column.key} onSort={() => update({ sort: column.key })} />
+          ))}
+          <span className="col-wide">Owner</span>
+          <SortHeader
+            column={{ key: "last", label: "Last seen", description: "Last seen" }}
+            active={query.sort === "last"}
+            onSort={() => update({ sort: "last" })}
+            alignStart
+          />
+        </div>
+
+        {isLoading ? (
+          <Skeleton />
+        ) : isError ? (
+          isApiStatus(error, 403) ? (
+            <EmptyState title="You don't have access to this project" action={<Link className="btn" to="/errors">Clear filters</Link>} />
+          ) : (
+            <EmptyState title="Couldn't load issues" action={<button type="button" className="btn" onClick={() => void refetch()}>Try again</button>}>
+              The server didn't respond. Your filters are kept.
+            </EmptyState>
+          )
+        ) : projectCount === 0 ? (
+          isAdmin(me) ? (
+            <EmptyState title="Connect your first app" action={<Link className="btn btn-primary" to="/settings/projects">New project</Link>}>
+              Create a project, then point the Sentry SDK at its DSN to start receiving errors.
+            </EmptyState>
+          ) : (
+            <EmptyState title="No projects yet">You don't have access to any project yet. Ask an admin to add you.</EmptyState>
+          )
+        ) : rows.length === 0 ? (
+          <EmptyRows query={query} />
+        ) : (
+          <ul className="m-0 list-none p-0">
+            {rows.map((row, index) => (
+              <IssueRow
+                key={`${row.projectId}:${row.groupId}`}
+                row={row}
+                now={now}
+                projectName={projectNames.get(row.projectId) ?? row.projectId}
+                canWrite={canWriteProject(me, row.projectId)}
+                meId={me.user.id}
+                linkRef={(element) => {
+                  rowLinks.current[index] = element;
+                }}
+              />
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <p className="flex flex-wrap gap-4 text-xs text-muted max-[720px]:hidden">
+        <span>
+          <span className="kbd">J</span> <span className="kbd">K</span> move
+        </span>
+        <span>
+          <span className="kbd">Enter</span> open
+        </span>
+        <span>
+          <span className="kbd">/</span> search
+        </span>
+      </p>
+    </div>
+  );
 }
 
-const SEVERITY_TONES: Record<string, string> = {
-  fatal: "border-rose-400/30 bg-rose-400/10 text-rose-200",
-  critical: "border-rose-400/30 bg-rose-400/10 text-rose-200",
-  error: "border-orange-400/30 bg-orange-400/10 text-orange-200",
-  warning: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-  info: "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
-  debug: "border-white/10 bg-white/5 text-slate-300",
-};
-
-const STATE_TONES: Record<string, string> = {
-  open: "border-cyan-400/30 bg-cyan-400/10 text-cyan-200",
-  reopened: "border-amber-400/30 bg-amber-400/10 text-amber-200",
-  closed: "border-white/10 bg-white/5 text-slate-400",
-};
-
-function Badge({ label, tone }: { label: string; tone: string }) {
+function SortHeader({
+  column,
+  active,
+  onSort,
+  alignStart,
+}: {
+  column: { key: SortKey; label: string; description: string };
+  active: boolean;
+  onSort: () => void;
+  alignStart?: boolean;
+}) {
   return (
-    <span
-      className={`inline-flex items-center rounded-full border px-2.5 py-0.5 text-[11px] font-medium capitalize tracking-wide ${tone}`}
-    >
-      {label}
+    <span className={`${column.key === "24h" ? "" : "col-wide"} ${alignStart ? "" : "justify-self-end"}`} aria-sort={active ? "descending" : "none"}>
+      <button
+        type="button"
+        onClick={onSort}
+        aria-label={`Sort by ${column.description.toLowerCase()}`}
+        className={`inline-flex items-center gap-1 ${active ? "text-fg" : "hover:text-fg"}`}
+      >
+        {column.label}
+        {active ? <ArrowDown className="h-3.5 w-3.5" aria-hidden /> : null}
+      </button>
     </span>
   );
 }
 
-export function ErrorsPage() {
-  const navigate = useNavigate();
-  const [searchParams, setSearchParams] = useSearchParams();
-  const [projectId, setProjectId] = useState(() => searchParams.get("projectId") ?? "");
-  const [assignmentFilter, setAssignmentFilter] = useState("any");
-  const [state, setState] = useState("open_or_reopened");
-  const [userInput, setUserInput] = useState(() => searchParams.get("user") ?? "");
-  const [userFilter, setUserFilter] = useState(() => searchParams.get("user") ?? "");
-  const [page, setPage] = useState(0);
-  // The listing defaults to the last 7 days; "All time" or a custom range widens it.
-  const [rangePreset, setRangePreset] = useState<RangePresetId | "custom">(DEFAULT_RANGE_PRESET);
-  const [rangeFrom, setRangeFrom] = useState(() => presetFrom(DEFAULT_RANGE_PRESET));
-  const [rangeTo, setRangeTo] = useState("");
-  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
-  const { data: assignees } = useQuery({
-    queryKey: ["error-assignees", projectId || "all"],
-    queryFn: () => api.errorAssignees(projectId || undefined),
-  });
-  const { data } = useQuery({
-    queryKey: ["errors", projectId || "all", assignmentFilter, state, userFilter, rangeFrom, rangeTo, page],
-    placeholderData: keepPreviousData,
-    queryFn: () =>
-      api.errors(projectId || undefined, {
-        limit: PAGE_SIZE,
-        offset: page * PAGE_SIZE,
-        from: rangeFrom || undefined,
-        to: rangeTo || undefined,
-        state,
-        assignment:
-          assignmentFilter === "any" || assignmentFilter === "assigned" || assignmentFilter === "unassigned"
-            ? assignmentFilter
-            : "user",
-        assignedUserId:
-          assignmentFilter !== "any" && assignmentFilter !== "assigned" && assignmentFilter !== "unassigned"
-            ? assignmentFilter
-            : undefined,
-        user: userFilter || undefined,
-      }),
-  });
-
-  const projectOptions = useMemo(() => projects?.projects ?? [], [projects]);
-  const assigneeOptions = useMemo(() => assignees?.users ?? [], [assignees]);
-  const projectNameById = useMemo(
-    () => new Map(projectOptions.map((project) => [project.id, project.name])),
-    [projectOptions],
+function IssueRow({
+  row,
+  now,
+  projectName,
+  canWrite,
+  meId,
+  linkRef,
+}: {
+  row: ErrorGroupSummary;
+  now: number;
+  projectName: string;
+  canWrite: boolean;
+  meId: string;
+  linkRef: (element: HTMLAnchorElement | null) => void;
+}) {
+  const workflow = useIssueWorkflow();
+  const [type, message] = splitTitle(row.title);
+  const level = (row.severity || "error").toLowerCase();
+  // Null for a group id no URL path can carry ("." or ".."): the row shows its title without a link and without
+  // write controls, since both would have to name the issue by that id.
+  const href = issuePath(row.projectId, row.groupId);
+  const writable = canWrite && href !== null;
+  // The text sits in its own span so the two line clamp clips the span, not the link: the link's vertical
+  // padding (the 44px phone target) is inside its overflow box, so clamping the link itself let a third line
+  // show through the padding.
+  const title = (
+    <span className="issue-title-text block truncate">
+      <b className="font-semibold">{type}</b>
+      {message ? `: ${message}` : ""}
+    </span>
   );
-
-  const errors = data?.errors ?? [];
-  const total = data?.total ?? 0;
-  const rangeStart = total === 0 ? 0 : page * PAGE_SIZE + 1;
-  const rangeEnd = Math.min((page + 1) * PAGE_SIZE, total);
-
-  // Snap back to the last valid page when the total shrinks (for example after issues close).
-  useEffect(() => {
-    if (total > 0 && page > 0 && page * PAGE_SIZE >= total) {
-      setPage(Math.max(Math.ceil(total / PAGE_SIZE) - 1, 0));
-    }
-  }, [total, page]);
-
-  useEffect(() => {
-    const nextProjectId = searchParams.get("projectId") ?? "";
-    if (nextProjectId !== projectId) {
-      setProjectId(nextProjectId);
-    }
-  }, [projectId, searchParams]);
-
-  function handleProjectChange(nextProjectId: string) {
-    setProjectId(nextProjectId);
-    setPage(0);
-    const nextParams = new URLSearchParams(searchParams);
-    if (nextProjectId) {
-      nextParams.set("projectId", nextProjectId);
-    } else {
-      nextParams.delete("projectId");
-    }
-    setSearchParams(nextParams, { replace: true });
-  }
 
   return (
-    <div className="space-y-6">
-      <section className="glass-panel flex flex-col gap-4 p-6">
-        <div>
-          <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Error explorer</p>
-          <h2 className="mt-4 text-3xl font-semibold text-white">Grouped failures across projects</h2>
-          <p className="mt-3 max-w-2xl text-sm leading-6 text-slate-300">
-            Track recurrence, first and last seen windows, and drill into stack traces with runtime context.
-          </p>
-        </div>
-        <div className="grid gap-4 lg:grid-cols-4">
-          <div className="min-w-0">
-            <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">Project</label>
-            <select className="input" value={projectId} onChange={(event) => handleProjectChange(event.target.value)}>
-              <option value="">All projects</option>
-              {projectOptions.map((project) => (
-                <option key={project.id} value={project.id}>
-                  {project.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="min-w-0">
-            <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">State</label>
-            <select
-              className="input"
-              value={state}
-              onChange={(event) => {
-                setState(event.target.value);
-                setPage(0);
-              }}
-            >
-              <option value="open_or_reopened">Open + reopened</option>
-              <option value="open">Open</option>
-              <option value="closed">Closed</option>
-              <option value="reopened">Reopened</option>
-              <option value="any">Any</option>
-            </select>
-          </div>
-          <div className="min-w-0">
-            <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">Assignment</label>
-            <select
-              className="input"
-              value={assignmentFilter}
-              onChange={(event) => {
-                setAssignmentFilter(event.target.value);
-                setPage(0);
-              }}
-            >
-              <option value="any">Any assignment</option>
-              <option value="assigned">Assigned</option>
-              <option value="unassigned">Unassigned</option>
-              {assigneeOptions.map((user) => (
-                <option key={user.id} value={user.id}>
-                  {user.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="min-w-0">
-            <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">User</label>
-            <input
-              className="input"
-              placeholder="User ID, email, or username — press Enter"
-              value={userInput}
-              onChange={(event) => setUserInput(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key !== "Enter") {
-                  return;
-                }
-                event.preventDefault();
-                const trimmed = userInput.trim();
-                setUserFilter(trimmed);
-                setPage(0);
-                const nextParams = new URLSearchParams(searchParams);
-                if (trimmed) {
-                  nextParams.set("user", trimmed);
-                } else {
-                  nextParams.delete("user");
-                }
-                setSearchParams(nextParams, { replace: true });
-              }}
-            />
-            {userFilter ? (
+    <li className="issue-grid group relative min-h-[52px] border-b border-line last:border-b-0 hover:bg-raised focus-within:bg-raised">
+      <div className="relative flex min-w-0 flex-col gap-0.5 py-2 max-[720px]:pb-2 max-[720px]:pt-0">
+        <div className="issue-line flex min-w-0 items-center gap-2">
+          <SeverityDot level={level} className="issue-dot" />
+          {href ? (
+            <Link ref={linkRef} to={href} className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none">
+              {title}
+            </Link>
+          ) : (
+            <span className="issue-title block min-w-0 text-fg">{title}</span>
+          )}
+          {row.state === "reopened" ? <span className="tag bg-reopened/10 text-reopened">Reopened</span> : null}
+          {isNewIssue(row, now) ? <span className="tag text-accent ring-1 ring-inset ring-accent">New</span> : null}
+          {writable && row.state !== "closed" ? (
+            <span className="absolute right-0 top-2 hidden bg-raised pl-3 group-focus-within:flex group-hover:flex max-[720px]:!hidden">
               <button
                 type="button"
-                className="mt-2 text-xs text-slate-400 underline-offset-2 hover:underline"
-                onClick={() => {
-                  setUserInput("");
-                  setUserFilter("");
-                  setPage(0);
-                  const nextParams = new URLSearchParams(searchParams);
-                  nextParams.delete("user");
-                  setSearchParams(nextParams, { replace: true });
-                }}
+                className="btn btn-sm"
+                disabled={workflow.isPending}
+                onClick={() =>
+                  workflow.mutate({ projectId: row.projectId, groupId: row.groupId, payload: { state: "closed" }, previousState: row.state })
+                }
               >
-                Clear filter
+                Close
               </button>
-            ) : null}
-          </div>
+            </span>
+          ) : null}
         </div>
-        <div className="flex flex-col gap-3 border-t border-white/10 pt-4 lg:flex-row lg:items-end lg:justify-between">
-          <div>
-            <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">Last seen within</label>
-            <div className="flex flex-wrap items-center gap-2">
-              {RANGE_PRESETS.map((preset) => {
-                const isActive = rangePreset === preset.id;
-                return (
-                  <button
-                    key={preset.id}
-                    type="button"
-                    aria-pressed={isActive}
-                    className={`rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                      isActive
-                        ? "border-cyan-400/40 bg-cyan-400/15 text-cyan-100"
-                        : "border-white/10 bg-white/5 text-slate-300 hover:border-white/20 hover:text-white"
-                    }`}
-                    onClick={() => {
-                      setRangePreset(preset.id);
-                      setRangeFrom(presetFrom(preset.id));
-                      setRangeTo("");
-                      setPage(0);
-                    }}
-                  >
-                    {preset.label}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="flex flex-wrap items-end gap-3">
-            <div className="min-w-0">
-              <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">Custom from</label>
-              <input
-                className="input"
-                type="date"
-                value={rangePreset === "custom" ? rangeFrom : ""}
-                onChange={(event) => {
-                  setRangePreset("custom");
-                  setRangeFrom(event.target.value);
-                  setRangeTo(rangePreset === "custom" ? rangeTo : "");
-                  setPage(0);
-                }}
-              />
-            </div>
-            <div className="min-w-0">
-              <label className="mb-2 block text-xs uppercase tracking-[0.25em] text-slate-400">Custom to</label>
-              <input
-                className="input"
-                type="date"
-                value={rangePreset === "custom" ? rangeTo : ""}
-                onChange={(event) => {
-                  setRangeFrom(rangePreset === "custom" ? rangeFrom : "");
-                  setRangePreset("custom");
-                  setRangeTo(event.target.value);
-                  setPage(0);
-                }}
-              />
-            </div>
-            {rangePreset === "custom" ? (
-              <button
-                type="button"
-                className="pb-2 text-xs text-slate-400 underline-offset-2 hover:underline"
-                onClick={() => {
-                  setRangePreset(DEFAULT_RANGE_PRESET);
-                  setRangeFrom(presetFrom(DEFAULT_RANGE_PRESET));
-                  setRangeTo("");
-                  setPage(0);
-                }}
-              >
-                Reset range
-              </button>
-            ) : null}
-          </div>
-        </div>
-      </section>
-
-      <DataTable
-        headers={[
-          "Issue",
-          "Status",
-          "Assigned",
-          { label: "Events 7d", align: "right" },
-          { label: "Users", align: "right" },
-          "Last seen",
-        ]}
-      >
-        {errors.map((error) => (
-          <tr
-            key={`${error.projectId}-${error.groupId}`}
-            className="cursor-pointer text-slate-200 transition hover:bg-white/[0.03]"
-            tabIndex={0}
-            onClick={() => navigate(`/errors/${error.projectId}/${error.groupId}`)}
-            onKeyDown={(event) => {
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                navigate(`/errors/${error.projectId}/${error.groupId}`);
-              }
-            }}
-          >
-            <td className="max-w-md px-5 py-4 align-top">
-              <p className="truncate font-medium text-white" title={error.title}>
-                {error.title}
-              </p>
-              <p className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400">
-                <span>{projectNameById.get(error.projectId) ?? error.projectId}</span>
-                <span aria-hidden="true" className="text-slate-600">
-                  •
-                </span>
-                <span className="truncate font-mono text-[11px] text-slate-500">{error.fingerprint}</span>
-                {error.githubIssueNumber ? (
-                  <>
-                    <span aria-hidden="true" className="text-slate-600">
-                      •
-                    </span>
-                    <span className="text-cyan-300/80">#{error.githubIssueNumber}</span>
-                  </>
-                ) : null}
-              </p>
-            </td>
-            <td className="px-5 py-4 align-top">
-              <div className="flex flex-wrap items-center gap-1.5">
-                <Badge
-                  label={error.state}
-                  tone={STATE_TONES[error.state] ?? "border-white/10 bg-white/5 text-slate-200"}
-                />
-                <Badge
-                  label={error.severity}
-                  tone={SEVERITY_TONES[error.severity?.toLowerCase()] ?? "border-white/10 bg-white/5 text-slate-300"}
-                />
-              </div>
-            </td>
-            <td className="px-5 py-4 align-top text-sm">
-              {error.assignedUserName ? (
-                <span className="text-slate-200">{error.assignedUserName}</span>
-              ) : (
-                <span className="text-slate-500">Unassigned</span>
-              )}
-            </td>
-            <td className="px-5 py-4 align-top text-right">
-              <p className="font-medium tabular-nums text-white">{formatNumber(error.count7d)}</p>
-              <p className="mt-1 text-xs tabular-nums text-slate-400">{formatNumber(error.count24h)} in 24h</p>
-            </td>
-            <td className="px-5 py-4 align-top text-right font-medium tabular-nums text-slate-200">
-              {formatNumber(error.affectedUsers)}
-            </td>
-            <td className="px-5 py-4 align-top text-sm">
-              <p className="text-slate-200">{formatDate(error.lastSeen)}</p>
-              <p className="mt-1 text-xs text-slate-400">First {formatDate(error.firstSeen)}</p>
-            </td>
-          </tr>
-        ))}
-      </DataTable>
-
-      <div className="flex items-center justify-between gap-4 text-sm text-slate-300">
-        <p>{total === 0 ? "No issues match these filters" : `Showing ${rangeStart}–${rangeEnd} of ${total}`}</p>
-        <div className="flex items-center gap-3">
-          <button
-            className="button-secondary"
-            type="button"
-            onClick={() => setPage((current) => Math.max(current - 1, 0))}
-            disabled={page === 0}
-          >
-            Previous
-          </button>
-          <button
-            className="button-secondary"
-            type="button"
-            onClick={() => setPage((current) => current + 1)}
-            disabled={(page + 1) * PAGE_SIZE >= total}
-          >
-            Next
-          </button>
+        <div className="issue-meta flex flex-wrap items-center gap-x-1.5 pl-4 text-xs leading-4 text-muted">
+          <span className="text-fg">{projectName}</span>
+          <span aria-hidden className="issue-sep">·</span>
+          <span>{level}</span>
+          <span aria-hidden className="issue-sep">·</span>
+          <span title={formatAbsolute(row.firstSeen)}>first seen {formatRelative(row.firstSeen, now)}</span>
+          {row.githubIssueUrl ? (
+            <>
+              <span aria-hidden className="issue-sep">·</span>
+              <a className="underline max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center" href={row.githubIssueUrl} target="_blank" rel="noreferrer">
+                GitHub #{row.githubIssueNumber}
+              </a>
+            </>
+          ) : null}
         </div>
       </div>
+      <span className="text-right tabular-nums">
+        <b className="font-semibold">{formatNumber(row.count24h)}</b>
+        <span className="unit text-xs text-muted"> in 24h</span>
+      </span>
+      <span className="col-wide text-right tabular-nums text-muted">{formatNumber(row.count7d)}</span>
+      <span className="col-wide text-right tabular-nums text-muted">{formatNumber(row.affectedUsers)}</span>
+      <span>
+        {writable ? (
+          <AssignMenu
+            variant="avatar"
+            projectId={row.projectId}
+            groupId={row.groupId}
+            meId={meId}
+            assignedUserId={row.assignedUserId}
+            assignedUserName={row.assignedUserName}
+          />
+        ) : (
+          <span
+            title={row.assignedUserName ?? "Unassigned"}
+            className="flex h-6 w-6 items-center justify-center rounded-full border border-line text-[11px] font-semibold text-muted"
+          >
+            {row.assignedUserName ? initials(row.assignedUserName) : "-"}
+          </span>
+        )}
+      </span>
+      <span className="col-wide text-[13px] text-muted" title={formatAbsolute(row.lastSeen)}>
+        {formatRelative(row.lastSeen, now)}
+      </span>
+    </li>
+  );
+}
+
+function Filters({
+  query,
+  update,
+  projects,
+  meId,
+}: {
+  query: ListQuery;
+  update: (patch: Partial<ListQuery>, options?: { replace?: boolean }) => void;
+  projects: Array<{ id: string; name: string }>;
+  meId: string;
+}) {
+  const { data: assignees } = useQuery({
+    queryKey: ["error-assignees", query.projectId ?? "all"],
+    queryFn: () => api.errorAssignees(query.projectId ?? undefined),
+  });
+  const [userDraft, setUserDraft] = useState(query.user ?? "");
+  useEffect(() => setUserDraft(query.user ?? ""), [query.user]);
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 max-[720px]:flex-nowrap max-[720px]:overflow-x-auto">
+      <ChipSelect
+        label="Status"
+        value={query.status}
+        onChange={(value) => update({ status: value as ListQuery["status"] })}
+        options={[
+          ["open", "Open, Reopened"],
+          ["reopened", "Reopened"],
+          ["closed", "Closed"],
+          ["any", "Any"],
+        ]}
+        isDefault={query.status === DEFAULT_QUERY.status}
+      />
+      <ChipSelect
+        label="Project"
+        value={query.projectId ?? ""}
+        onChange={(value) => update({ projectId: value || null })}
+        options={[["", "All"], ...projects.map((project): [string, string] => [project.id, project.name])]}
+        isDefault={!query.projectId}
+      />
+      <ChipSelect
+        label="Assignee"
+        value={query.assignee}
+        onChange={(value) => update({ assignee: value })}
+        options={[
+          ["any", "Any"],
+          ["none", "Unassigned"],
+          ["assigned", "Assigned"],
+          ["me", "Me"],
+          ...(assignees?.users ?? []).filter((user) => user.id !== meId).map((user): [string, string] => [user.id, user.name]),
+        ]}
+        isDefault={query.assignee === "any"}
+      />
+      <ChipSelect
+        label="Severity"
+        value={query.severity ?? ""}
+        onChange={(value) => update({ severity: value || null })}
+        options={[["", "Any"], ...SEVERITIES.map((level): [string, string] => [level, level])]}
+        isDefault={!query.severity}
+      />
+      <ChipSelect
+        label="Last seen"
+        value={query.range}
+        onChange={(value) => {
+          if (value === "custom") {
+            const today = localDay(new Date());
+            update({ range: "custom", from: query.from ?? today, to: query.to ?? today });
+          } else {
+            update({ range: value as ListQuery["range"], from: null, to: null });
+          }
+        }}
+        options={[...RANGE_PRESETS.map((preset): [string, string] => [preset.id, preset.label]), ["custom", "Custom dates"]]}
+        isDefault={query.range === DEFAULT_QUERY.range}
+      />
+      {query.range === "custom" ? (
+        <span className="chip border-solid">
+          <label className="sr-only" htmlFor="range-from">From</label>
+          <input
+            id="range-from"
+            type="date"
+            className="bg-transparent text-xs text-fg max-[720px]:-my-px max-[720px]:self-stretch"
+            value={query.from ?? ""}
+            onChange={(event) => event.target.value && update({ from: event.target.value })}
+          />
+          <span aria-hidden>to</span>
+          <label className="sr-only" htmlFor="range-to">To</label>
+          <input
+            id="range-to"
+            type="date"
+            className="bg-transparent text-xs text-fg max-[720px]:-my-px max-[720px]:self-stretch"
+            value={query.to ?? ""}
+            onChange={(event) => event.target.value && update({ to: event.target.value })}
+          />
+        </span>
+      ) : null}
+      <form
+        className={`chip ${query.user ? "border-solid bg-raised" : "border-dashed"}`}
+        onSubmit={(event) => {
+          event.preventDefault();
+          update({ user: userDraft.trim() || null });
+        }}
+      >
+        <label htmlFor="affected-user">Affected user</label>
+        <input
+          id="affected-user"
+          value={userDraft}
+          onChange={(event) => setUserDraft(event.target.value)}
+          onBlur={() => userDraft.trim() !== (query.user ?? "") && update({ user: userDraft.trim() || null })}
+          placeholder="id, email or username"
+          className="w-36 bg-transparent text-xs text-fg outline-none placeholder:text-muted max-[720px]:-my-px max-[720px]:self-stretch"
+        />
+        {query.user ? (
+          <button type="button" aria-label="Clear affected user filter" className="max-[720px]:-my-px max-[720px]:inline-flex max-[720px]:w-11 max-[720px]:items-center max-[720px]:justify-center max-[720px]:self-stretch" onClick={() => update({ user: null })}>
+            <X className="h-3.5 w-3.5" aria-hidden />
+          </button>
+        ) : null}
+      </form>
+      <button
+        type="button"
+        aria-pressed={query.isNew}
+        className={`chip ${query.isNew ? "border-solid bg-raised text-fg" : "border-dashed"}`}
+        onClick={() => update({ isNew: !query.isNew })}
+      >
+        New in 24h
+      </button>
     </div>
   );
+}
+
+function ChipSelect({
+  label,
+  value,
+  onChange,
+  options,
+  isDefault,
+}: {
+  label: string;
+  value: string;
+  onChange: (value: string) => void;
+  options: Array<[string, string]>;
+  isDefault: boolean;
+}) {
+  const id = `filter-${label.toLowerCase().replace(/\s+/g, "-")}`;
+  return (
+    <span className={`chip ${isDefault ? "" : "bg-raised"}`}>
+      <label htmlFor={id}>{label}</label>
+      <select
+        id={id}
+        value={value}
+        onChange={(event) => onChange(event.target.value)}
+        className="cursor-pointer bg-transparent font-medium capitalize text-fg outline-none max-[720px]:-my-px max-[720px]:self-stretch"
+      >
+        {options.map(([optionValue, optionLabel]) => (
+          <option key={optionValue} value={optionValue}>
+            {optionLabel}
+          </option>
+        ))}
+      </select>
+    </span>
+  );
+}
+
+function EmptyRows({ query }: { query: ListQuery }) {
+  const kind = emptyListKind(query);
+  const allTime = showAllTimeHref(query);
+  const closed = <Link className="btn" to="/errors?status=closed&range=all">View closed issues</Link>;
+  if (kind === "nothing-open") {
+    return (
+      <EmptyState title="No open issues" action={closed}>
+        Closed issues reopen on their own if the error happens again.
+      </EmptyState>
+    );
+  }
+  if (kind === "filters") {
+    // Any range but any-time can be what hides the matches, so widening it is offered first and keeps the
+    // other filters; Clear filters would also drop the project or status the user chose.
+    return (
+      <EmptyState
+        title="No issues match these filters"
+        action={
+          <span className="flex flex-wrap justify-center gap-2">
+            {allTime ? <Link className="btn btn-primary" to={allTime}>Show all time</Link> : null}
+            <Link className="btn" to="/errors">Clear filters</Link>
+          </span>
+        }
+      />
+    );
+  }
+  // The range is the only narrowing (so it is not any-time and allTime is set): older open issues may exist,
+  // so say what was searched and offer the wider search first.
+  const searched = RANGE_PRESETS.find((preset) => preset.id === query.range)?.label.toLowerCase() ?? "the chosen range";
+  return (
+    <EmptyState
+      title={`No open issues seen in the ${searched}`}
+      action={
+        <span className="flex flex-wrap justify-center gap-2">
+          <Link className="btn btn-primary" to={allTime!}>Show all time</Link>
+          {closed}
+        </span>
+      }
+    >
+      Open issues last seen earlier than that are not listed.
+    </EmptyState>
+  );
+}
+
+function Skeleton() {
+  return (
+    <div aria-hidden>
+      {Array.from({ length: 6 }, (_, index) => (
+        <div key={index} className="issue-grid h-[52px] border-b border-line last:border-b-0">
+          <div className="flex flex-col gap-2">
+            <span className="h-2.5 w-3/5 rounded bg-raised" />
+            <span className="h-2 w-1/4 rounded bg-raised" />
+          </div>
+          <span className="h-2.5 rounded bg-raised" />
+          <span className="col-wide h-2.5 rounded bg-raised" />
+          <span className="col-wide h-2.5 rounded bg-raised" />
+          <span className="h-6 w-6 rounded-full bg-raised" />
+          <span className="col-wide h-2.5 rounded bg-raised" />
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function localDay(date: Date): string {
+  const pad = (value: number) => String(value).padStart(2, "0");
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
 }

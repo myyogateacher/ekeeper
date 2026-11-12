@@ -1,165 +1,94 @@
 # Frontend Architecture
 
-## Overview
+Vite, React 19, TypeScript, Tailwind 3.4, React Router 7, TanStack Query 5. The backend serves the built
+SPA from `frontend/dist/` with a fallback to `index.html`, so a new client route needs no backend change.
 
-The frontend is a Vite + React + TypeScript + Tailwind application focused on error operations workflows: dashboards, issue triage, project administration, user administration, source map management, and server settings.
+Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.tsx` (routes).
 
-Core entrypoints:
-- [frontend/src/main.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/main.tsx)
-- [frontend/src/App.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/App.tsx)
+## Where code goes
 
-## Design Direction
+| Kind | Location | Rule |
+|---|---|---|
+| Decision logic: filters, sorting, permissions, time, URL state | `frontend/src/lib/*.ts` | Pure, no React, no fetch. Every rule has a test in `*.test.ts` beside it. |
+| API calls | `frontend/src/lib/api.ts` | One `request()`; failures throw `ApiError` with the HTTP status. |
+| Shared UI and hooks | `frontend/src/components/` | Read lib helpers, never re-implement them. |
+| Screens | `frontend/src/pages/`, Settings sections in `pages/settings/` | Read the URL, call hooks, render. |
 
-The UI uses a glass-like enterprise SaaS style:
-- translucent panels
-- soft borders
-- backdrop blur
-- dense but readable data views
-- emphasis on tables, detail panes, and operational workflows
+**Canonical page: `pages/ErrorsPage.tsx`.** Copy its shape for a new page: state in the URL, logic in
+`lib/`, the signed-in user from `useMe()`, writes through a shared mutation hook.
 
-The visual shell is implemented in:
-- [frontend/src/components/AppShell.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/components/AppShell.tsx)
+## Routes
 
-## Routing Model
+| Path | Screen |
+|---|---|
+| `/login` | Google sign-in |
+| `/errors` | Issues list, the home page. Filters, search, sort and range live in the query string. |
+| `/errors/:projectId/:groupId` | Issue detail. `?event=<eventId>` selects an event. GitHub issue bodies link here, so the path is fixed. |
+| `/settings/:section` | `projects`, `members`, `source-maps`, `github`, `mcp`, `server` |
+| `/`, `/dashboard`, unknown | Redirect to `/errors`. The backend lands every sign-in on `/dashboard`, which restores the page the user was sent away from when their session expired; Log out, here or in another tab, forgets it. |
+| `/projects`, `/users`, `/minimaps`, `/settings` | Redirect to their Settings section. |
 
-The app uses React Router with:
-- a protected app layout
-- a public login route
-- nested product routes
+## Theme and styles
 
-Primary routes:
-- `/login`
-- `/dashboard`
-- `/projects`
-- `/users`
-- `/errors`
-- `/errors/:projectId/:groupId`
-- `/minimaps`
-- `/settings`
+- Colours are CSS variables in `frontend/src/theme/tokens.css`, the only file allowed to hold a colour
+  literal. `tailwind.config.ts` replaces Tailwind's palette with these tokens, so `bg-slate-900` compiles to
+  nothing; use `bg-surface`, `text-muted`, `border-line` and the rest.
+- Dark and light: an inline script in `index.html` sets `data-theme` before first paint from the stored
+  choice (`localStorage["ekeeper:theme"]`), else the system preference. `components/ThemeSwitch.tsx` changes it.
+- Component classes (`.card`, `.btn`, `.input`, `.chip`, `.tag`, `.warn-box`) are in `src/index.css`
+  under `@layer components`. Controls grow to 44px under 720px wide.
+- The issue grid collapses on the list's own width (container query), not the viewport, because the
+  sidebar takes 220px at tablet widths.
+- The owner picker and the status split button are disclosures of plain buttons (`components/usePopover.ts`:
+  focus into the panel on open, Escape back to the trigger, Tab out closes), not `role="menu"`.
 
-Routing is defined in:
-- [frontend/src/App.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/App.tsx)
+## Data
 
-## Data Fetching
+- TanStack Query. 400, 401, 403 and 404 are never retried; anything else retries twice.
+- Session: `api.me` resolves a 401 to `null` (`lib/session.ts`), so signed out is a cached value, not an error.
+  A 401 on any other query or mutation writes `null` into the `["me"]` query (`endSession` in `main.tsx`) and
+  `ProtectedLayout` redirects to `/login`. Never remove or invalidate `["me"]` from a handler: the layout has
+  it mounted and refetches it at once, which looped a signed-out user on the loader.
+  A failure of `/api/me` that is not a 401 (a 5xx, no network) shows "Couldn't reach eKeeper" with Try again
+  and does not redirect.
+  The cache belongs to one user: logout and a 401 call `endSession` (`lib/session.ts`), which removes every cached
+  query except `["me"]` and sets that to `null`. Tabs share one cookie jar, so `useSessionSync` posts the signed
+  in user's id (or `null`) on a `BroadcastChannel` and a tab holding a different user drops its cache and
+  refetches `["me"]`; without that, Back in a second tab rendered the previous user's cached list.
+- Ids in URLs: ids are data, and a group id is a sender's fingerprint verbatim, so it can hold `/`, `..` or `?`.
+  Build request paths with the `path` tag and issue routes with `issuePath` (`lib/url.ts`); never interpolate an
+  id raw. `url.test.ts` fails on a raw interpolation in `api.ts`. The detail page reads its ids back with
+  `idsFromIssuePath(location.pathname)`, not `useParams`: the router decodes `%2F` in a param twice.
+- `RouteErrorBoundary` wraps the routed content (and the issue detail again): a render error shows a message with
+  a way back and is logged, instead of blanking the app. Parse payload JSON with `parseMaybeJson`, which only
+  returns the shape the caller reads.
+  Any failed mutation shows a toast unless the mutation handles its own error.
+- **Issues list** loads up to 500 rows of the current view (five pages of 100) through
+  `fetchIssueSet`. Status, assignee, project, affected user and range go to the API; search, severity,
+  "new in 24h" and sort run in the browser on those rows. Above 500 the page says so. The set counts as
+  complete only when every page reports the same total; otherwise it refetches once and then shows a
+  "list changed while loading" notice.
+- **Times**: ClickHouse sends UTC without a zone. Always go through `lib/time.ts` (`parseServerTime`,
+  `formatRelative`, `formatAbsolute`); never `new Date(serverValue)`. Absolute times print their zone.
+- **Status and owner changes** go through `components/workflow.tsx`. No optimistic update: the toast
+  follows the server's answer. A failed change is treated as unknown (the backend writes before its last
+  step can fail), so both list and detail refetch.
 
-The frontend uses TanStack Query for:
-- session bootstrap
-- server state caching
-- mutation lifecycle handling
-- invalidation after writes
+## Permissions
 
-The API client lives in:
-- [frontend/src/lib/api.ts](/Users/apple/Desktop/experiments/ekeeper/frontend/src/lib/api.ts)
+`lib/permissions.ts` mirrors the backend guards in `backend/src/lib/auth.ts` and the
+`requireWorkspaceRole` calls in `backend/src/routes/api.ts`, so a control renders exactly when its call
+would succeed. The backend stays the authority. When a backend guard changes, change the matching rule
+and its table test in `permissions.test.ts`.
 
-This file centralizes:
-- authenticated JSON requests
-- form upload requests for minimaps
-- project, user, error, workflow, and settings endpoints
+- Close, assign and GitHub edits: admin, or a manager membership on that project.
+- Settings sections: Members and Source maps for admin and workspace viewer; Server for admin only.
 
-## Shell and Navigation
+## Tests and checks
 
-The app shell provides:
-- collapsible sidebar navigation
-- responsive desktop/mobile layout
-- session-aware logout
-- admin-only navigation entries for minimaps and settings
+```bash
+npm test --prefix frontend      # node:test over src/**/*.test.ts, Node 22.6+, no browser
+npm run build --prefix frontend  # tsc --noEmit, then vite build
+```
 
-Implemented in:
-- [frontend/src/components/AppShell.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/components/AppShell.tsx)
-
-## Major Screens
-
-### Dashboard
-
-- top-level project health cards
-- recurring issue visibility
-- quick monitoring summary
-
-File:
-- [frontend/src/pages/DashboardPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/DashboardPage.tsx)
-
-### Projects
-
-- create and remove projects
-- view DSNs and project metadata
-
-File:
-- [frontend/src/pages/ProjectsPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/ProjectsPage.tsx)
-
-### Users
-
-- add, edit, remove users
-- manage workspace roles
-- manage project access
-
-File:
-- [frontend/src/pages/UsersPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/UsersPage.tsx)
-
-### Errors
-
-- issue list filtering
-- workflow visibility
-- assignment filtering
-- project-scoped drill-down entry
-
-File:
-- [frontend/src/pages/ErrorsPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/ErrorsPage.tsx)
-
-### Error Detail
-
-- workflow actions
-- assignment controls
-- deobfuscated stack traces when source maps exist
-- breadcrumbs, request data, tags, user, extra payload, contexts
-- raw event download
-
-File:
-- [frontend/src/pages/ErrorDetailPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/ErrorDetailPage.tsx)
-
-### Minimaps
-
-- project-scoped source map uploads
-- artifact listing
-- retention: artifacts are removed once they fall outside the configurable window
-  (`MINIMAPS_RETENTION_DAYS`, default 30) or beyond the most recent releases per project
-  (`MINIMAPS_KEEP_RELEASES`, default 10, 0 disables). Admins can trigger this manually, and
-  the backend also runs it on a daily schedule. Retention values come from the server
-  settings endpoint, so roles without access to it see generic copy.
-
-File:
-- [frontend/src/pages/MinimapsPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/MinimapsPage.tsx)
-
-### Settings
-
-- plugin-facing org/url/token values
-- selected project slug for plugin configuration
-- token regeneration
-- copy-ready Vite snippet
-
-File:
-- [frontend/src/pages/SettingsPage.tsx](/Users/apple/Desktop/experiments/ekeeper/frontend/src/pages/SettingsPage.tsx)
-
-## Shared Contracts
-
-The frontend consumes shared application types from:
-- [shared/src/contracts.ts](/Users/apple/Desktop/experiments/ekeeper/shared/src/contracts.ts)
-
-This keeps frontend and backend aligned for:
-- users
-- projects
-- issue summaries
-- issue detail payloads
-- minimap artifacts
-- server settings
-
-## Build and Delivery
-
-Development:
-- Vite runs the dev server directly
-- API, auth, and ingest traffic are proxied to the backend
-
-Production:
-- Vite builds the SPA into `frontend/dist/`
-- the Bun backend serves the built assets
-
-This keeps development fast while still allowing a single-server production deployment.
+There is no component or browser test runner; pages stay thin so the logic worth testing sits in `lib/`.
