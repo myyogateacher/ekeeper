@@ -19,6 +19,7 @@ import {
   applyListPatch,
   emptyListKind,
   isNewIssue,
+  listOriginState,
   listShortcut,
   listStats,
   matchSavedView,
@@ -66,6 +67,8 @@ export function ErrorsPage() {
 
   const rows = useMemo(() => (set ? applyBrowserFilters(set.rows, query, now) : []), [set, query, now]);
   const stats = listStats(rows, now);
+  // Carried by every row link so the issue page can step to the previous and next issue of this list.
+  const listState = useMemo(() => listOriginState(query), [query]);
   const view = matchSavedView(query);
   const title = SAVED_VIEWS.find((entry) => entry.id === view)?.label ?? "Issues";
   const projectNames = useMemo(() => new Map((projects?.projects ?? []).map((project) => [project.id, project.name])), [projects]);
@@ -232,6 +235,7 @@ export function ErrorsPage() {
                 projectName={projectNames.get(row.projectId) ?? row.projectId}
                 canWrite={canWriteProject(me, row.projectId)}
                 meId={me.user.id}
+                listState={listState}
                 linkRef={(element) => {
                   rowLinks.current[index] = element;
                 }}
@@ -288,6 +292,7 @@ function IssueRow({
   projectName,
   canWrite,
   meId,
+  listState,
   linkRef,
 }: {
   row: ErrorGroupSummary;
@@ -295,6 +300,7 @@ function IssueRow({
   projectName: string;
   canWrite: boolean;
   meId: string;
+  listState: { list: string };
   linkRef: (element: HTMLAnchorElement | null) => void;
 }) {
   const workflow = useIssueWorkflow();
@@ -320,7 +326,7 @@ function IssueRow({
         <div className="issue-line flex min-w-0 items-center gap-2">
           <SeverityDot level={level} className="issue-dot" />
           {href ? (
-            <Link ref={linkRef} to={href} className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none">
+            <Link ref={linkRef} to={href} state={listState} className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none">
               {title}
             </Link>
           ) : (

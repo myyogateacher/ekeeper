@@ -1,11 +1,9 @@
 import type {
-  DuplicateIssueGroup,
-  ErrorEventDetail,
+  ErrorDetailResponse,
   ErrorGroupSummary,
   IssueState,
   MeResponse,
   MinimapArtifact,
-  OccurrenceSummary,
   Project,
   ProjectGithubIntegration,
   ProjectMembership,
@@ -174,9 +172,10 @@ export const api = {
       labelsAdded: number;
     }>(path`/api/projects/${projectId}/github-integration/cleanup-duplicates`, { method: "POST" }),
   errorDetail: (projectId: string, groupId: string, eventId?: string) =>
-    request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[]; duplicateGroups: DuplicateIssueGroup[] }>(
+    request<ErrorDetailResponse>(
       path`/api/projects/${projectId}/errors/${groupId}` + (eventId ? `?${new URLSearchParams({ eventId })}` : ""),
     ),
+
   updateIssueWorkflow: (projectId: string, groupId: string, payload: { state?: IssueState; assignedUserId?: string | null }) =>
     request<{ issue: ErrorGroupSummary | undefined }>(path`/api/projects/${projectId}/errors/${groupId}/workflow`, {
       method: "PATCH",

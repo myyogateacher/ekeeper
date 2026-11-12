@@ -1,11 +1,10 @@
 // Pure helpers for the issue detail page, kept out of the component so each rule has a test.
-import type { Breadcrumb, IssueState, OccurrenceSummary } from "@ekeeper/shared";
-import { parseServerTime } from "./time.ts";
+import type { Breadcrumb, DuplicateIssueGroup, EventNavigation, IssueState } from "@ekeeper/shared";
+import { pluralize } from "./plural.ts";
+import { formatRelative, parseServerTime } from "./time.ts";
+import { formatNumber } from "./utils.ts";
 
 type UnknownRecord = Record<string, unknown>;
-
-const HOUR = 3_600_000;
-const DAY = 24 * HOUR;
 
 /** Titles are always "<type>: <message>" (backend/src/lib/ingest.ts:191); a title without one renders whole. */
 export function splitTitle(title: string): [string, string] {
@@ -13,63 +12,82 @@ export function splitTitle(title: string): [string, string] {
   return index > 0 ? [title.slice(0, index), title.slice(index + 2)] : [title, ""];
 }
 
-export interface OccurrenceStats {
-  count24h: number;
-  count7d: number;
-  firstSeen: string | null;
-  lastSeen: string | null;
-  /** 24 rolling hours, oldest first: index 23 is the hour ending now. */
-  hourly: number[];
+/** The 24 hourly bars and the tallest one. */
+export interface HourlyChart {
+  bars: number[];
+  peak: number;
 }
 
 /**
- * Stats and the 24 hour chart from one pass with one `now`, so the chart always sums to the 24h number
- * beside it. The detail endpoint sends every occurrence of the group newest first with no LIMIT
- * (backend/src/routes/api.ts:836-846), which is what makes these exact rather than sampled. An event
- * stamped ahead of the viewer's clock counts in the latest hour rather than falling off the chart.
+ * The bars for "Events per hour, last 24h", or null when the server's array cannot be drawn honestly. The axis
+ * and every bar's "Nh ago" tooltip assume exactly 24 slots, oldest first (`stats.hourly24h` in
+ * shared/src/contracts.ts), so a shorter or longer array would label each bar with the wrong hour; the card
+ * says the counts are unavailable instead of drawing a shifted chart. The bars come from the server, never from
+ * a client side bucketing of event times, so they always add up to the "Events 24h" figure beside them.
  */
-export function occurrenceStats(occurrences: OccurrenceSummary[], now: number): OccurrenceStats {
-  const hourly = new Array<number>(24).fill(0);
-  let count7d = 0;
-  for (const occurrence of occurrences) {
-    const at = parseServerTime(occurrence.timestamp)?.getTime();
-    if (at === undefined) continue;
-    const age = Math.max(0, now - at);
-    if (age < 7 * DAY) count7d += 1;
-    if (age < DAY) hourly[23 - Math.floor(age / HOUR)] += 1;
+export function hourlyChart(hourly24h: readonly number[]): HourlyChart | null {
+  if (!Array.isArray(hourly24h) || hourly24h.length !== 24 || !hourly24h.every((count) => Number.isFinite(count) && count >= 0)) {
+    return null;
   }
-  return {
-    count24h: hourly.reduce((sum, value) => sum + value, 0),
-    count7d,
-    lastSeen: occurrences[0]?.timestamp ?? null,
-    firstSeen: occurrences.at(-1)?.timestamp ?? null,
-    hourly,
-  };
+  return { bars: [...hourly24h], peak: Math.max(...hourly24h) };
 }
 
 export interface EventNav {
-  /** 0 is the latest event. -1 when the shown event is not in the list. */
-  index: number;
-  total: number;
+  /** 1 is the newest event; null when the server's position is outside 1..total. */
+  position: number | null;
+  total: number | null;
+  /** Event ids for the Latest, Newer, Older and Oldest buttons; null where the button has nowhere to go. */
   latest: string | null;
   newer: string | null;
   older: string | null;
   oldest: string | null;
 }
 
-/** Event ids for the Latest, Newer, Older and Oldest buttons; null where the button has nowhere to go. */
-export function eventNav(occurrences: OccurrenceSummary[], currentEventId: string): EventNav {
-  const total = occurrences.length;
-  const index = occurrences.findIndex((occurrence) => occurrence.eventId === currentEventId);
-  const at = (position: number) => (index >= 0 && position !== index ? occurrences[position]?.eventId ?? null : null);
+/**
+ * The event switcher from the server's `navigation` (shared/src/contracts.ts EventNavigation). Latest and
+ * Oldest are disabled on the event they name, which is how the contract says to read them: they are always set
+ * and equal the shown event at the edges. A missing `navigation` disables all four rather than guessing, and the
+ * position reads "?" (the page never gets here with an event but no navigation, so this is the contract's own
+ * null, not a state the server produces).
+ */
+export function eventNav(navigation: EventNavigation | null | undefined, currentEventId: string): EventNav {
+  if (!navigation) return { position: null, total: null, latest: null, newer: null, older: null, oldest: null };
+  const inRange = Number.isInteger(navigation.position) && navigation.position >= 1 && navigation.position <= navigation.total;
   return {
-    index,
-    total,
-    latest: index > 0 ? at(0) : null,
-    newer: index > 0 ? at(index - 1) : null,
-    older: index >= 0 && index < total - 1 ? at(index + 1) : null,
-    oldest: index >= 0 && index < total - 1 ? at(total - 1) : null,
+    position: inRange ? navigation.position : null,
+    total: navigation.total,
+    latest: navigation.latestEventId !== currentEventId ? navigation.latestEventId : null,
+    newer: navigation.newerEventId,
+    older: navigation.olderEventId,
+    oldest: navigation.oldestEventId !== currentEventId ? navigation.oldestEventId : null,
   };
+}
+
+/**
+ * "Closed 2h ago. Reopens on its own if a new event arrives." for a closed issue, null for any other state.
+ * `closedAt` is the one time on this page that is ISO with a Z (the rest are zone-less ClickHouse digits);
+ * parseServerTime reads both. The contract types closedAt as nullable even for a closed issue (the only writer,
+ * backend/src/lib/issue-workflow.ts, always sets it when it closes one), so a missing or unreadable value
+ * still says the issue reopens, just without the age, instead of printing "Closed never."
+ */
+export function closedNote(state: IssueState, closedAt: string | null, now: number): string | null {
+  if (state !== "closed") return null;
+  const closed = parseServerTime(closedAt) ? `Closed ${formatRelative(closedAt, now)}.` : "Closed.";
+  return `${closed} Reopens on its own if a new event arrives.`;
+}
+
+/**
+ * The line under a similar issue's title: "612 events · 201 users · release 2026.11.12-1". The release is left
+ * out when the group's newest event had none (the server sends null, never ""), so the line never ends in
+ * "release null".
+ */
+export function similarSummary(group: Pick<DuplicateIssueGroup, "events" | "affectedUsers" | "latestRelease">): string {
+  const parts = [
+    `${formatNumber(group.events)} ${pluralize(group.events, "event")}`,
+    `${formatNumber(group.affectedUsers)} ${pluralize(group.affectedUsers, "user")}`,
+  ];
+  if (group.latestRelease) parts.push(`release ${group.latestRelease}`);
+  return parts.join(" · ");
 }
 
 export interface StatusAction {
@@ -132,12 +150,23 @@ export function exceptionParts(exceptionInput: unknown): { type: string; value: 
   };
 }
 
+/**
+ * One stack frame as stored. Every field is `unknown` because a public DSN can send any JSON: the SDK's
+ * function, filename, lineno and colno, plus what the backend adds on read (`in_app: false` and `package` for
+ * node_modules code, and the three source line fields on a source mapped frame, backend/src/lib/stack-frames.ts).
+ * A reader checks the type of each field it uses (lib/stack-trace.ts does).
+ */
 export interface Frame {
   function?: unknown;
   filename?: unknown;
   lineno?: unknown;
   colno?: unknown;
   deobfuscated?: unknown;
+  in_app?: unknown;
+  package?: unknown;
+  pre_context?: unknown;
+  context_line?: unknown;
+  post_context?: unknown;
 }
 
 /** Only object entries are frames; an SDK or a hostile sender can put null, numbers or strings in the list. */

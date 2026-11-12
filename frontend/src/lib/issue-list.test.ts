@@ -8,6 +8,9 @@ import {
   applyBrowserFilters,
   applyListPatch,
   emptyListKind,
+  issuePosition,
+  listOriginQuery,
+  listOriginState,
   listShortcut,
   matchSavedView,
   mergePages,
@@ -241,4 +244,39 @@ test("Show all time keeps every other filter, and is offered only while a range 
   assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, status: "closed", q: "x", range: "30d" }), "/errors?status=closed&range=all&q=x");
   assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, range: "custom", from: "2026-11-01", to: "2026-11-02" }), "/errors?range=all");
   assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, range: "all" }), null);
+});
+
+test("a list row's router state round trips to the same query, and anything else reads as no list", () => {
+  const query = parseListQuery(new URLSearchParams("status=closed&projectId=p1&q=zoom&sort=users&severity=fatal"));
+  assert.deepEqual(listOriginQuery(listOriginState(query)), query);
+  assert.deepEqual(listOriginQuery(listOriginState(DEFAULT_QUERY)), DEFAULT_QUERY);
+  for (const state of [null, undefined, "list", 5, {}, { list: 5 }, { list: null }, []]) {
+    assert.equal(listOriginQuery(state), null, JSON.stringify(state));
+  }
+  // A malformed query string in the state falls back to defaults like a pasted URL does.
+  assert.deepEqual(listOriginQuery({ list: "status=bogus" }), DEFAULT_QUERY);
+});
+
+test("an issue's place in the list gives 'N of M' and its neighbours, none at either end", () => {
+  const rows = ["a", "b", "c"].map((id) => row(id));
+  assert.deepEqual(issuePosition(rows, "p1", "a"), { position: 1, total: 3, previous: null, next: { projectId: "p1", groupId: "b" } });
+  assert.deepEqual(issuePosition(rows, "p1", "b"), { position: 2, total: 3, previous: { projectId: "p1", groupId: "a" }, next: { projectId: "p1", groupId: "c" } });
+  assert.deepEqual(issuePosition(rows, "p1", "c"), { position: 3, total: 3, previous: { projectId: "p1", groupId: "b" }, next: null });
+  assert.deepEqual(issuePosition(rows.slice(0, 1), "p1", "a"), { position: 1, total: 1, previous: null, next: null });
+});
+
+test("an issue not in the list, or in another project with the same group id, has no position", () => {
+  const rows = [row("a"), row("b", { projectId: "p2" })];
+  assert.equal(issuePosition(rows, "p1", "gone"), null);
+  assert.equal(issuePosition(rows, "p1", "b"), null, "group ids repeat across projects; the pair is the identity");
+  assert.equal(issuePosition(rows, "p2", "b")?.position, 2);
+  assert.equal(issuePosition([], "p1", "a"), null);
+});
+
+// "." and ".." have no URL (issuePath), so the list draws them without a link. As a neighbour they would stop
+// the stepper dead, so they are skipped and not counted.
+test("a row with no addressable id is stepped over and left out of the count", () => {
+  const rows = [row("a"), row(".."), row("c")];
+  assert.deepEqual(issuePosition(rows, "p1", "a"), { position: 1, total: 2, previous: null, next: { projectId: "p1", groupId: "c" } });
+  assert.equal(issuePosition(rows, "p1", ".."), null);
 });
