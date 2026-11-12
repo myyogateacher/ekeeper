@@ -5,11 +5,35 @@ import type { EventNavigation, IssueStats } from "@ekeeper/shared";
 // string and a time is whatever the SQL selected. This file turns those rows into the contract in
 // shared/src/contracts.ts and holds every branch worth a table test, so nothing here touches I/O.
 
-// The chart is one bar per UTC clock hour for the last 24 hours. Same count as the old client side chart
-// (frontend/src/lib/issue-detail.ts occurrenceStats, `new Array(24)`), and the canvas draws 24 bars.
+// The chart has 24 bars, as the canvas draws and as the old client side chart counted
+// (frontend/src/lib/issue-detail.ts occurrenceStats, `new Array(24)`).
 export const HOURLY_BUCKETS = 24;
 
-export interface StatsTotalsRow {
+// The totals and the 24 hourly counts come back as ONE row from ONE query, because ClickHouse reads `now()` once
+// per query: every window in that row shares one clock, so sum(hourly24h) equals events24h exactly. Two queries
+// would each read their own now() and could disagree by an event that crossed a bucket edge between them.
+// Bucket i holds [now - (24 - i)h, now - (23 - i)h), and the last has no upper bound, so an event stamped ahead of
+// the server clock is counted there, the way events24h counts it, instead of being in a window and no bar.
+//
+// `now('UTC')` and hour intervals, not `now() - INTERVAL 1 DAY` like the list's countIf: a day interval follows the
+// server time zone's calendar and is 23 or 25 hours across a daylight saving change, which would make the
+// window and the buckets disagree twice a year. UTC has no such day.
+export const EVENTS_24H_SQL = "countIf(timestamp >= now('UTC') - INTERVAL 24 HOUR)";
+export const EVENTS_7D_SQL = "countIf(timestamp >= now('UTC') - INTERVAL 168 HOUR)";
+
+/**
+ * The 24 `countIf(...) AS hourN` select items, oldest first. Static text built from constants, never from input.
+ * The aliases hour0 to hour23 are not columns of `events` (defect register 20); hourlyFromRow reads them back.
+ */
+export function hourlyColumnsSql(): string {
+  return Array.from({ length: HOURLY_BUCKETS }, (_, index) => {
+    const from = `timestamp >= now('UTC') - INTERVAL ${HOURLY_BUCKETS - index} HOUR`;
+    const to = index === HOURLY_BUCKETS - 1 ? "" : ` AND timestamp < now('UTC') - INTERVAL ${HOURLY_BUCKETS - 1 - index} HOUR`;
+    return `countIf(${from}${to}) AS hour${index}`;
+  }).join(",\n        ");
+}
+
+export type StatsRow = {
   totalEvents: string | number;
   events24h: string | number;
   events7d: string | number;
@@ -17,13 +41,7 @@ export interface StatsTotalsRow {
   // max over no rows, so a group with no events is read from totalEvents, never from these.
   firstSeenMs: string | number;
   lastSeenMs: string | number;
-}
-
-export interface HourlyRow {
-  // 0 is the hour containing now, 23 is 23 hours earlier.
-  hoursAgo: string | number;
-  eventCount: string | number;
-}
+} & Record<string, string | number>;
 
 /**
  * Milliseconds since the epoch to ISO 8601 UTC with Z. The ClickHouse JSON output prints DateTime64 as digits
@@ -34,31 +52,20 @@ export function isoFromEpochMs(value: string | number): string {
   return new Date(Number(value)).toISOString();
 }
 
-/**
- * 24 counts, oldest first, from the sparse rows ClickHouse returns (an hour with no event has no row). Entry 23
- * is the hour containing now. A row outside 0 to 23 or with a non-integer hoursAgo is ignored rather than
- * thrown on: the query bounds the window, so this only guards the array from being indexed out of range.
- */
-export function fillHourly(rows: HourlyRow[]): number[] {
-  const hourly = new Array<number>(HOURLY_BUCKETS).fill(0);
-  for (const row of rows) {
-    const hoursAgo = Number(row.hoursAgo);
-    if (Number.isInteger(hoursAgo) && hoursAgo >= 0 && hoursAgo < HOURLY_BUCKETS) {
-      hourly[HOURLY_BUCKETS - 1 - hoursAgo] = Number(row.eventCount);
-    }
-  }
-  return hourly;
+/** The hour0 to hour23 columns of a stats row as 24 numbers, oldest first. */
+export function hourlyFromRow(row: Record<string, string | number>): number[] {
+  return Array.from({ length: HOURLY_BUCKETS }, (_, index) => Number(row[`hour${index}`]));
 }
 
-export function buildIssueStats(totals: StatsTotalsRow, hourlyRows: HourlyRow[]): IssueStats {
-  const totalEvents = Number(totals.totalEvents);
+export function buildIssueStats(row: StatsRow): IssueStats {
+  const totalEvents = Number(row.totalEvents);
   return {
     totalEvents,
-    events24h: Number(totals.events24h),
-    events7d: Number(totals.events7d),
-    hourly24h: fillHourly(hourlyRows),
-    firstSeen: totalEvents > 0 ? isoFromEpochMs(totals.firstSeenMs) : null,
-    lastSeen: totalEvents > 0 ? isoFromEpochMs(totals.lastSeenMs) : null,
+    events24h: Number(row.events24h),
+    events7d: Number(row.events7d),
+    hourly24h: hourlyFromRow(row),
+    firstSeen: totalEvents > 0 ? isoFromEpochMs(row.firstSeenMs) : null,
+    lastSeen: totalEvents > 0 ? isoFromEpochMs(row.lastSeenMs) : null,
   };
 }
 

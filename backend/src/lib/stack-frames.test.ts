@@ -28,6 +28,23 @@ describe("classifyFrame: a frame under node_modules is framework code, anything 
     });
   }
 
+  // NODE_MODULES_PACKAGE is a module level /g regex, whose lastIndex a .test() or .exec() would carry into the next
+  // call and make the second frame with the same filename miss. classifyFrame reads it with matchAll, which works
+  // on a copy; this pins that, in a row and with other filenames between.
+  test("the same filename classified repeatedly, and between other filenames, gives the same answer every time", () => {
+    const frame = (filename: string) => ({ filename, function: "f", lineno: 1 });
+    const filenames = demoted.map((entry) => entry.filename);
+
+    for (const filename of [...filenames, ...filenames, ...filenames.slice().reverse()]) {
+      const result = classifyFrame(frame(filename)) as Record<string, unknown>;
+      expect([filename, result.in_app]).toEqual([filename, false]);
+    }
+    for (const filename of ["src/app.ts", "https://x/assets/a.js", filenames[0]!, "src/app.ts", filenames[0]!, filenames[0]!]) {
+      const result = classifyFrame(frame(filename)) as Record<string, unknown>;
+      expect([filename, result.in_app === false]).toEqual([filename, filename.includes("node_modules")]);
+    }
+  });
+
   const untouched: Array<[string, Record<string, unknown>]> = [
     ["an app file", { filename: "../../../src/app/util_functions.js", in_app: true }],
     ["a bundle URL", { filename: "https://teacher.myyogateacher.com/assets/index-B3NerMcJ.js", in_app: true }],

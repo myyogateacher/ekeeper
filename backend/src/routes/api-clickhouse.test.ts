@@ -22,7 +22,6 @@ const realClickHouse = await import("../db/clickhouse");
 const realClient = realClickHouse.getClickHouseClient();
 let shadowTables = "";
 let aliasSetting: 0 | 1 = 0;
-let sessionTimezone: string | undefined;
 mock.module("../db/clickhouse", () => ({
   ...realClickHouse,
   getClickHouseClient: () => ({
@@ -32,11 +31,7 @@ mock.module("../db/clickhouse", () => ({
           ? {
               ...options,
               query: `WITH ${shadowTables} ${options.query}`,
-              clickhouse_settings: {
-                ...options.clickhouse_settings,
-                prefer_column_name_to_alias: aliasSetting,
-                ...(sessionTimezone ? { session_timezone: sessionTimezone } : {}),
-              },
+              clickhouse_settings: { ...options.clickhouse_settings, prefer_column_name_to_alias: aliasSetting },
             }
           : options,
       ),
@@ -53,8 +48,6 @@ const literal = (value: string) => `'${value.replaceAll("\\", "\\\\").replaceAll
 // Event times are SQL, not JS: ClickHouse evaluates `now()` once per query, so the rows and the query's own
 // windows share one clock and a test cannot straddle a window edge because the two clocks disagree.
 const ago = (interval: string) => `toDateTime64(now('UTC') - INTERVAL ${interval}, 3, 'UTC')`;
-// The start of the UTC clock hour `hours` ago: the exact edge a bucket is cut at.
-const hourStart = (hours: number) => `toDateTime64(toStartOfHour(now('UTC'), 'UTC') - INTERVAL ${hours} HOUR, 3, 'UTC')`;
 const at = (utc: string) => `toDateTime64('${utc}', 3, 'UTC')`;
 
 interface TestEvent {
@@ -229,68 +222,81 @@ describe("queryAffectedUsers", () => {
 describe("queryGroupStats", () => {
   beforeEach(() => {
     aliasSetting = 0;
-    sessionTimezone = undefined;
   });
 
-  // One event on each edge of the 24 hour window, plus the hour just outside it: the first event of the current
-  // UTC hour is entry 23, and 23 hours earlier is entry 0.
-  const edgeEvents: TestEvent[] = [
-    { project: "pA", group: "g1", at: hourStart(0) },
-    { project: "pA", group: "g1", at: hourStart(0) },
-    { project: "pA", group: "g1", at: hourStart(1) },
-    { project: "pA", group: "g1", at: hourStart(5) },
-    { project: "pA", group: "g1", at: hourStart(23) },
-    { project: "pA", group: "g1", at: ago("1441 MINUTE") },
-    { project: "pA", group: "g1", at: ago("3 DAY") },
-    { project: "pA", group: "g1", at: ago("8 DAY") },
-    { project: "pA", group: "other", at: hourStart(0) },
-    { project: "pB", group: "g1", at: hourStart(0) },
+  // Rolling hours: hourly24h[i] is [now - (24 - i)h, now - (23 - i)h). Each lower edge is inclusive, so an event
+  // exactly 1 hour old is in the last bar and one exactly 24 hours old is in the first. `ago` is evaluated by the
+  // same query's now(), so the edge events sit exactly on the edges.
+  const group = "g1";
+  const inWindow: TestEvent[] = [
+    { project: "pA", group, at: ago("30 MINUTE") },
+    { project: "pA", group, at: ago("30 MINUTE") },
+    { project: "pA", group, at: ago("1 HOUR") },
+    { project: "pA", group, at: ago("-3 HOUR") },
+    { project: "pA", group, at: ago("61 MINUTE") },
+    { project: "pA", group, at: ago("2 HOUR") },
+    { project: "pA", group, at: ago("330 MINUTE") },
+    { project: "pA", group, at: ago("1410 MINUTE") },
+    { project: "pA", group, at: ago("24 HOUR") },
+  ];
+  const outside: TestEvent[] = [
+    { project: "pA", group, at: ago("86401 SECOND") },
+    { project: "pA", group, at: ago("3 DAY") },
+    { project: "pA", group, at: ago("8 DAY") },
+    { project: "pA", group: "other", at: ago("30 MINUTE") },
+    { project: "pB", group, at: ago("30 MINUTE") },
   ];
 
-  test("24 counts, oldest first, one per UTC clock hour, zero filled, for this group only", async () => {
-    shadow(edgeEvents);
+  test("24 counts, oldest first, rolling hours with inclusive lower edges, for this group only", async () => {
+    shadow([...inWindow, ...outside]);
 
-    const stats = await queryGroupStats("pA", "g1");
+    const stats = await queryGroupStats("pA", group);
 
-    expect(stats.hourly24h).toHaveLength(24);
     const expected = new Array<number>(24).fill(0);
-    expected[23] = 2;
-    expected[22] = 1;
-    expected[18] = 1;
-    expected[0] = 1;
+    expected[23] = 4; // 30 min x2, exactly 1 h, and the event stamped 3 h ahead of the clock
+    expected[22] = 2; // 61 min and exactly 2 h
+    expected[18] = 1; // 5 h 30 min
+    expected[0] = 2; // 23 h 30 min and exactly 24 h
     expect(stats.hourly24h).toEqual(expected);
   });
 
-  test("the hours are UTC clock hours whatever time zone the server session runs in", async () => {
-    shadow(edgeEvents);
-    sessionTimezone = "Asia/Kolkata";
+  test("the chart sums to events24h: one now() for both, so an event on a bucket edge is counted once in each", async () => {
+    shadow([...inWindow, ...outside]);
 
-    const stats = await queryGroupStats("pA", "g1");
+    const stats = await queryGroupStats("pA", group);
 
-    expect(stats.hourly24h[23]).toBe(2);
-    expect(stats.hourly24h[22]).toBe(1);
-    expect(stats.hourly24h[0]).toBe(1);
+    expect(stats.hourly24h.reduce((sum, count) => sum + count, 0)).toBe(stats.events24h);
+    expect(stats.events24h).toBe(9);
   });
 
-  test("totals count every event of the group; the 24h and 7d windows are rolling and agree with the list's countIf", async () => {
-    shadow(edgeEvents);
+  test("an event one second older than 24 hours is in no bar and not in events24h, but is in the 7 day count and the total", async () => {
+    shadow([{ project: "pA", group, at: ago("86401 SECOND") }]);
 
-    const stats = await queryGroupStats("pA", "g1");
+    const stats = await queryGroupStats("pA", group);
 
-    expect(stats.totalEvents).toBe(8);
-    // hourStart(23) is still inside a rolling day; 1441 minutes ago and older are not.
-    expect(stats.events24h).toBe(5);
-    expect(stats.events7d).toBe(7);
+    expect(stats).toMatchObject({ events24h: 0, events7d: 1, totalEvents: 1 });
+    expect(stats.hourly24h.every((count) => count === 0)).toBe(true);
+  });
+
+  test("the total, 24h and 7d counts are for this group, and the 7 day window is rolling", async () => {
+    shadow([...inWindow, ...outside]);
+
+    const stats = await queryGroupStats("pA", group);
+
+    expect(stats.totalEvents).toBe(12);
+    expect(stats.events24h).toBe(9);
+    // the 9 in the last 24 hours, the one 24 h 1 s old, and the one 3 days old; not the one 8 days old
+    expect(stats.events7d).toBe(11);
   });
 
   test("firstSeen and lastSeen are ISO 8601 UTC with Z, not zoneless digits", async () => {
     shadow([
-      { project: "pA", group: "g1", at: at("2020-06-07 08:09:10.111") },
-      { project: "pA", group: "g1", at: at("2020-01-02 03:04:05.678") },
-      { project: "pA", group: "g1", at: at("2020-03-04 05:06:07.001") },
+      { project: "pA", group, at: at("2020-06-07 08:09:10.111") },
+      { project: "pA", group, at: at("2020-01-02 03:04:05.678") },
+      { project: "pA", group, at: at("2020-03-04 05:06:07.001") },
     ]);
 
-    const stats = await queryGroupStats("pA", "g1");
+    const stats = await queryGroupStats("pA", group);
 
     expect(stats.firstSeen).toBe("2020-01-02T03:04:05.678Z");
     expect(stats.lastSeen).toBe("2020-06-07T08:09:10.111Z");
@@ -298,7 +304,7 @@ describe("queryGroupStats", () => {
   });
 
   test("an unknown group is all zeros and null times, not an error and not 1970", async () => {
-    shadow([{ project: "pA", group: "g1" }]);
+    shadow([{ project: "pA", group, at: ago("30 MINUTE") }]);
 
     expect(await queryGroupStats("pA", "nope")).toEqual({
       totalEvents: 0,
@@ -309,21 +315,11 @@ describe("queryGroupStats", () => {
       lastSeen: null,
     });
   });
-
-  test("an event stamped ahead of the clock is counted in the totals but not drawn in a bar that does not exist yet", async () => {
-    shadow([{ project: "pA", group: "g1", at: ago("-3 HOUR") }, { project: "pA", group: "g1", at: hourStart(0) }]);
-
-    const stats = await queryGroupStats("pA", "g1");
-
-    expect(stats.totalEvents).toBe(2);
-    expect(stats.hourly24h.reduce((sum, count) => sum + count, 0)).toBe(1);
-  });
 });
 
 describe("queryEventNavigation", () => {
   beforeEach(() => {
     aliasSetting = 0;
-    sessionTimezone = undefined;
   });
 
   // Newest first: e5, e4, e3, e2, e1. e3 and e4 share a millisecond, so their order is decided by event_id.
@@ -498,7 +494,6 @@ describe.each([0, 1] as const)("queryDuplicateIssueGroups with prefer_column_nam
 describe("GET /api/projects/:projectId/errors/:groupId", () => {
   beforeEach(() => {
     aliasSetting = 0;
-    sessionTimezone = undefined;
   });
 
   const detail = async (path: string, app = appAs("admin")) => {
@@ -590,7 +585,6 @@ describe("GET /api/projects/:projectId/errors/:groupId", () => {
 describe("POST /api/errors/affected-users", () => {
   beforeEach(() => {
     aliasSetting = 0;
-    sessionTimezone = undefined;
   });
 
   // A query that reaches ClickHouse while this is set fails with a 500, so a 4xx proves the request was refused
@@ -700,7 +694,6 @@ describe("POST /api/errors/affected-users", () => {
 describe("GET /api/projects/:projectId/ingest-status", () => {
   beforeEach(() => {
     aliasSetting = 0;
-    sessionTimezone = undefined;
   });
 
   const status = async (projectId: string, app = appAs("admin")) => {

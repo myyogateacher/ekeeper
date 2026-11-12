@@ -27,7 +27,7 @@ import {
   parseLabels,
   syncGithubIssueState,
 } from "../lib/issue-sync";
-import { buildEventNavigation, buildIssueStats, isoFromEpochMs, type HourlyRow, type NavigationRow, type StatsTotalsRow } from "../lib/issue-stats";
+import { EVENTS_24H_SQL, EVENTS_7D_SQL, buildEventNavigation, buildIssueStats, hourlyColumnsSql, isoFromEpochMs, type NavigationRow, type StatsRow } from "../lib/issue-stats";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
   AffectedUsersResponse,
@@ -133,52 +133,32 @@ export async function queryAffectedUsers(groups: Array<{ projectId: string; grou
 }
 
 /**
- * Whole-group figures for the issue page in two sort key range reads (project_id, group_id, then timestamp), run
- * together. Nothing here returns a row per event, which the detail endpoint used to do for every occurrence of
- * the group on every load and every switch between events.
+ * Whole-group figures for the issue page in one read of the group's rows (the sort key prefix project_id,
+ * group_id). Nothing here returns a row per event, which the detail endpoint used to do for every occurrence of
+ * the group on every load and every switch between events. One query, so one `now()` for the 24h and 7d counts and
+ * for all 24 hourly buckets (see issue-stats.ts for why that makes the chart sum to events24h). The aliases are
+ * not column names (defect register 20).
  */
 export async function queryGroupStats(projectId: string, groupId: string): Promise<IssueStats> {
   const client = getClickHouseClient();
-  const query_params = { projectId, groupId };
-  // events24h and events7d are the rolling windows queryErrorGroups calls count24h and count7d, so the list and
-  // the page agree. The aliases are not column names (defect register 20).
-  const totalsPromise = client.query({
+  const result = await client.query({
     query: `
       SELECT
         count() AS totalEvents,
-        countIf(timestamp >= now() - INTERVAL 1 DAY) AS events24h,
-        countIf(timestamp >= now() - INTERVAL 7 DAY) AS events7d,
+        ${EVENTS_24H_SQL} AS events24h,
+        ${EVENTS_7D_SQL} AS events7d,
         toUnixTimestamp64Milli(min(timestamp)) AS firstSeenMs,
-        toUnixTimestamp64Milli(max(timestamp)) AS lastSeenMs
+        toUnixTimestamp64Milli(max(timestamp)) AS lastSeenMs,
+        ${hourlyColumnsSql()}
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String}
     `,
-    query_params,
+    query_params: { projectId, groupId },
     format: "JSONEachRow",
   });
-  // The hour is counted in SQL against the server's own `now('UTC')`, so the app clock never decides which bucket
-  // an event lands in. 'UTC' is explicit: toStartOfHour(now()) follows the server time zone, and a server in
-  // Asia/Kolkata would cut hours at :30 UTC. The window is two constant bounds on timestamp, a key range that
-  // reads at most the last 24 hours of this group; the upper bound drops events stamped ahead of the clock.
-  const hourlyPromise = client.query({
-    query: `
-      SELECT
-        dateDiff('hour', toStartOfHour(timestamp, 'UTC'), toStartOfHour(now('UTC'), 'UTC'), 'UTC') AS hoursAgo,
-        count() AS eventCount
-      FROM events
-      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
-        AND timestamp >= toStartOfHour(now('UTC'), 'UTC') - INTERVAL 23 HOUR
-        AND timestamp < toStartOfHour(now('UTC'), 'UTC') + INTERVAL 1 HOUR
-      GROUP BY hoursAgo
-    `,
-    query_params,
-    format: "JSONEachRow",
-  });
-  const [totalsResult, hourlyResult] = await Promise.all([totalsPromise, hourlyPromise]);
-  const [totals] = (await totalsResult.json()) as StatsTotalsRow[];
-  const hourly = (await hourlyResult.json()) as HourlyRow[];
   // An aggregate with no GROUP BY returns exactly one row, with zeros, for a group that has no events.
-  return buildIssueStats(totals!, hourly);
+  const [row] = (await result.json()) as StatsRow[];
+  return buildIssueStats(row!);
 }
 
 /**

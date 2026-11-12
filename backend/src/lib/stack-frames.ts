@@ -30,7 +30,9 @@ const CONTEXT_LINES_EACH_SIDE = 3;
 // start the path or follow a separator, so `src/my_node_modules_helper/x.js` is not matched. `\` is accepted
 // because a Windows build can emit it in a map's sources. The package name is the LAST match: under pnpm the
 // path is `node_modules/.pnpm/react@18.3.1/node_modules/react/index.js`, and the first match is the store
-// directory `.pnpm`, not the package.
+// directory `.pnpm`, not the package. Global so matchAll sees every match; it is read only through matchAll, never
+// .test() or .exec(), because those carry `lastIndex` on this shared object into the next frame and the second
+// frame with the same filename would miss (stack-frames.test.ts classifies one filename repeatedly).
 const NODE_MODULES_PACKAGE = /(?:^|[\\/])node_modules[\\/]((?:@[^\\/]+[\\/])?[^\\/]+)/g;
 
 function isRecord(value: unknown): value is UnknownRecord {

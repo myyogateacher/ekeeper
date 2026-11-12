@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildEventNavigation, buildIssueStats, fillHourly, isoFromEpochMs } from "./issue-stats";
+import { EVENTS_24H_SQL, buildEventNavigation, buildIssueStats, hourlyColumnsSql, hourlyFromRow, isoFromEpochMs } from "./issue-stats";
 
 describe("isoFromEpochMs", () => {
   test("carries the zone: ISO 8601 UTC with Z, from a number or the string ClickHouse returns for a UInt64", () => {
@@ -8,32 +8,50 @@ describe("isoFromEpochMs", () => {
   });
 });
 
-describe("fillHourly", () => {
-  const zeros = new Array<number>(24).fill(0);
+const hours = (values: Record<number, number>) => Object.fromEntries(Array.from({ length: 24 }, (_, index) => [`hour${index}`, values[index] ?? 0]));
 
-  test("always 24 entries, zero filled, oldest first: hoursAgo 0 is the last entry and 23 the first", () => {
-    expect(fillHourly([])).toEqual(zeros);
-    const result = fillHourly([{ hoursAgo: 0, eventCount: 7 }, { hoursAgo: 23, eventCount: 2 }, { hoursAgo: "5", eventCount: "3" }]);
+describe("hourlyColumnsSql", () => {
+  const lines = hourlyColumnsSql().split(",\n").map((line) => line.trim());
 
-    expect(result).toHaveLength(24);
-    expect(result[23]).toBe(7);
-    expect(result[0]).toBe(2);
-    expect(result[18]).toBe(3);
-    expect(result.reduce((sum, count) => sum + count, 0)).toBe(12);
+  test("24 countIf columns named hour0 to hour23, oldest first", () => {
+    expect(lines).toHaveLength(24);
+    lines.forEach((line, index) => expect(line.endsWith(` AS hour${index}`)).toBe(true));
   });
 
-  test("a row outside the window or with a bad hoursAgo is dropped, not written to a wrong slot or off the array", () => {
-    const rows = [-1, 24, 100, 1.5, Number.NaN, "x", undefined as unknown as number].map((hoursAgo) => ({ hoursAgo, eventCount: 9 }));
+  test("bucket i is [now - (24 - i)h, now - (23 - i)h): each bucket starts where the one before it ends", () => {
+    expect(lines[0]).toBe("countIf(timestamp >= now('UTC') - INTERVAL 24 HOUR AND timestamp < now('UTC') - INTERVAL 23 HOUR) AS hour0");
+    expect(lines[11]).toBe("countIf(timestamp >= now('UTC') - INTERVAL 13 HOUR AND timestamp < now('UTC') - INTERVAL 12 HOUR) AS hour11");
+    expect(lines[22]).toBe("countIf(timestamp >= now('UTC') - INTERVAL 2 HOUR AND timestamp < now('UTC') - INTERVAL 1 HOUR) AS hour22");
+  });
 
-    expect(fillHourly(rows)).toEqual(zeros);
+  test("the last bucket has no upper bound, and the first starts where events24h starts", () => {
+    expect(lines[23]).toBe("countIf(timestamp >= now('UTC') - INTERVAL 1 HOUR) AS hour23");
+    expect(EVENTS_24H_SQL).toBe("countIf(timestamp >= now('UTC') - INTERVAL 24 HOUR)");
+    expect(lines[0]).toContain("now('UTC') - INTERVAL 24 HOUR");
+  });
+
+  test("it is a fixed string built from constants: it holds no placeholder and no user input", () => {
+    expect(hourlyColumnsSql()).not.toMatch(/[{}]/);
+  });
+});
+
+describe("hourlyFromRow", () => {
+  test("24 numbers oldest first from the hour0 to hour23 columns, strings included", () => {
+    const result = hourlyFromRow({ ...hours({ 0: 2, 18: 3 }), hour23: "7" });
+
+    expect(result).toHaveLength(24);
+    expect(result[0]).toBe(2);
+    expect(result[18]).toBe(3);
+    expect(result[23]).toBe(7);
+    expect(result.reduce((sum, count) => sum + count, 0)).toBe(12);
   });
 });
 
 describe("buildIssueStats", () => {
   const totals = { totalEvents: "1904", events24h: "412", events7d: "1904", firstSeenMs: "1731494400000", lastSeenMs: "1731498000000" };
 
-  test("numbers from strings, times as ISO with Z, the chart from the hourly rows", () => {
-    expect(buildIssueStats(totals, [{ hoursAgo: 0, eventCount: 33 }])).toEqual({
+  test("numbers from strings, times as ISO with Z, the chart from the hour columns", () => {
+    expect(buildIssueStats({ ...totals, ...hours({ 23: 33 }) })).toEqual({
       totalEvents: 1904,
       events24h: 412,
       events7d: 1904,
@@ -44,7 +62,7 @@ describe("buildIssueStats", () => {
   });
 
   test("a group with no events has null times, not 1970 from the empty min and max", () => {
-    const empty = buildIssueStats({ totalEvents: "0", events24h: "0", events7d: "0", firstSeenMs: "0", lastSeenMs: "0" }, []);
+    const empty = buildIssueStats({ totalEvents: "0", events24h: "0", events7d: "0", firstSeenMs: "0", lastSeenMs: "0", ...hours({}) });
 
     expect(empty.firstSeen).toBeNull();
     expect(empty.lastSeen).toBeNull();
