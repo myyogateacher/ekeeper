@@ -1,8 +1,9 @@
+import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { api } from "@/lib/api";
-import { rememberPathForLogin, takePathAfterLogin } from "@/lib/after-login";
+import { clearPathAfterLogin, peekPathAfterLogin, rememberPathForLogin } from "@/lib/after-login";
 import { ErrorDetailPage } from "@/pages/ErrorDetailPage";
 import { ErrorsPage } from "@/pages/ErrorsPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -56,7 +57,7 @@ function LoginRoute() {
   });
 
   if (data) {
-    return <Navigate to={takePathAfterLogin() ?? "/errors"} replace />;
+    return <RedirectAfterLogin />;
   }
 
   return (
@@ -71,10 +72,18 @@ function LoginRoute() {
   );
 }
 
-// The backend lands every sign-in on /dashboard (backend/src/routes/auth.ts:25). Overview was dropped, so
-// that path restores the page a logged-out user was sent away from, else opens the issues list.
-function AfterLoginRedirect() {
-  return <Navigate to={takePathAfterLogin() ?? "/errors"} replace />;
+// Sends a signed-in user to the page a logged-out click was sent away from (a GitHub issue link), else to the
+// issues list. The backend lands every sign-in on /dashboard (backend/src/routes/auth.ts:25) and Overview was
+// dropped, so that path renders this too. The target is read once into state, not on every render: render
+// runs twice under StrictMode and can repeat in production, and a target recomputed after the clear below
+// would flip to /errors and replace the deep link. The clear is an effect for the same reason, so no render
+// consumes the stored path.
+function RedirectAfterLogin() {
+  const [target] = useState(() => peekPathAfterLogin() ?? "/errors");
+  useEffect(() => {
+    clearPathAfterLogin();
+  }, []);
+  return <Navigate to={target} replace />;
 }
 
 // /errors and /errors/:projectId/:groupId stay the canonical URLs: GitHub issue bodies link to the latter
@@ -85,7 +94,7 @@ export default function App() {
       <Route path="/login" element={<LoginRoute />} />
       <Route element={<ProtectedLayout />}>
         <Route path="/" element={<Navigate to="/errors" replace />} />
-        <Route path="/dashboard" element={<AfterLoginRedirect />} />
+        <Route path="/dashboard" element={<RedirectAfterLogin />} />
         <Route path="/errors" element={<ErrorsPage />} />
         <Route path="/errors/:projectId/:groupId" element={<ErrorDetailPage />} />
         {/* The old top level pages moved into Settings; their URLs stay working for bookmarks. */}

@@ -28,8 +28,11 @@ const queryClient: QueryClient = new QueryClient({
   // project create and delete). A mutation that handles its own error says so with an onError.
   mutationCache: new MutationCache({
     onError: (error, _variables, _context, mutation) => {
+      // The redirect to /login is the message for an ended session; a toast on top of it would appear on the
+      // login page.
       if (isApiStatus(error, 401)) {
         endSession();
+        return;
       }
       if (mutation.options.onError) {
         return;

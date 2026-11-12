@@ -10,3 +10,10 @@ test("exactly one is singular; zero and every other count are plural", () => {
   assert.equal(pluralize(2, "event"), "events");
   assert.equal(pluralize(1_204, "file"), "files");
 });
+
+// "1 needs triage" but "2 need triage": a verb agrees with the count, so a caller passes both forms.
+test("a custom plural form is used for every count except one", () => {
+  assert.equal(pluralize(1, "needs", "need"), "needs");
+  assert.equal(pluralize(0, "needs", "need"), "need");
+  assert.equal(pluralize(2, "needs", "need"), "need");
+});

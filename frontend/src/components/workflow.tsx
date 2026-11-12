@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "react-toastify";
 import type { IssueState } from "@ekeeper/shared";
 import { api } from "@/lib/api";
+import { isApiStatus } from "@/lib/api-error";
 import { undoState } from "@/lib/issue-detail";
 
 interface WorkflowChange {
@@ -62,6 +63,9 @@ export function useIssueWorkflow() {
       );
     },
     onError: async (error, change) => {
+      // A 401 is a refused request, not an unknown outcome: the session ended and nothing was written. The
+      // redirect to /login (main.tsx) is the message, so no refetch and no toast on the login page.
+      if (isApiStatus(error, 401)) return;
       await refresh(change);
       toast.error(
         `Couldn't confirm the change. Showing the current state.${error instanceof Error ? ` (${error.message})` : ""}`,

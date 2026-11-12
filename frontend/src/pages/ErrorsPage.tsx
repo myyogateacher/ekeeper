@@ -123,7 +123,7 @@ export function ErrorsPage() {
             </button>
             {query.status !== "closed" ? (
               <Link className="underline underline-offset-4 hover:text-fg max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center max-[720px]:gap-1" to={`/errors?${serializeListQuery({ ...query, assignee: "none" })}`}>
-                <b className="font-medium text-fg">{stats.needTriage}</b> need triage
+                <b className="font-medium text-fg">{stats.needTriage}</b> {pluralize(stats.needTriage, "needs", "need")} triage
               </Link>
             ) : null}
             <span>
