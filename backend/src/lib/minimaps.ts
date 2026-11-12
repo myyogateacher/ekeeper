@@ -367,6 +367,31 @@ function getReleaseArtifacts(projectId: string, release: string) {
   );
 }
 
+/**
+ * The project's newest uploaded release and how many source map files it holds, for the Settings "verify" line.
+ * "Newest" is the release of the most recent upload, the same recency rankedReleasesCte uses for retention. A
+ * file counts when parseSourceMapArtifact would read it as a map (name or path ends in .map), because that is
+ * what deobfuscateEvent can use; a release holding only bundles has latestRelease set and 0 files. Scoped to
+ * EKEEPER_ORG and project_id like getReleaseArtifacts, so it counts exactly the files a lookup can find.
+ */
+export function getLatestReleaseMapCount(projectId: string): { release: string | null; mapFiles: number } {
+  const latest = one<{ release: string }>(
+    `SELECT release FROM minimap_artifacts WHERE org = ? AND project_id = ? ORDER BY uploaded_at DESC LIMIT 1`,
+    [config.EKEEPER_ORG, projectId],
+  );
+  if (!latest) {
+    return { release: null, mapFiles: 0 };
+  }
+
+  const counted = one<{ mapFiles: number }>(
+    `SELECT COUNT(*) AS mapFiles FROM minimap_artifacts
+     WHERE org = ? AND project_id = ? AND release = ?
+       AND (substr(artifact_name, -4) = '.map' OR substr(file_path, -4) = '.map')`,
+    [config.EKEEPER_ORG, projectId, latest.release],
+  );
+  return { release: latest.release, mapFiles: counted?.mapFiles ?? 0 };
+}
+
 export function listMinimapArtifacts(
   projectId?: string,
   pagination: { limit?: number; offset?: number } = {},

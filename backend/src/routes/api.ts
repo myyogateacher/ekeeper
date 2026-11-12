@@ -12,6 +12,7 @@ import {
   cleanupExpiredMinimapsAsync,
   countExpiredMinimaps,
   deobfuscateEvent,
+  getLatestReleaseMapCount,
   isMinimapCleanupRunning,
   listMinimapArtifacts,
   saveMinimapArtifact,
@@ -26,7 +27,7 @@ import {
   parseLabels,
   syncGithubIssueState,
 } from "../lib/issue-sync";
-import { buildEventNavigation, buildIssueStats, type HourlyRow, type NavigationRow, type StatsTotalsRow } from "../lib/issue-stats";
+import { buildEventNavigation, buildIssueStats, isoFromEpochMs, type HourlyRow, type NavigationRow, type StatsTotalsRow } from "../lib/issue-stats";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
   AffectedUsersResponse,
@@ -36,6 +37,7 @@ import type {
   ErrorEventDetail,
   ErrorGroupSummary,
   EventNavigation,
+  IngestStatus,
   IssueState,
   IssueStats,
   MinimapArtifact,
@@ -209,6 +211,29 @@ export async function queryEventNavigation(
   });
   const [row] = (await result.json()) as NavigationRow[];
   return buildEventNavigation(row!);
+}
+
+/**
+ * The newest event time of a project as ISO 8601 UTC with Z, or null when it has none. The sort key leads with
+ * project_id but timestamp is its third column, so this is not a read of one row: ClickHouse reads this project's
+ * timestamp column and nothing else. That is one 8 byte column over one project, against 196,902 events across
+ * every project in 120 days, and the Settings screen asks when a person opens it, so it was not worth a second
+ * table; if a screen ever polls this, read project_daily_metrics for the day first.
+ */
+export async function queryLastEventAt(projectId: string): Promise<string | null> {
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query: `
+      SELECT count() AS eventCount, toUnixTimestamp64Milli(max(timestamp)) AS lastEventMs
+      FROM events
+      WHERE project_id = {projectId:String}
+    `,
+    query_params: { projectId },
+    format: "JSONEachRow",
+  });
+  const [row] = (await result.json()) as Array<{ eventCount: string | number; lastEventMs: string | number }>;
+  // max over no rows is the type's default, 1970-01-01, so the count decides whether there is a time at all.
+  return Number(row?.eventCount ?? 0) > 0 ? isoFromEpochMs(row!.lastEventMs) : null;
 }
 
 const DUPLICATE_URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/;
@@ -928,6 +953,20 @@ apiRouter.post("/errors/affected-users", async (ctx) => {
     requireProjectAccess(ctx, projectId, false);
   }
   return ctx.json({ affectedUsers: await queryAffectedUsers(groups) } satisfies AffectedUsersResponse);
+});
+
+// The Settings "Connect an app" verify line. Same access as the Projects section, which lists the projects
+// GET /projects returns: admin and workspace viewer read any project, a manager only their memberships.
+apiRouter.get("/projects/:projectId/ingest-status", async (ctx) => {
+  const projectId = ctx.req.param("projectId");
+  requireProjectAccess(ctx, projectId, false);
+  const sourceMaps = getLatestReleaseMapCount(projectId);
+  const lastEventAt = await queryLastEventAt(projectId);
+  return ctx.json({
+    lastEventAt,
+    latestRelease: sourceMaps.release,
+    sourceMapFiles: sourceMaps.mapFiles,
+  } satisfies IngestStatus);
 });
 
 apiRouter.get("/projects/all/errors", async (ctx) => {

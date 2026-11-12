@@ -76,6 +76,8 @@ These routes cover:
 - user and project administration
 - dashboard summaries
 - issue listing and issue detail
+- `POST /api/errors/affected-users`: distinct users over up to 500 listed (project, group) pairs, for the issues list header total. Every project named must be readable by the caller, or the request is a 403 before any query
+- `GET /api/projects/:projectId/ingest-status`: the project's newest event time, newest uploaded source map release and how many `.map` files it holds, for the Settings verify step. Same read access as the project itself
 - workflow updates
 - minimap management
 - server settings

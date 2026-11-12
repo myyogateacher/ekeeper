@@ -2,6 +2,7 @@ import type { ClickHouseSettings } from "@clickhouse/client";
 import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
 import { Hono } from "hono";
 import type { ErrorDetailResponse } from "@ekeeper/shared";
+import { config } from "../config";
 import { run } from "../db/sqlite";
 import { HttpError } from "../lib/http";
 
@@ -133,9 +134,29 @@ const closedAt = "2026-11-13T07:30:00.000Z";
 run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [routeProject, `Route ${routeSuffix}`, `route-${routeSuffix}`, "production", 1, routeNow, routeNow]);
 run(`INSERT INTO issue_workflows (project_id, group_id, state, assigned_user_id, created_at, updated_at, closed_at) VALUES (?, 'closed-group', 'closed', NULL, ?, ?, ?)`, [routeProject, routeNow, routeNow, closedAt]);
 run(`INSERT INTO issue_workflows (project_id, group_id, state, assigned_user_id, created_at, updated_at, closed_at) VALUES (?, 'reopened-group', 'reopened', NULL, ?, ?, NULL)`, [routeProject, routeNow, routeNow]);
+// Source map rows for the ingest-status route. The newest upload of routeProject is in release r_new, which holds
+// two maps and a bundle; r_old is older; one row belongs to another org and one to another project, both newer.
+// The files are never opened, so the paths point nowhere.
+const otherProject = `p_route_other_${routeSuffix}`;
+run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [otherProject, `Other ${routeSuffix}`, `other-${routeSuffix}`, "production", 1, routeNow, routeNow]);
+let artifactCounter = 0;
+const addArtifact = (projectId: string, release: string, artifactName: string, uploadedAt: string, org = config.EKEEPER_ORG) =>
+  run(
+    `INSERT INTO minimap_artifacts (id, org, project_id, project, release, dist, artifact_name, checksum, file_path, content_type, size, uploaded_at, expires_at)
+     VALUES (?, ?, ?, ?, ?, NULL, ?, 'c', ?, NULL, 1, ?, '2099-01-01T00:00:00.000Z')`,
+    [`a_${routeSuffix}_${(artifactCounter += 1)}`, org, projectId, `slug-${projectId}`, release, artifactName, `/nonexistent/${artifactName}`, uploadedAt],
+  );
+addArtifact(routeProject, "r_old", "~/assets/a.js.map", "2026-11-01T00:00:00.000Z");
+addArtifact(routeProject, "r_old", "~/assets/b.js.map", "2026-11-01T00:00:01.000Z");
+addArtifact(routeProject, "r_new", "~/assets/a.js", "2026-11-12T00:00:00.000Z");
+addArtifact(routeProject, "r_new", "~/assets/a.js.map", "2026-11-12T00:00:01.000Z");
+addArtifact(routeProject, "r_new", "~/assets/b.js.map", "2026-11-12T00:00:02.000Z");
+addArtifact(routeProject, "r_other_org", "~/assets/a.js.map", "2026-11-13T00:00:00.000Z", "someone-else");
+addArtifact(otherProject, "r_other_project", "~/assets/a.js.map", "2026-11-13T00:00:00.000Z");
 afterAll(() => {
+  run(`DELETE FROM minimap_artifacts WHERE project_id IN (?, ?)`, [routeProject, otherProject]);
   run(`DELETE FROM issue_workflows WHERE project_id = ?`, [routeProject]);
-  run(`DELETE FROM projects WHERE id = ?`, [routeProject]);
+  run(`DELETE FROM projects WHERE id IN (?, ?)`, [routeProject, otherProject]);
 });
 
 describe("queryAffectedUsers", () => {
@@ -673,5 +694,64 @@ describe("POST /api/errors/affected-users", () => {
     const response = await post({ groups: [] }, app);
 
     expect(response.status).toBe(401);
+  });
+});
+
+describe("GET /api/projects/:projectId/ingest-status", () => {
+  beforeEach(() => {
+    aliasSetting = 0;
+    sessionTimezone = undefined;
+  });
+
+  const status = async (projectId: string, app = appAs("admin")) => {
+    const response = await app.request(`/api/projects/${projectId}/ingest-status`);
+    return { status: response.status, body: await response.json() };
+  };
+
+  test("the newest event time as ISO with Z, the newest uploaded release and its source map files", async () => {
+    shadow([
+      { project: routeProject, group: "g1", at: at("2026-11-13 10:31:00.250") },
+      { project: routeProject, group: "g1", at: at("2026-11-12 09:00:00.000") },
+      { project: otherProject, group: "g1", at: at("2026-11-14 00:00:00.000") },
+    ]);
+
+    expect(await status(routeProject)).toEqual({
+      status: 200,
+      body: { lastEventAt: "2026-11-13T10:31:00.250Z", latestRelease: "r_new", sourceMapFiles: 2 },
+    });
+  });
+
+  test("a project with no event and no upload answers nulls and 0, not an error", async () => {
+    const empty = `p_empty_${routeSuffix}`;
+    run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [empty, `Empty ${routeSuffix}`, `empty-${routeSuffix}`, "production", 1, routeNow, routeNow]);
+    try {
+      shadow([{ project: routeProject, group: "g1" }]);
+
+      expect(await status(empty)).toEqual({ status: 200, body: { lastEventAt: null, latestRelease: null, sourceMapFiles: 0 } });
+    } finally {
+      run(`DELETE FROM projects WHERE id = ?`, [empty]);
+    }
+  });
+
+  test("a release that holds only bundles is reported with 0 map files", async () => {
+    const bundlesOnly = `p_bundles_${routeSuffix}`;
+    run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [bundlesOnly, `Bundles ${routeSuffix}`, `bundles-${routeSuffix}`, "production", 1, routeNow, routeNow]);
+    try {
+      addArtifact(bundlesOnly, "r_bundles", "~/assets/a.js", "2026-11-12T00:00:00.000Z");
+      shadow([{ project: routeProject, group: "g1" }]);
+
+      expect((await status(bundlesOnly)).body).toMatchObject({ latestRelease: "r_bundles", sourceMapFiles: 0 });
+    } finally {
+      run(`DELETE FROM minimap_artifacts WHERE project_id = ?`, [bundlesOnly]);
+      run(`DELETE FROM projects WHERE id = ?`, [bundlesOnly]);
+    }
+  });
+
+  test("project access: a manager without a membership is refused, one with it and a viewer read", async () => {
+    shadow([{ project: routeProject, group: "g1" }]);
+
+    expect((await status(routeProject, appAs("manager"))).status).toBe(403);
+    expect((await status(routeProject, appAs("manager", [routeProject]))).status).toBe(200);
+    expect((await status(routeProject, appAs("viewer"))).status).toBe(200);
   });
 });
