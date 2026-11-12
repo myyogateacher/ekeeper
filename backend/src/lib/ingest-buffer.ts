@@ -1,5 +1,6 @@
 import { getClickHouseClient } from "../db/clickhouse";
 import { all, one, run } from "../db/sqlite";
+import { HttpError } from "./http";
 import { ensureGithubIssueForGroup, getGithubIntegration } from "./issue-sync";
 import { normalizeEvent } from "./ingest";
 import { connectRedis } from "./redis";
@@ -69,13 +70,37 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
     return;
   }
 
+  // Normalised one payload at a time, and a payload that throws is dropped here instead of aborting the batch. This
+  // used to be `payloads.map(normalizeEvent)`, so one bad event failed every good event of its project and then the
+  // whole bucket (PROD-10530). Dropping is safe, unlike retrying: normalizeEvent is deterministic, so the same
+  // payload would fail on every flush until the bucket expires. Only the project id and the error are logged, never the
+  // payload, which can hold user emails. No JSON shape is known to make normalizeEvent throw today, so this is the
+  // backstop for a future normalizeEvent bug: the gate in enqueueBufferedIngest would refuse such a payload, but one
+  // buffered by an older build never passed the current gate.
+  const events: ReturnType<typeof normalizeEvent>[] = [];
+  let rejectedCount = 0;
+  for (const payload of payloads) {
+    try {
+      events.push(normalizeEvent(projectId, payload));
+    } catch (error) {
+      rejectedCount += 1;
+      console.error("[ingest-buffer] dropped a payload that failed normalisation", {
+        projectId,
+        reason: String(error),
+      });
+    }
+  }
+  if (events.length === 0) {
+    return;
+  }
+
   logIngestBuffer("writing project batch to ClickHouse", {
     projectId,
-    eventCount: payloads.length,
+    eventCount: events.length,
+    rejectedCount,
   });
 
   const client = getClickHouseClient();
-  const events = payloads.map((payload) => normalizeEvent(projectId, payload));
   await client.insert({
     table: "events",
     values: events.map((event) => ({
@@ -248,6 +273,11 @@ async function flushBucket(redisKey: string) {
     await insertEvents(projectId, payloads);
   }
 
+  // Deleted only after every project's insert has returned. An insert that throws (ClickHouse down, a row it refuses)
+  // leaves the bucket for the next flush so an outage does not lose events; its TTL is set at enqueue
+  // (INGEST_BUFFER_RETENTION_SECONDS), so a bucket that keeps failing is lost whole when it expires. The cost of the retry
+  // is that projects inserted earlier in the loop are inserted again, because events is a plain MergeTree and nothing
+  // dedupes on event_id. A payload that cannot be normalised no longer causes that retry: insertEvents drops it.
   await redis.del(redisKey);
   logIngestBuffer("completed bucket flush", {
     redisKey,
@@ -256,9 +286,39 @@ async function flushBucket(redisKey: string) {
   });
 }
 
+// Why a payload may not enter the buffer, or null when it may. The routes cast the request body to a Record without
+// checking it, so a body of `null`, a number or an array reaches here typed as an object; the flush would drop a falsy
+// one silently and store a truthy one as an empty event.
+function refusalReason(projectId: string, payload: Record<string, unknown>): string | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return "payload is not a JSON object";
+  }
+  try {
+    normalizeEvent(projectId, payload);
+    return null;
+  } catch (error) {
+    return String(error);
+  }
+}
+
 export async function enqueueBufferedIngest(projectId: string, payloads: Record<string, unknown>[]) {
   if (payloads.length === 0) {
     return;
+  }
+
+  // Every public ingest route funnels through here, so this is the one gate in front of Redis. A payload that
+  // normalizeEvent cannot process used to be accepted with a 200 and then stall its bucket at flush (PROD-10530). Refusing
+  // it here with a 400 tells the sender its body was refused, instead of acknowledging an event that is dropped five
+  // minutes later, and keeps it out of Redis. The cost is a second normalizeEvent per event on the request path, bounded
+  // by the length caps in ingest.ts. The buffer still holds raw payloads: buckets already in Redis at deploy time do, and
+  // a new stored shape would need a reader for both. All payloads are checked before any is buffered, so an envelope is
+  // accepted or refused whole and a 200 never covers an event that was then dropped.
+  for (const payload of payloads) {
+    const reason = refusalReason(projectId, payload);
+    if (reason) {
+      console.warn("[ingest-buffer] refused a payload", { projectId, reason });
+      throw new HttpError(400, "Event payload could not be processed");
+    }
   }
 
   const redis = await connectRedis();

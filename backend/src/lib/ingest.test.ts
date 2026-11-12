@@ -286,6 +286,71 @@ describe("ingest helpers", () => {
     expect([event.browser, event.os, event.device]).toEqual([null, null, null]);
   });
 
+  // Every field of an event is attacker-controlled JSON, because ingest is public to anyone holding a DSN. normalizeEvent
+  // used to throw on the shapes below, and a throw inside the buffer flush aborted the whole project batch and then the
+  // whole bucket (PROD-10530), so each case is a value JSON.parse produces that once crashed it. The assertion is only
+  // "does not throw": what the field becomes is pinned by the existing grouping tests, which must stay unchanged.
+  // {"toString":1} parses fine and then makes String() fail with "No default value".
+  const noToString = { toString: 1 };
+  // Nested 10000 deep, JSON.parse and JSON.stringify both accept it, so it passes enqueue, but String() on it overflows
+  // the stack (2000 levels pass, 5000 throw), which is how it reaches the flush.
+  const nested = JSON.parse(`${"[".repeat(10_000)}1${"]".repeat(10_000)}`);
+  const exceptionWith = (exception: Record<string, unknown>) => ({ exception: { values: [exception] } });
+  const framesOf = (frames: unknown) => exceptionWith({ type: "Error", value: "v", stacktrace: { frames } });
+  const hostileEvents: Array<[string, Record<string, unknown>]> = [
+    ["a null stack frame with no explicit fingerprint", framesOf([null])],
+    ["stacktrace.frames that is a string", framesOf("abc")],
+    ["stacktrace.frames that is an object", framesOf({})],
+    ["stacktrace.frames that is a number", framesOf(5)],
+    ["a frame filename that is an object", framesOf([{ filename: noToString, function: "f" }])],
+    ["a frame function that is an object", framesOf([{ filename: "a.js", function: noToString }])],
+    ["an exception type that is an object", exceptionWith({ type: noToString, value: "v" })],
+    ["an exception value that is an object", exceptionWith({ type: "Error", value: noToString })],
+    ["a message that is an object when there is no exception", { message: noToString }],
+    ["user.id that is an object", { user: { id: noToString } }],
+    ["user.email that is an object", { user: { email: noToString } }],
+    ["user.username that is an object", { user: { username: noToString } }],
+    ["event_id that is an object", { event_id: noToString }],
+    ["level that is an object", { level: noToString }],
+    ["timestamp that is an object", { timestamp: noToString }],
+    ["release that is an object", { release: noToString }],
+    ["environment that is an object", { environment: noToString }],
+    ["a tag value that is an object", { tags: { a: noToString } }],
+    ["a breadcrumb category that is an object", { breadcrumbs: [{ category: noToString }] }],
+    ["a breadcrumb timestamp that is an object", { breadcrumbs: [{ timestamp: noToString }] }],
+    ["contexts.browser.name that is an object", { contexts: { browser: { name: noToString } } }],
+    ["contexts.device.model that is an object", { contexts: { device: { model: noToString } } }],
+    ["contexts.device.family that is an object", { contexts: { device: { family: noToString } } }],
+    ["contexts.os.name that is an object", { contexts: { os: { name: noToString } } }],
+    ["contexts.runtime.name that is an object", { contexts: { runtime: { name: noToString } } }],
+    ["user.id nested deep enough to overflow String()", { user: { id: nested } }],
+    ["an exception value nested deep enough to overflow String()", exceptionWith({ type: "Error", value: nested })],
+  ];
+
+  test.each(hostileEvents)("normalizeEvent does not throw on %s", (_label, payload) => {
+    expect(normalizeEvent("project_1", payload).projectId).toBe("project_1");
+  });
+
+  // One unusable field costs only that field: the rest of the event is still stored and still groups.
+  test("a user.id that cannot be read as text does not discard the rest of the event", () => {
+    const event = normalizeEvent("project_1", {
+      user: { id: noToString, email: "a@example.com" },
+      exception: { values: [{ type: "TypeError", value: "boom" }] },
+    });
+
+    expect(event.userId).toBeNull();
+    expect(event.userEmail).toBe("a@example.com");
+    expect(event.title).toBe("TypeError: boom");
+  });
+
+  test("a null frame groups like an empty frame, so it neither throws nor splits the group", () => {
+    const withFrames = (frames: unknown[]) => computeGroupFingerprint(framesOf(frames));
+
+    expect(withFrames([{ filename: "a.js", function: "f" }, null])).toBe(
+      withFrames([{ filename: "a.js", function: "f" }, {}]),
+    );
+  });
+
   test("parse envelope extracts event items", () => {
     const raw = [
       JSON.stringify({ event_id: "env_1" }),

@@ -115,6 +115,21 @@ export function normalizeExceptionValue(raw: string): string {
   return s.replaceAll(BRACE_OPEN_PLACEHOLDER, "{").replaceAll(BRACE_CLOSE_PLACEHOLDER, "}");
 }
 
+// String(value) that cannot throw. Every field of an event is attacker-controlled JSON (ingest is public to anyone
+// holding a DSN), and String() throws on two shapes that JSON.parse produces: an object whose own "toString" is not a
+// function (`{"toString":1}`, "No default value"), and an array nested deep enough to overflow the stack in
+// Array#toString (measured on bun 1.4.2: 2000 levels pass, 5000 throw). JSON.parse and JSON.stringify both still
+// succeed at 20000 levels, so such a value gets past enqueue. A throw in normalizeEvent aborts the whole project batch
+// in the buffer flush (PROD-10530), so one unusable field must cost only that field. The result for every value that
+// did not throw is exactly String(value): this must not change any stored title or group, so no existing group splits.
+function safeString<F extends string | null>(value: unknown, fallback: F): string | F {
+  try {
+    return String(value);
+  } catch {
+    return fallback;
+  }
+}
+
 function normalizeBreadcrumbs(value: unknown): Breadcrumb[] {
   const source = Array.isArray(value)
     ? value
@@ -124,12 +139,13 @@ function normalizeBreadcrumbs(value: unknown): Breadcrumb[] {
 
   return source.map((item) => {
     const entry = (item ?? {}) as Record<string, unknown>;
+    const now = new Date().toISOString();
     return {
-      timestamp: String(entry.timestamp ?? new Date().toISOString()),
-      category: String(entry.category ?? "default"),
-      level: String(entry.level ?? "info"),
-      message: String(entry.message ?? ""),
-      type: String(entry.type ?? "default"),
+      timestamp: safeString(entry.timestamp ?? now, now),
+      category: safeString(entry.category ?? "default", "default"),
+      level: safeString(entry.level ?? "info", "info"),
+      message: safeString(entry.message ?? "", ""),
+      type: safeString(entry.type ?? "default", "default"),
       data: (entry.data as Record<string, unknown>) ?? {},
     };
   });
@@ -162,18 +178,24 @@ export function computeGroupFingerprint(payload: Record<string, unknown>): strin
     ? (((payload.exception as Record<string, unknown>).values as unknown[]) as Array<Record<string, unknown>>)
     : [];
   const exception = exceptionValues[0] ?? {};
-  const type = String(exception.type ?? "Error");
-  const value = normalizeExceptionValue(String(exception.value ?? payload.message ?? "Unknown error"));
-  const frames = (((exception.stacktrace as Record<string, unknown> | undefined)?.frames ?? []) as Array<
-    Record<string, unknown>
-  >)
+  const type = safeString(exception.type ?? "Error", "Error");
+  const value = normalizeExceptionValue(
+    safeString(exception.value ?? payload.message ?? "Unknown error", "Unknown error"),
+  );
+  // `frames` is client data: a string, object or number has no .map, and a null element has no .filename, so each of
+  // those threw here and stalled the flush. A null frame reads as an empty one, which contributes "" to its slot in the
+  // join exactly as a frame with neither filename nor function always did.
+  const rawFrames = (exception.stacktrace as Record<string, unknown> | undefined)?.frames;
+  const frames = (Array.isArray(rawFrames) ? rawFrames : [])
     .slice(-4)
-    .map((frame) =>
-      [
-        typeof frame.filename === "string" ? normalizeVolatileText(frame.filename) : frame.filename,
-        frame.function,
-      ].filter(Boolean).join(":"),
-    )
+    .map((frame: Record<string, unknown> | null) => {
+      const { filename, function: functionName } = frame ?? {};
+      // join() would call String() on each part and throw on the shapes safeString documents, so convert here.
+      return [typeof filename === "string" ? normalizeVolatileText(filename) : filename, functionName]
+        .filter(Boolean)
+        .map((part) => safeString(part, ""))
+        .join(":");
+    })
     .join("|");
 
   return hashString(`${type}|${value}|${frames}`).slice(0, 32);
@@ -185,9 +207,9 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
     : [];
   const primaryException = exceptionValues[0] ?? {};
   const message = normalizeExceptionValue(
-    String(primaryException.value ?? payload.message ?? "Unknown error"),
+    safeString(primaryException.value ?? payload.message ?? "Unknown error", "Unknown error"),
   );
-  const exceptionType = String(primaryException.type ?? "Error");
+  const exceptionType = safeString(primaryException.type ?? "Error", "Error");
   const title = `${exceptionType}: ${message}`;
   const fingerprint = computeGroupFingerprint(payload);
   const contexts = (payload.contexts as Record<string, unknown>) ?? {};
@@ -199,27 +221,35 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
   const breadcrumbs = normalizeBreadcrumbs(payload.breadcrumbs);
   // Per field, not all or nothing: an event that sends only `contexts.os` still gets its browser from the UA.
   const fromUserAgent = parseUserAgent(userAgentOf(payload.request));
+  const now = new Date().toISOString();
+  const generatedEventId = crypto.randomUUID().replace(/-/g, "");
+  const eventId = safeString(payload.event_id ?? generatedEventId, generatedEventId);
 
   return {
-    eventId: String(payload.event_id ?? crypto.randomUUID().replace(/-/g, "")),
+    eventId,
     projectId,
     groupId: fingerprint,
     fingerprint,
     title,
     message,
-    severity: String(payload.level ?? "error"),
-    timestamp: String(payload.timestamp ?? new Date().toISOString()),
-    release: payload.release ? String(payload.release) : null,
-    environment: payload.environment ? String(payload.environment) : null,
-    userId: user.id ? String(user.id) : null,
-    userEmail: user.email ? String(user.email) : null,
-    userUsername: user.username ? String(user.username) : null,
-    browser: browserContext.name ? String(browserContext.name) : fromUserAgent.browser,
-    device: deviceContext.model ? String(deviceContext.model) : deviceContext.family ? String(deviceContext.family) : fromUserAgent.device,
-    os: osContext.name ? String(osContext.name) : fromUserAgent.os,
-    runtime: runtimeContext.name ? String(runtimeContext.name) : null,
+    severity: safeString(payload.level ?? "error", "error"),
+    timestamp: safeString(payload.timestamp ?? now, now),
+    release: payload.release ? safeString(payload.release, null) : null,
+    environment: payload.environment ? safeString(payload.environment, null) : null,
+    userId: user.id ? safeString(user.id, null) : null,
+    userEmail: user.email ? safeString(user.email, null) : null,
+    userUsername: user.username ? safeString(user.username, null) : null,
+    // A name that cannot be read as text falls back to the User-Agent, the same as an absent one.
+    browser: browserContext.name ? safeString(browserContext.name, fromUserAgent.browser) : fromUserAgent.browser,
+    device: deviceContext.model
+      ? safeString(deviceContext.model, fromUserAgent.device)
+      : deviceContext.family
+        ? safeString(deviceContext.family, fromUserAgent.device)
+        : fromUserAgent.device,
+    os: osContext.name ? safeString(osContext.name, fromUserAgent.os) : fromUserAgent.os,
+    runtime: runtimeContext.name ? safeString(runtimeContext.name, null) : null,
     tags: Object.fromEntries(
-      Object.entries((payload.tags as Record<string, unknown>) ?? {}).map(([key, value]) => [key, String(value)]),
+      Object.entries((payload.tags as Record<string, unknown>) ?? {}).map(([key, value]) => [key, safeString(value, "")]),
     ),
     contexts,
     exception: (payload.exception as Record<string, unknown>) ?? {},
