@@ -96,6 +96,12 @@ bun run test
 bun run migrate
 ```
 
+`bun run test` runs the backend suite, then the frontend suite. The frontend suite alone, which needs only Node 22:
+
+```bash
+npm test --prefix frontend
+```
+
 ## Daily Workflow
 
 1. Start ClickHouse

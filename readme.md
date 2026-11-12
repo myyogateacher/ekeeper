@@ -7,11 +7,7 @@ It combines:
 - grouped issue views with stack traces and breadcrumbs
 - project-based access control
 - issue assignment and lifecycle workflow
-- a polished glass-style enterprise dashboard
-
-![eKeeper landing page](images/landing-page.png)
-
-![eKeeper error details](images/error-details.png)
+- an issues inbox with saved views, URL-held filters and keyboard navigation, in dark and light themes
 
 ## Features
 
@@ -19,7 +15,7 @@ It combines:
 - project-level error tracking
 - grouped issues based on fingerprints and normalized exception shape
 - event detail views with request info, tags, contexts, stack frames, and breadcrumbs
-- 7-day dashboard rollups by project
+- per-issue 24 hour event chart, 24h and 7d counts, and per-project open issue counts in the sidebar
 
 ### Workflow
 - assign issues to a project team member
