@@ -94,9 +94,10 @@ mock.module("./issue-sync", () => ({
     issueCalls.push(input);
   },
 }));
-// No JSON shape is known to make the fixed normalizeEvent throw (see ingest.test.ts), and one that could not be enqueued
-// cannot be put in a bucket either, so the flush's per-payload catch is exercised by throwing on a marked event. It stands
-// for a future normalizeEvent bug hitting an entry that an older build buffered, past the enqueue gate.
+// The only JSON shape known to make the fixed normalizeEvent throw is a value nested about 40,000 levels deep (RangeError from
+// JSON.stringify for rawPayload). The enqueue gate refuses it with a 400, and it could not be put in a bucket anyway, so the
+// flush's per-payload catch is exercised by throwing on a marked event. It stands for a future normalizeEvent bug hitting an
+// entry that an older build buffered, past the enqueue gate.
 const POISON_EVENT_ID = "evt_poison";
 mock.module("./ingest", () => ({
   ...original.ingest,
@@ -519,6 +520,20 @@ describe("ingest routes", () => {
     expect(bufferedCount()).toBe(0);
   });
 
+  // The store route already logged after the gate; the envelope route logged first, so a refused envelope read as accepted
+  // to anyone counting these lines.
+  test("a refused envelope is not logged as accepted, and an accepted one is logged once", async () => {
+    const log = spyOn(console, "log").mockImplementation(() => {});
+    spyOn(console, "warn").mockImplementation(() => {});
+    const acceptedLines = () => log.mock.calls.filter((call) => call[0] === "[ingest] accepted envelope payload").length;
+
+    expect((await post("/key_a/envelope", envelopeOf("null"))).status).toBe(400);
+    expect(acceptedLines()).toBe(0);
+
+    expect((await post("/key_a/envelope", envelopeOf(JSON.stringify({ event_id: "evt_1" })))).status).toBe(200);
+    expect(acceptedLines()).toBe(1);
+  });
+
   test("an event with an unusable user.id is accepted, since normalizeEvent now stores it", async () => {
     const response = await post("/key_a/store", JSON.stringify({ event_id: "evt_1", user: { id: { toString: 1 } } }));
 
@@ -601,7 +616,7 @@ describeLive("flushBufferedIngest against a real ClickHouse", () => {
       entry("project_m", withTimestamp("evt_object", { toString: 1 })),
       entry("project_b", withTimestamp("evt_b", 1731400000.123)),
     ]);
-    const receivedAfter = Date.now();
+    const flushStartedAfter = Date.now();
 
     await flushBufferedIngest();
     await flushBufferedIngest();
@@ -610,11 +625,12 @@ describeLive("flushBufferedIngest against a real ClickHouse", () => {
     expect(events.map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_garbage", "evt_object"]);
     expect((await rowsOf("breadcrumbs")).map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_garbage", "evt_object"]);
     expect(buckets.has(BUCKET)).toBe(false);
-    // Valid timestamps keep their instant; an unparseable one is stored at the time the event was received.
+    // Valid timestamps keep their instant; an unparseable one is stored at the time of the flush, because normalizeEvent runs
+    // again there and the result of the check at ingest is discarded.
     const msOf = (eventId: string) => Number(events.find((row) => row.event_id === eventId)?.ms);
     expect(msOf("evt_a")).toBe(Date.parse("2026-11-13T10:00:00.123Z"));
     expect(msOf("evt_b")).toBe(1731400000123);
-    expect(Math.abs(msOf("evt_garbage") - receivedAfter)).toBeLessThan(60_000);
+    expect(Math.abs(msOf("evt_garbage") - flushStartedAfter)).toBeLessThan(60_000);
   });
 
   // The other String-column failure on the engine: ClickHouse refuses a lone high surrogate ("missing second part of

@@ -164,16 +164,18 @@ const CLICKHOUSE_ACCEPTED_TIMESTAMPS: readonly RegExp[] = [
 ];
 
 // ISO-8601 with a numeric offset. ClickHouse refuses it, but JavaScript reads it exactly, so it is rewritten to UTC
-// instead of being replaced by the receive time.
+// instead of being replaced by `now`.
 const ISO_WITH_OFFSET = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?)([+-]\d{2}:\d{2})$/;
 
 // A timestamp text that ClickHouse stores correctly. A shape ClickHouse already reads keeps the instant it has today, so
 // the input is returned unchanged and ClickHouse's own reading stays in charge: it truncates a fraction to milliseconds
 // (measured: 1731400000.9999 is stored as .999), which re-deriving the Sentry float seconds through a JavaScript Date
 // would have to reproduce exactly. A text with an offset is converted to UTC. Everything else, including an object, an
-// empty string and anything that is not a date, becomes `now`, the time the event was received. Losing the event's own
-// time is the cost, and it is far smaller than a rejected INSERT, which stalls the whole bucket and loses it after 48
-// hours.
+// empty string and anything that is not a date, becomes `now`. normalizeEvent runs again when the buffer is flushed and the
+// result of the check at ingest is discarded, so `now` is the time of the flush that stores the event: up to about 10
+// minutes after receipt (a 5 minute bucket window plus a 5 minute flush interval), longer if the bucket is retried. Losing
+// the event's own time is the cost, and it is far smaller than a rejected INSERT, which stalls the whole bucket and loses it
+// after 48 hours.
 export function normalizeTimestamp(raw: unknown, now: string): string {
   const text = typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
   const accepted = (candidate: string) =>

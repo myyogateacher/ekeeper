@@ -358,7 +358,7 @@ describe("ingest helpers", () => {
   // ClickHouse 24.8 did with each shape in a JSONEachRow insert, measured on a real server through the app's own insert and
   // toClickHouseDateTime (T to a space, Z dropped); the live block at the end of ingest-buffer.test.ts re-checks the shapes
   // that matter, and mutations of them, against an engine. "kept" returns the input unchanged because ClickHouse already stores the right instant; "reread" is
-  // the one shape ClickHouse rejects that is still a real instant (an ISO offset); "now" is a fallback to the receive time.
+  // the one shape ClickHouse rejects that is still a real instant (an ISO offset); "now" is a fallback to the time normalizeEvent runs.
   const NOW = "2026-11-13T12:00:00.000Z";
   test.each<[string, unknown, string]>([
     // kept: ISO-8601 as Sentry SDKs send it, with and without milliseconds, microseconds or a zone
@@ -407,7 +407,7 @@ describe("ingest helpers", () => {
     ["an offset that is not a date", "2026-13-45T10:00:00+05:30", NOW],
     ["an offset that carries the year past 9999", "9999-12-31T23:00:00-05:00", NOW],
     // now although ClickHouse accepts them: each is stored there as a wrong date (year 2299, 1900, 1969 or 1970), so the
-    // receive time is closer to the truth, and no SDK sends them
+    // current time is closer to the truth, and no SDK sends them
     ["microseconds as a number", 1731400000123456, NOW],
     ["a negative number", -1, NOW],
     ["a compact date as digits", "20261113", NOW],
@@ -420,7 +420,7 @@ describe("ingest helpers", () => {
     expect(normalizeTimestamp(raw, NOW)).toBe(expected);
   });
 
-  test("an event and its breadcrumbs with unparseable timestamps are stamped with the receive time", () => {
+  test("an event and its breadcrumbs with unparseable timestamps are stamped with the time normalizeEvent ran", () => {
     const before = Date.now();
     const event = normalizeEvent("project_1", {
       timestamp: "garbage",

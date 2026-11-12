@@ -46,13 +46,15 @@ async function handleStoreRequest(projectKey: string, sentryProjectId: string | 
 async function handleEnvelopeRequest(projectKey: string, sentryProjectId: string | undefined, raw: string) {
   const project = resolveProject(projectKey, sentryProjectId);
   const payloads = parseEnvelope(raw);
+  // Logged after the gate, as in the store route: enqueueBufferedIngest refuses an envelope whole, and a refused envelope
+  // must not show up as accepted in the log.
+  await enqueueBufferedIngest(project.projectId, payloads);
   console.log("[ingest] accepted envelope payload", {
     projectId: project.projectId,
     publicKey: project.publicKey,
     sentryProjectId: project.sentryProjectId,
     acceptedCount: payloads.length,
   });
-  await enqueueBufferedIngest(project.projectId, payloads);
   return { status: "success", accepted: payloads.length };
 }
 
