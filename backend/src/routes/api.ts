@@ -137,7 +137,9 @@ function duplicateMessageSearchPattern(message: string): string {
   return message;
 }
 
-async function queryDuplicateIssueGroups(
+// Exported for api-clickhouse.test.ts. The issue detail route reaches it through safeQueryDuplicateIssueGroups,
+// which turns a failed query into an empty list, so the test calls this one to see a failure.
+export async function queryDuplicateIssueGroups(
   projectId: string,
   groupId: string,
   message: string,
@@ -147,16 +149,21 @@ async function queryDuplicateIssueGroups(
     return [];
   }
 
+  // No alias below is also a column of `events`. ClickHouse resolves a name in WHERE to a SELECT alias before a
+  // column when prefer_column_name_to_alias is 0 (the 24.8 default), so the first version's
+  // `any(message) AS message` made `WHERE message = ...` read an aggregate and fail with ILLEGAL_AGGREGATION
+  // (PROD-10527, defect register 20). Which way that setting is set depends on the server profile and
+  // version, so the query must not depend on it; the sample* names are mapped back to the response keys below.
   const client = getClickHouseClient();
   const result = await client.query({
     query: `
       SELECT
         group_id AS groupId,
-        any(title) AS title,
-        any(message) AS message,
-        any(fingerprint) AS fingerprint,
-        count() AS events,
-        uniqIf(user_id, user_id != '') AS affectedUsers,
+        any(title) AS sampleTitle,
+        any(message) AS sampleMessage,
+        any(fingerprint) AS sampleFingerprint,
+        count() AS eventCount,
+        ${AFFECTED_USERS_SQL} AS affectedUsers,
         min(timestamp) AS firstSeen,
         max(timestamp) AS lastSeen,
         argMax(release, timestamp) AS latestRelease
@@ -166,7 +173,7 @@ async function queryDuplicateIssueGroups(
         AND timestamp >= now() - INTERVAL 90 DAY
         AND (message = {message:String} OR message LIKE {messagePattern:String})
       GROUP BY group_id
-      ORDER BY events DESC, lastSeen DESC
+      ORDER BY eventCount DESC, lastSeen DESC
       LIMIT 50
     `,
     query_params: {
@@ -177,16 +184,32 @@ async function queryDuplicateIssueGroups(
     },
     format: "JSONEachRow",
   });
-  const rows = (await result.json()) as DuplicateIssueGroup[];
+  const rows = (await result.json()) as Array<{
+    groupId: string;
+    sampleTitle: string;
+    sampleMessage: string;
+    sampleFingerprint: string;
+    eventCount: string | number;
+    affectedUsers: string | number;
+    firstSeen: string;
+    lastSeen: string;
+    latestRelease: string;
+  }>;
 
   return rows
-    .filter((row) => normalizeDuplicateMessageKey(row.message) === key)
+    .filter((row) => normalizeDuplicateMessageKey(row.sampleMessage) === key)
     .slice(0, 12)
     .map((row) => ({
-      ...row,
-      events: Number(row.events),
+      groupId: row.groupId,
+      title: row.sampleTitle,
+      message: row.sampleMessage,
+      fingerprint: row.sampleFingerprint,
+      events: Number(row.eventCount),
       affectedUsers: Number(row.affectedUsers),
-      latestRelease: row.latestRelease ?? null,
+      firstSeen: row.firstSeen,
+      lastSeen: row.lastSeen,
+      // events.release is '' for an event with no release, never NULL, so `?? null` left an empty string.
+      latestRelease: row.latestRelease || null,
     }));
 }
 

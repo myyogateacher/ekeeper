@@ -28,7 +28,7 @@ mock.module("../db/clickhouse", () => ({
       ),
   }),
 }));
-const { queryAffectedUsers } = await import("./api");
+const { queryAffectedUsers, queryDuplicateIssueGroups } = await import("./api");
 
 afterAll(() => {
   shadowTables = "";
@@ -141,5 +141,103 @@ describe("queryAffectedUsers", () => {
     shadow(groups.map((group, index) => ({ project: group.projectId, group: group.groupId, user: `user-${index % 40}` })));
 
     expect(await queryAffectedUsers(groups)).toBe(40);
+  });
+});
+
+describe.each([0, 1] as const)("queryDuplicateIssueGroups with prefer_column_name_to_alias = %d", (setting) => {
+  beforeEach(() => {
+    aliasSetting = setting;
+  });
+
+  const current = { project: "pA", group: "current", message: "Cannot read properties of undefined" };
+
+  test("returns the other groups with the same message, with events, users, release and times", async () => {
+    shadow([
+      { ...current, user: "u1" },
+      { project: "pA", group: "twin1", message: current.message, title: "TypeError: twin one", user: "u1", release: "2026.11.12-1", at: ago("3 HOUR") },
+      { project: "pA", group: "twin1", message: current.message, title: "TypeError: twin one", user: "u2", release: "2026.11.13-1", at: ago("1 HOUR") },
+      { project: "pA", group: "twin1", message: current.message, user: "u2", release: "2026.11.13-1", at: ago("2 HOUR") },
+      { project: "pA", group: "twin2", message: current.message, user: "", release: "2026.11.10-1", at: ago("5 HOUR") },
+      { project: "pA", group: "unrelated", message: "something else entirely" },
+    ]);
+
+    const result = await queryDuplicateIssueGroups("pA", "current", current.message);
+
+    expect(result.map((group) => group.groupId)).toEqual(["twin1", "twin2"]);
+    expect(result[0]).toMatchObject({
+      groupId: "twin1",
+      message: current.message,
+      fingerprint: "twin1",
+      events: 3,
+      affectedUsers: 2,
+      latestRelease: "2026.11.13-1",
+    });
+    expect(result[0]!.title).toContain("Error");
+    expect(result[1]).toMatchObject({ groupId: "twin2", events: 1, affectedUsers: 0, latestRelease: "2026.11.10-1" });
+    expect(typeof result[0]!.firstSeen).toBe("string");
+    expect(result[0]!.firstSeen < result[0]!.lastSeen).toBe(true);
+  });
+
+  test("never returns the current group, or a group of another project", async () => {
+    shadow([
+      { ...current },
+      { project: "pB", group: "other-project-twin", message: current.message },
+      { project: "pA", group: "twin", message: current.message },
+    ]);
+
+    const result = await queryDuplicateIssueGroups("pA", "current", current.message);
+
+    expect(result.map((group) => group.groupId)).toEqual(["twin"]);
+  });
+
+  test("ignores an event older than 90 days, and keeps one just inside", async () => {
+    shadow([
+      { project: "pA", group: "old", message: current.message, at: ago("91 DAY") },
+      { project: "pA", group: "recent", message: current.message, at: ago("89 DAY") },
+    ]);
+
+    const result = await queryDuplicateIssueGroups("pA", "current", current.message);
+
+    expect(result.map((group) => group.groupId)).toEqual(["recent"]);
+  });
+
+  test("a latest event with no release gives null, not an empty string", async () => {
+    shadow([{ project: "pA", group: "twin", message: current.message, release: "" }]);
+
+    const [group] = await queryDuplicateIssueGroups("pA", "current", current.message);
+
+    expect(group!.latestRelease).toBeNull();
+  });
+
+  test("finds a group whose message differs only in a URL query or an id, through the LIKE prefix", async () => {
+    const message = "fetch failed https://api.example.com/v1/slots?id=1";
+    shadow([
+      { project: "pA", group: "twin", message: "fetch failed https://api.example.com/v1/slots?id=2" },
+      { project: "pA", group: "different", message: "fetch failed https://api.example.com/v1/other" },
+    ]);
+
+    const result = await queryDuplicateIssueGroups("pA", "current", message);
+
+    expect(result.map((group) => group.groupId)).toEqual(["twin"]);
+  });
+
+  test("a message that normalizes to nothing asks ClickHouse nothing and returns no groups", async () => {
+    shadowTables = "events AS (SELECT throwIf(1) AS event_id)";
+
+    expect(await queryDuplicateIssueGroups("pA", "current", "")).toEqual([]);
+  });
+
+  test("at most 12 groups come back, the busiest first", async () => {
+    shadow(
+      Array.from({ length: 15 }, (_, group) =>
+        Array.from({ length: group + 1 }, () => ({ project: "pA", group: `twin${String(group).padStart(2, "0")}`, message: current.message })),
+      ).flat(),
+    );
+
+    const result = await queryDuplicateIssueGroups("pA", "current", current.message);
+
+    expect(result).toHaveLength(12);
+    expect(result[0]!.groupId).toBe("twin14");
+    expect(result[0]!.events).toBe(15);
   });
 });
