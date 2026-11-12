@@ -1,3 +1,4 @@
+import { ClickHouseError, type ClickHouseClient } from "@clickhouse/client";
 import { getClickHouseClient } from "../db/clickhouse";
 import { all, one, run } from "../db/sqlite";
 import { HttpError } from "./http";
@@ -61,6 +62,61 @@ function groupByProject(entries: BufferedIngestEntry[]) {
   return grouped;
 }
 
+// The ClickHouse errors that mean "the server read this INSERT and refused the data in it". Every one measured so far is a
+// parse error: a timestamp that does not parse (CANNOT_PARSE_DATETIME), a shape the DateTime64 reader rejects
+// (CANNOT_PARSE_INPUT_ASSERTION_FAILED) and a lone surrogate (CANNOT_PARSE_ESCAPE_SEQUENCE). A ClickHouseError is not
+// enough to decide, because the client throws one for any answer from the server: a missing table, a missing database and a
+// wrong password (UNKNOWN_TABLE, UNKNOWN_DATABASE, AUTHENTICATION_FAILED, all measured) are ClickHouseErrors too, and there
+// every row is refused, so dropping them would lose the whole bucket where today it is kept until the server is fixed. A
+// connection error is not a ClickHouseError at all. A type is added here only after an engine probe shows it for bad data;
+// an unlisted type keeps the bucket, which is the behaviour from before this check existed.
+function isRejectedData(error: unknown): error is ClickHouseError {
+  return error instanceof ClickHouseError && /^CANNOT_PARSE_/.test(error.type ?? "");
+}
+
+// INSERTs `rows`; if the server refuses them as bad data, halves them and retries each half, so that only the rows the server
+// still refuses on their own are dropped, and returns their positions in `rows`. A parse error names a row in its message,
+// but the message quotes the input, so it is not used. Any other failure is thrown: the caller keeps the bucket.
+//
+// Cost, only on the failure path: about two INSERTs per level of halving per refused row (13 for one bad row in 64, 29 in
+// 10000) instead of one per row, because every INSERT is a MergeTree part and ClickHouse throws TOO_MANY_PARTS past a few
+// thousand. The remaining duplicate risk: if an outage starts mid-retry, the halves already inserted are inserted again by
+// the next flush, which is the same exposure as an outage between two projects in flushBucket, and events has no key that
+// dedupes. An INSERT of fewer rows than max_insert_block_size (about a million) is atomic, so a refused batch stored nothing
+// and the halves do not duplicate it.
+async function insertSkippingRefusedRows(
+  client: ClickHouseClient,
+  projectId: string,
+  table: "events" | "breadcrumbs",
+  rows: Array<Record<string, unknown> & { event_id: string }>,
+  firstIndex = 0,
+): Promise<number[]> {
+  try {
+    await client.insert({ table, values: rows, format: "JSONEachRow" });
+    return [];
+  } catch (error) {
+    if (!isRejectedData(error)) {
+      throw error;
+    }
+    if (rows.length === 1) {
+      // Only ids and the error's code and type: its message quotes the refused input, which can hold user emails.
+      console.error("[ingest-buffer] dropped a row ClickHouse refused", {
+        projectId,
+        table,
+        eventId: rows[0].event_id,
+        code: error.code,
+        type: error.type,
+      });
+      return [firstIndex];
+    }
+    const middle = Math.ceil(rows.length / 2);
+    return [
+      ...(await insertSkippingRefusedRows(client, projectId, table, rows.slice(0, middle), firstIndex)),
+      ...(await insertSkippingRefusedRows(client, projectId, table, rows.slice(middle), firstIndex + middle)),
+    ];
+  }
+}
+
 async function insertEvents(projectId: string, payloads: Record<string, unknown>[]) {
   if (payloads.length === 0) {
     return;
@@ -97,36 +153,38 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
   });
 
   const client = getClickHouseClient();
-  await client.insert({
-    table: "events",
-    values: events.map((event) => ({
-      event_id: event.eventId,
-      project_id: event.projectId,
-      group_id: event.groupId,
-      fingerprint: event.fingerprint,
-      title: event.title,
-      message: event.message,
-      severity: event.severity,
-      timestamp: toClickHouseDateTime(event.timestamp),
-      release: event.release ?? "",
-      environment: event.environment ?? "",
-      user_id: event.userId ?? "",
-      user_email: event.userEmail ?? "",
-      user_username: event.userUsername ?? "",
-      browser: event.browser ?? "",
-      device: event.device ?? "",
-      os: event.os ?? "",
-      runtime: event.runtime ?? "",
-      tags: JSON.stringify(event.tags),
-      contexts: JSON.stringify(event.contexts),
-      exception: JSON.stringify(event.exception),
-      stacktrace: JSON.stringify(event.stacktrace ?? {}),
-      raw_payload: event.rawPayload,
-    })),
-    format: "JSONEachRow",
-  });
+  const eventRows = events.map((event) => ({
+    event_id: event.eventId,
+    project_id: event.projectId,
+    group_id: event.groupId,
+    fingerprint: event.fingerprint,
+    title: event.title,
+    message: event.message,
+    severity: event.severity,
+    timestamp: toClickHouseDateTime(event.timestamp),
+    release: event.release ?? "",
+    environment: event.environment ?? "",
+    user_id: event.userId ?? "",
+    user_email: event.userEmail ?? "",
+    user_username: event.userUsername ?? "",
+    browser: event.browser ?? "",
+    device: event.device ?? "",
+    os: event.os ?? "",
+    runtime: event.runtime ?? "",
+    tags: JSON.stringify(event.tags),
+    contexts: JSON.stringify(event.contexts),
+    exception: JSON.stringify(event.exception),
+    stacktrace: JSON.stringify(event.stacktrace ?? {}),
+    raw_payload: event.rawPayload,
+  }));
+  // Everything after this works on `stored`: a refused event gets no breadcrumbs, group reopening or GitHub issue.
+  const refusedEventRows = new Set(await insertSkippingRefusedRows(client, projectId, "events", eventRows));
+  const stored = events.filter((_, index) => !refusedEventRows.has(index));
+  if (stored.length === 0) {
+    return;
+  }
 
-  const breadcrumbs = events.flatMap((event) =>
+  const breadcrumbs = stored.flatMap((event) =>
     event.breadcrumbs.map((breadcrumb) => ({
       event_id: event.eventId,
       project_id: event.projectId,
@@ -145,14 +203,10 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
       projectId,
       breadcrumbCount: breadcrumbs.length,
     });
-    await client.insert({
-      table: "breadcrumbs",
-      values: breadcrumbs,
-      format: "JSONEachRow",
-    });
+    await insertSkippingRefusedRows(client, projectId, "breadcrumbs", breadcrumbs);
   }
 
-  const affectedGroupIds = [...new Set(events.map((event) => event.groupId))];
+  const affectedGroupIds = [...new Set(stored.map((event) => event.groupId))];
   const reopenedAt = new Date().toISOString();
   for (const groupId of affectedGroupIds) {
     run(
@@ -163,11 +217,11 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
     );
   }
 
-  await maybeCreateGithubIssues({ projectId, events, affectedGroupIds });
+  await maybeCreateGithubIssues({ projectId, events: stored, affectedGroupIds });
 
   logIngestBuffer("finished ClickHouse batch", {
     projectId,
-    eventCount: events.length,
+    eventCount: stored.length,
     breadcrumbCount: breadcrumbs.length,
     reopenedGroupCount: affectedGroupIds.length,
   });
@@ -269,11 +323,12 @@ async function flushBucket(redisKey: string) {
     await insertEvents(projectId, payloads);
   }
 
-  // Deleted only after every project's insert has returned. An insert that throws (ClickHouse down, a row it refuses)
-  // leaves the bucket for the next flush so an outage does not lose events; its TTL is set at enqueue
-  // (INGEST_BUFFER_RETENTION_SECONDS), so a bucket that keeps failing is lost whole when it expires. The cost of the retry
-  // is that projects inserted earlier in the loop are inserted again, because events is a plain MergeTree and nothing
-  // dedupes on event_id. A payload that cannot be normalised no longer causes that retry: insertEvents drops it.
+  // Deleted only after every project's insert has returned. An insert that throws leaves the bucket for the next flush, so
+  // an outage does not lose events: ClickHouse unreachable, or a server error that is not about the data (the list is
+  // isRejectedData). Its TTL is set at enqueue (INGEST_BUFFER_RETENTION_SECONDS), so a bucket that keeps failing is lost
+  // whole when it expires. The cost of the retry is that projects inserted earlier in the loop are inserted again, because
+  // events is a plain MergeTree and nothing dedupes on event_id. Neither a payload that cannot be normalised nor a row the
+  // server refuses as bad data causes that retry any more: insertEvents drops them.
   await redis.del(redisKey);
   logIngestBuffer("completed bucket flush", {
     redisKey,

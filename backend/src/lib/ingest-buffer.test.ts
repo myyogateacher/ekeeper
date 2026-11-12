@@ -1,5 +1,5 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
-import { createClient, type ClickHouseClient } from "@clickhouse/client";
+import { ClickHouseError, createClient, type ClickHouseClient } from "@clickhouse/client";
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { Hono } from "hono";
@@ -30,6 +30,13 @@ let failNextInsert = false;
 // Set only by the opt-in live block at the bottom: the client for a scratch ClickHouse database. While it is null the
 // recording fake below stands in for ClickHouse.
 let liveClient: ClickHouseClient | null = null;
+type InsertOptions = { table: string; values: Array<Record<string, unknown>>; format: "JSONEachRow" };
+// Test-only rewrite of what the live block sends, so a test can make the real engine refuse a row that production code
+// would never produce. Production code is not changed for it.
+let liveRewrite: ((options: InsertOptions) => Partial<InsertOptions>) | null = null;
+let insertAttempts: Array<{ table: string; size: number }> = [];
+// Runs at the top of every insert on the recording fake; throw from it to make that insert fail.
+let beforeInsert: ((options: InsertOptions) => void) | null = null;
 let githubIntegration: object | null = null;
 let issueCalls: Array<Record<string, unknown>> = [];
 
@@ -53,7 +60,9 @@ const fakeRedis = {
 
 mock.module("./redis", () => ({ connectRedis: async () => fakeRedis }));
 const recordingClickHouse = {
-  insert: async (options: { table: string; values: Array<Record<string, unknown>> }) => {
+  insert: async (options: InsertOptions) => {
+    insertAttempts.push({ table: options.table, size: options.values.length });
+    beforeInsert?.(options);
     if (failNextInsert) {
       failNextInsert = false;
       throw new Error("ClickHouse unavailable");
@@ -61,7 +70,12 @@ const recordingClickHouse = {
     inserts.push({ table: options.table, values: options.values });
   },
 };
-mock.module("../db/clickhouse", () => ({ getClickHouseClient: () => liveClient ?? recordingClickHouse }));
+mock.module("../db/clickhouse", () => ({
+  getClickHouseClient: () =>
+    liveClient
+      ? { insert: (options: InsertOptions) => liveClient!.insert({ ...options, ...liveRewrite?.(options) }) }
+      : recordingClickHouse,
+}));
 // `one` answers two call sites: the project-key lookup in routes/ingest.ts (only "key_a" exists) and the project-name
 // read before a GitHub issue is created. `run` reopens closed issues and `all` reads existing GitHub links.
 mock.module("../db/sqlite", () => ({
@@ -113,6 +127,9 @@ beforeEach(() => {
   buckets = new Map();
   inserts = [];
   failNextInsert = false;
+  insertAttempts = [];
+  beforeInsert = null;
+  liveRewrite = null;
   githubIntegration = null;
   issueCalls = [];
 });
@@ -230,6 +247,147 @@ describe("flushBufferedIngest", () => {
     await flushBufferedIngest();
     expect(buckets.has(BUCKET)).toBe(false);
     expect(storedEventIds()).toEqual(["evt_a"]);
+  });
+});
+
+// A row ClickHouse refuses must not block its bucket (PROD-10530). Two timestamp shapes and a lone surrogate were each found by
+// probing the engine, so the flush no longer depends on knowing every shape: when the batch INSERT fails with a parse error
+// from the server, the rows are retried in halves and only the rows the server still refuses are dropped.
+describe("flushBufferedIngest when ClickHouse refuses a row", () => {
+  const REFUSED = "evt_refused";
+  const serverError = (type: string, code: string) => new ClickHouseError({ message: "server said no", code, type });
+  // What the engine does for a bad timestamp: the whole INSERT that contains the row fails.
+  const refuseBatchesContaining = (table: string, matches: (row: Record<string, unknown>) => boolean) => (options: InsertOptions) => {
+    if (options.table === table && options.values.some(matches)) {
+      throw serverError("CANNOT_PARSE_DATETIME", "41");
+    }
+  };
+  const refusedEvent = { ...goodEvent(REFUSED), user: { email: "private@example.com" } };
+
+  test("a row the server refuses is dropped alone, its project's other events are stored once, and the bucket is deleted", async () => {
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    beforeInsert = refuseBatchesContaining("events", (row) => row.event_id === REFUSED);
+    buckets.set(BUCKET, [
+      entry("project_a", goodEvent("evt_1")),
+      entry("project_a", refusedEvent),
+      entry("project_a", goodEvent("evt_2")),
+      entry("project_a", goodEvent("evt_3")),
+    ]);
+
+    await flushBufferedIngest();
+
+    expect(storedEventIds()).toEqual(["evt_1", "evt_2", "evt_3"]);
+    expect(storedIds("breadcrumbs")).toEqual(["evt_1", "evt_2", "evt_3"]);
+    expect(buckets.has(BUCKET)).toBe(false);
+    // The server's message quotes the input, which can hold user emails, so only ids and the error code and type are logged.
+    const logged = JSON.stringify(errorLog.mock.calls);
+    for (const expected of ["project_a", REFUSED, "41", "CANNOT_PARSE_DATETIME"]) {
+      expect(logged).toContain(expected);
+    }
+    expect(logged).not.toContain("private@example.com");
+    expect(logged).not.toContain("server said no");
+  });
+
+  test("a project whose only event is refused is dropped, and the bucket is still deleted", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    githubIntegration = {};
+    buckets.set(BUCKET, [entry("project_a", refusedEvent), entry("project_b", goodEvent("evt_b"))]);
+    beforeInsert = refuseBatchesContaining("events", (row) => row.event_id === REFUSED);
+
+    await flushBufferedIngest();
+
+    expect(storedEventIds()).toEqual(["evt_b"]);
+    expect(buckets.has(BUCKET)).toBe(false);
+    expect(issueCalls).toHaveLength(1);
+  });
+
+  // Halving, not one INSERT per row: every INSERT is a MergeTree part, and ClickHouse throws TOO_MANY_PARTS past a few
+  // thousand, so one bad row among thousands must not create thousands of parts.
+  test("one refused row among 64 costs at most 13 inserts, not 65", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    beforeInsert = refuseBatchesContaining("events", (row) => row.event_id === "evt_40");
+    buckets.set(BUCKET, Array.from({ length: 64 }, (_, index) => entry("project_a", goodEvent(`evt_${index}`))));
+
+    await flushBufferedIngest();
+
+    expect(storedEventIds()).toHaveLength(63);
+    expect(insertAttempts.filter((attempt) => attempt.table === "events").length).toBeLessThanOrEqual(13);
+  });
+
+  test("a breadcrumb the server refuses is dropped alone and its event is kept", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    beforeInsert = refuseBatchesContaining("breadcrumbs", (row) => row.category === "refused");
+    const crumbs = [
+      { category: "ui.click", message: "clicked", timestamp: "2026-11-13T00:00:00.000Z" },
+      { category: "refused", message: "boom", timestamp: "2026-11-13T00:00:00.000Z" },
+    ];
+    buckets.set(BUCKET, [entry("project_a", { event_id: "evt_1", breadcrumbs: crumbs }), entry("project_a", goodEvent("evt_2"))]);
+
+    await flushBufferedIngest();
+
+    expect(storedEventIds()).toEqual(["evt_1", "evt_2"]);
+    const stored = inserts.filter((insert) => insert.table === "breadcrumbs").flatMap((insert) => insert.values);
+    expect(stored.map((row) => `${row.event_id}:${row.category}`)).toEqual(["evt_1:ui.click", "evt_2:ui.click"]);
+    expect(buckets.has(BUCKET)).toBe(false);
+  });
+
+  // These are the cases the retry must NOT treat as bad data. A ClickHouseError also carries failures of the server or the
+  // request (measured: UNKNOWN_TABLE, UNKNOWN_DATABASE and AUTHENTICATION_FAILED), where every row would be refused and
+  // dropping them would lose the whole bucket, and a connection error is not a server answer at all. Both keep the bucket
+  // with one attempt, as before.
+  test.each([
+    ["a missing table", serverError("UNKNOWN_TABLE", "60")],
+    ["a wrong password", serverError("AUTHENTICATION_FAILED", "516")],
+    ["a refused connection", new Error("connect ECONNREFUSED 127.0.0.1:8123")],
+  ])("%s keeps the bucket after one attempt and drops nothing", async (_label, failure) => {
+    spyOn(console, "error").mockImplementation(() => {});
+    beforeInsert = () => {
+      throw failure;
+    };
+    buckets.set(BUCKET, [entry("project_a", goodEvent("evt_1")), entry("project_a", goodEvent("evt_2"))]);
+
+    await flushBufferedIngest();
+
+    expect(buckets.has(BUCKET)).toBe(true);
+    expect(insertAttempts).toEqual([{ table: "events", size: 2 }]);
+
+    beforeInsert = null;
+    await flushBufferedIngest();
+
+    expect(storedEventIds()).toEqual(["evt_1", "evt_2"]);
+    expect(buckets.has(BUCKET)).toBe(false);
+  });
+
+  // The cost of retrying in halves, in a test so it is not forgotten: an outage that starts mid-retry keeps the bucket, and
+  // the halves already inserted are inserted again by the next flush.
+  test("a connection error during the retry keeps the bucket, and the halves already stored are stored again by the next flush", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    let calls = 0;
+    const refuseRefused = refuseBatchesContaining("events", (row) => row.event_id === REFUSED);
+    beforeInsert = (options) => {
+      calls += 1;
+      if (calls === 3) {
+        throw new Error("connect ECONNREFUSED 127.0.0.1:8123");
+      }
+      refuseRefused(options);
+    };
+    buckets.set(BUCKET, [
+      entry("project_a", goodEvent("evt_1")),
+      entry("project_a", goodEvent("evt_2")),
+      entry("project_a", refusedEvent),
+      entry("project_a", goodEvent("evt_3")),
+    ]);
+
+    await flushBufferedIngest();
+
+    // Call 1 is the whole batch (refused), call 2 stores [evt_1, evt_2], call 3 hits the outage.
+    expect(storedEventIds()).toEqual(["evt_1", "evt_2"]);
+    expect(buckets.has(BUCKET)).toBe(true);
+
+    await flushBufferedIngest();
+
+    expect(storedEventIds()).toEqual(["evt_1", "evt_2", "evt_1", "evt_2", "evt_3"]);
+    expect(buckets.has(BUCKET)).toBe(false);
   });
 });
 
@@ -514,6 +672,52 @@ describeLive("flushBufferedIngest against a real ClickHouse", () => {
       format: "JSONEachRow",
     })).json()) as Array<{ data: string }>;
     expect(crumbs[0].data).toContain("\\ud800");
+  });
+
+  // The backstop against the engine. No shape is known any more that normalizeEvent passes and ClickHouse refuses, so one is
+  // forced: the test client rewrites the timestamp of one event (and of its breadcrumbs) to "garbage" on the way to the real
+  // engine, which refuses the INSERT exactly as it would for a shape nobody has found yet. Nothing in production code knows.
+  test("a row the engine refuses is dropped alone, and the events around it, in its project and others, are stored once", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    liveRewrite = (options) => ({
+      values: options.values.map((row) => (row.event_id === "evt_forced" ? { ...row, timestamp: "garbage" } : row)),
+    });
+    const withCrumb = (eventId: string) => ({
+      ...goodEvent(eventId),
+      breadcrumbs: [{ category: "ui.click", message: "clicked", timestamp: "2026-11-13T10:00:00.123Z" }],
+    });
+    buckets.set(BUCKET, [
+      entry("project_a", withCrumb("evt_a")),
+      entry("project_m", withCrumb("evt_forced")),
+      entry("project_m", withCrumb("evt_ok")),
+      entry("project_b", withCrumb("evt_b")),
+    ]);
+
+    await flushBufferedIngest();
+    await flushBufferedIngest();
+
+    expect((await rowsOf("events")).map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_ok"]);
+    expect((await rowsOf("breadcrumbs")).map((row) => row.event_id)).toEqual(["evt_a", "evt_b", "evt_ok"]);
+    expect(buckets.has(BUCKET)).toBe(false);
+  });
+
+  // The other half of the contract, against the real client: a ClickHouseError that is not about the data (here UNKNOWN_TABLE,
+  // from the real server) must not be mistaken for a refused row, or the whole bucket would be dropped row by row.
+  test("a server error that is not about the data keeps the bucket, and the next flush stores everything once", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    liveRewrite = () => ({ table: "events_that_does_not_exist" });
+    buckets.set(BUCKET, [entry("project_a", goodEvent("evt_a")), entry("project_b", goodEvent("evt_b"))]);
+
+    await flushBufferedIngest();
+
+    expect(buckets.has(BUCKET)).toBe(true);
+    expect(await rowsOf("events")).toEqual([]);
+
+    liveRewrite = null;
+    await flushBufferedIngest();
+
+    expect((await rowsOf("events")).map((row) => row.event_id)).toEqual(["evt_a", "evt_b"]);
+    expect(buckets.has(BUCKET)).toBe(false);
   });
 
   // The engine is the oracle for normalizeTimestamp's pattern list: a pattern that is too wide lets a string through that
