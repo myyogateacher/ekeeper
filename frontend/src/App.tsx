@@ -1,8 +1,8 @@
 import { useQuery, useQueryClient } from "@tanstack/react-query";
-import { Navigate, Outlet, Route, Routes, useNavigate } from "react-router-dom";
+import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
 import { api } from "@/lib/api";
-import { DashboardPage } from "@/pages/DashboardPage";
+import { rememberPathForLogin, takePathAfterLogin } from "@/lib/after-login";
 import { ErrorDetailPage } from "@/pages/ErrorDetailPage";
 import { ErrorsPage } from "@/pages/ErrorsPage";
 import { LoginPage } from "@/pages/LoginPage";
@@ -13,6 +13,7 @@ import { UsersPage } from "@/pages/UsersPage";
 
 function ProtectedLayout() {
   const navigate = useNavigate();
+  const location = useLocation();
   const queryClient = useQueryClient();
   const { data, isLoading } = useQuery({
     queryKey: ["me"],
@@ -21,10 +22,15 @@ function ProtectedLayout() {
   });
 
   if (isLoading) {
-    return <div className="flex min-h-screen items-center justify-center text-slate-200">Loading workspace...</div>;
+    return (
+      <div className="flex min-h-screen items-center justify-center text-muted" role="status">
+        Loading
+      </div>
+    );
   }
 
   if (!data) {
+    rememberPathForLogin(`${location.pathname}${location.search}`);
     return <Navigate to="/login" replace />;
   }
 
@@ -38,7 +44,7 @@ function ProtectedLayout() {
         navigate("/login", { replace: true });
       }}
     >
-      <Outlet />
+      <Outlet context={data} />
     </AppShell>
   );
 }
@@ -53,7 +59,7 @@ function LoginRoute() {
   });
 
   if (data) {
-    return <Navigate to="/dashboard" replace />;
+    return <Navigate to={takePathAfterLogin() ?? "/errors"} replace />;
   }
 
   return (
@@ -68,21 +74,29 @@ function LoginRoute() {
   );
 }
 
+// The backend lands every sign-in on /dashboard (backend/src/routes/auth.ts:25). Overview was dropped, so
+// that path restores the page a logged-out user was sent away from, else opens the issues list.
+function AfterLoginRedirect() {
+  return <Navigate to={takePathAfterLogin() ?? "/errors"} replace />;
+}
+
+// /errors and /errors/:projectId/:groupId stay the canonical URLs: GitHub issue bodies link to the latter
+// (backend/src/lib/issue-sync.ts:181), so renaming them would need a redirect kept forever.
 export default function App() {
   return (
     <Routes>
       <Route path="/login" element={<LoginRoute />} />
       <Route element={<ProtectedLayout />}>
-        <Route path="/" element={<Navigate to="/dashboard" replace />} />
-        <Route path="/dashboard" element={<DashboardPage />} />
-        <Route path="/projects" element={<ProjectsPage />} />
-        <Route path="/users" element={<UsersPage />} />
+        <Route path="/" element={<Navigate to="/errors" replace />} />
+        <Route path="/dashboard" element={<AfterLoginRedirect />} />
         <Route path="/errors" element={<ErrorsPage />} />
         <Route path="/errors/:projectId/:groupId" element={<ErrorDetailPage />} />
+        <Route path="/projects" element={<ProjectsPage />} />
+        <Route path="/users" element={<UsersPage />} />
         <Route path="/minimaps" element={<MinimapsPage />} />
         <Route path="/settings" element={<SettingsPage />} />
       </Route>
-      <Route path="*" element={<Navigate to="/dashboard" replace />} />
+      <Route path="*" element={<Navigate to="/errors" replace />} />
     </Routes>
   );
 }

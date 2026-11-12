@@ -1,5 +1,4 @@
 import type {
-  DashboardProjectCard,
   DuplicateIssueGroup,
   ErrorEventDetail,
   ErrorGroupSummary,
@@ -15,6 +14,28 @@ import type {
   User,
   UserRole,
 } from "@ekeeper/shared";
+import {
+  ISSUE_LIST_PAGE_SIZE,
+  mergePages,
+  remainingPageOffsets,
+  type ApiFilters,
+  type IssueSet,
+} from "@/lib/issue-list";
+
+/**
+ * Carries the HTTP status so callers can tell a refusal from an outage: the query client never retries a
+ * 4xx, a 401 sends the user to /login, and a 403 on an issue renders "This issue isn't available" instead
+ * of a generic failure. Before this, every failure was a plain Error and those cases were indistinguishable.
+ */
+export class ApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "ApiError";
+  }
+}
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
@@ -30,11 +51,16 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   });
 
   if (!response.ok) {
-    const body = await response.json().catch(() => ({ message: "Request failed" }));
-    throw new Error(body.message ?? "Request failed");
+    // A non-JSON error body (a proxy's HTML 502 page) still has to surface as an ApiError with its status.
+    const body = (await response.json().catch(() => ({}))) as { message?: string };
+    throw new ApiError(body.message ?? `Request failed (${response.status})`, response.status);
   }
 
   return response.json() as Promise<T>;
+}
+
+export function isApiStatus(error: unknown, ...statuses: number[]): boolean {
+  return error instanceof ApiError && statuses.includes(error.status);
 }
 
 export const api = {
@@ -69,7 +95,6 @@ export const api = {
     request<{ success: boolean }>(`/api/projects/${projectId}/members/${userId}`, { method: "DELETE" }),
   errorAssignees: (projectId?: string) =>
     request<{ users: User[] }>(projectId ? `/api/error-assignees?projectId=${projectId}` : "/api/error-assignees"),
-  dashboard: () => request<{ cards: DashboardProjectCard[] }>("/api/dashboard/summary?range=7d"),
   serverSettings: () => request<{ settings: ServerSettings }>("/api/settings/server"),
   serverUploadToken: () => request<{ token: string }>("/api/settings/server/token"),
   regenerateServerToken: () => request<{ token: string }>("/api/settings/server/regenerate-token", { method: "POST" }),
@@ -177,3 +202,23 @@ export const api = {
 };
 
 export const roleOptions: UserRole[] = ["admin", "manager", "viewer"];
+
+/**
+ * Loads a whole issue view up to ISSUE_LIST_MAX_ROWS: the first page, then the rest in parallel. If the
+ * pages disagree (an issue closed or re-ranked between requests, see mergePages) the set is fetched once
+ * more; a second disagreement is returned as incomplete and the page says the list changed while loading.
+ */
+export async function fetchIssueSet(filters: ApiFilters): Promise<IssueSet> {
+  const { projectId, ...rest } = filters;
+  const load = async () => {
+    const first = await api.errors(projectId, { ...rest, limit: ISSUE_LIST_PAGE_SIZE, offset: 0 });
+    const others = await Promise.all(
+      remainingPageOffsets(first.total).map((offset) =>
+        api.errors(projectId, { ...rest, limit: ISSUE_LIST_PAGE_SIZE, offset }),
+      ),
+    );
+    return mergePages([first, ...others]);
+  };
+  const set = await load();
+  return set.complete ? set : load();
+}

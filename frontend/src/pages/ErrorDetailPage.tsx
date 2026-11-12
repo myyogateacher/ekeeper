@@ -1,7 +1,7 @@
 import { useState } from "react";
 import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link, useParams } from "react-router-dom";
-import { HiArrowDownTray, HiChevronLeft, HiChevronRight } from "react-icons/hi2";
+import { ChevronLeft as HiChevronLeft, ChevronRight as HiChevronRight, Download as HiArrowDownTray } from "lucide-react";
 import { api } from "@/lib/api";
 import { formatDate } from "@/lib/utils";
 import type { IssueState } from "@ekeeper/shared";
