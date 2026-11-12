@@ -1,4 +1,6 @@
 import type {
+  AffectedUsersRequest,
+  AffectedUsersResponse,
   ErrorDetailResponse,
   ErrorGroupSummary,
   IssueState,
@@ -175,7 +177,12 @@ export const api = {
     request<ErrorDetailResponse>(
       path`/api/projects/${projectId}/errors/${groupId}` + (eventId ? `?${new URLSearchParams({ eventId })}` : ""),
     ),
-
+  // The ids travel in the body, so no id is ever a path segment here (lib/url.ts).
+  affectedUsers: (groups: AffectedUsersRequest["groups"]) =>
+    request<AffectedUsersResponse>("/api/errors/affected-users", {
+      method: "POST",
+      body: JSON.stringify({ groups } satisfies AffectedUsersRequest),
+    }),
   updateIssueWorkflow: (projectId: string, groupId: string, payload: { state?: IssueState; assignedUserId?: string | null }) =>
     request<{ issue: ErrorGroupSummary | undefined }>(path`/api/projects/${projectId}/errors/${groupId}/workflow`, {
       method: "PATCH",

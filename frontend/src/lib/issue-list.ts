@@ -287,7 +287,7 @@ export interface ListStats {
   events7d: number;
 }
 
-/** Users affected is left out on purpose: distinct users cannot be summed across groups. */
+/** Users affected is left out on purpose: distinct users cannot be summed across groups (see affectedUsersScope). */
 export function listStats(rows: ErrorGroupSummary[], now: number): ListStats {
   return {
     issues: rows.length,
@@ -390,6 +390,19 @@ export function stepRow(current: number, delta: 1 | -1, length: number): number 
 export interface IssueKey {
   projectId: string;
   groupId: string;
+}
+
+/**
+ * The issues the list header's "N users affected" is asked about: exactly the rows on screen, or null when the
+ * figure must not be shown. Distinct users cannot be summed across groups (one user can hit several), so the
+ * count comes from the server over this set (POST /api/errors/affected-users) and the client never adds
+ * per-row counts. Null while the list is loading (`set` undefined), when it holds only the busiest 500 of a
+ * longer list (`truncated`, so the figure would count a different set than the title promises), when its pages
+ * disagreed (`complete` false), and when no row is left to ask about.
+ */
+export function affectedUsersScope(set: IssueSet | undefined, rows: ErrorGroupSummary[]): IssueKey[] | null {
+  if (!set || set.truncated || !set.complete || rows.length === 0) return null;
+  return rows.map(({ projectId, groupId }) => ({ projectId, groupId }));
 }
 
 /**

@@ -15,6 +15,7 @@ import {
   RANGE_PRESETS,
   SAVED_VIEWS,
   SEVERITIES,
+  affectedUsersScope,
   applyBrowserFilters,
   applyListPatch,
   emptyListKind,
@@ -37,6 +38,7 @@ import { formatAbsolute, formatRelative } from "@/lib/time";
 import { pluralize } from "@/lib/plural";
 import { formatNumber } from "@/lib/utils";
 import { useMe } from "@/components/session";
+import { useAffectedUsers } from "@/components/useAffectedUsers";
 import { useIssueSet } from "@/components/useIssueSet";
 import { AssignMenu, initials } from "@/components/AssignMenu";
 import { useIssueWorkflow } from "@/components/workflow";
@@ -67,6 +69,10 @@ export function ErrorsPage() {
 
   const rows = useMemo(() => (set ? applyBrowserFilters(set.rows, query, now) : []), [set, query, now]);
   const stats = listStats(rows, now);
+  // "N users affected" is the server's distinct count over the rows on screen, never a sum of the Users column
+  // (one user can hit several issues). No figure while the list is loading or incomplete, or while the count
+  // itself is loading or failed: a missing figure is honest, a stale or partial one is not.
+  const affected = useAffectedUsers(useMemo(() => affectedUsersScope(set, rows), [set, rows]));
   // Carried by every row link so the issue page can step to the previous and next issue of this list.
   const listState = useMemo(() => listOriginState(query), [query]);
   const view = matchSavedView(query);
@@ -153,6 +159,11 @@ export function ErrorsPage() {
             <span>
               <b className="font-medium text-fg">{formatNumber(stats.events7d)}</b> {pluralize(stats.events7d, "event")} in 7d
             </span>
+            {affected.data ? (
+              <span>
+                <b className="font-medium text-fg">{formatNumber(affected.data.affectedUsers)}</b> {pluralize(affected.data.affectedUsers, "user")} affected
+              </span>
+            ) : null}
           </div>
         ) : null}
         <label className="ml-auto flex h-8 max-w-[360px] flex-[1_1_240px] items-center gap-2 rounded-md border border-line bg-surface px-2.5 text-muted max-[720px]:ml-0 max-[720px]:h-11 max-[720px]:max-w-none max-[720px]:basis-full">

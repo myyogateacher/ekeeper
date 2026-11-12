@@ -5,6 +5,7 @@ import {
   DEFAULT_QUERY,
   ISSUE_LIST_MAX_ROWS,
   SAVED_VIEWS,
+  affectedUsersScope,
   applyBrowserFilters,
   applyListPatch,
   emptyListKind,
@@ -244,6 +245,24 @@ test("Show all time keeps every other filter, and is offered only while a range 
   assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, status: "closed", q: "x", range: "30d" }), "/errors?status=closed&range=all&q=x");
   assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, range: "custom", from: "2026-11-01", to: "2026-11-02" }), "/errors?range=all");
   assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, range: "all" }), null);
+});
+
+// Distinct users cannot be summed across groups, so the header figure comes from the server over the rows on
+// screen. It must never be asked, let alone shown, for a set that is not the whole list.
+test("users affected is asked only about a complete, uncapped list, over exactly the rows on screen", () => {
+  const rows = [row("a"), row("b", { projectId: "p2" })];
+  const set = (over: object) => ({ rows, total: 2, truncated: false, complete: true, ...over });
+  assert.deepEqual(affectedUsersScope(set({}), rows), [{ projectId: "p1", groupId: "a" }, { projectId: "p2", groupId: "b" }]);
+  assert.deepEqual(affectedUsersScope(set({}), rows.slice(1)), [{ projectId: "p2", groupId: "b" }], "a search that narrows the rows narrows the set asked about");
+  assert.equal(affectedUsersScope(undefined, []), null, "still loading");
+  assert.equal(affectedUsersScope(set({ truncated: true, total: 900 }), rows), null, "only the busiest 500 are loaded");
+  assert.equal(affectedUsersScope(set({ complete: false }), rows), null, "pages disagreed");
+  assert.equal(affectedUsersScope(set({}), []), null, "nothing left to ask about");
+});
+
+test("the keys sent to the server carry only the two ids, never the row", () => {
+  const [key] = affectedUsersScope({ rows: [row("a")], total: 1, truncated: false, complete: true }, [row("a")])!;
+  assert.deepEqual(Object.keys(key).sort(), ["groupId", "projectId"]);
 });
 
 test("a list row's router state round trips to the same query, and anything else reads as no list", () => {
