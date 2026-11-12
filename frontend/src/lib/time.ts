@@ -49,24 +49,37 @@ export function formatRelative(value: string | null | undefined, now: number): s
 }
 
 /**
- * "12 Nov 2026, 16:29 GMT+5:30". The zone is always printed so a screenshot pasted into Slack cannot be
- * misread by someone in another zone.
+ * The date and time of an instant as "12 Nov 2026, 16:29 GMT+5:30", or "12 Nov, 16:29 GMT+5:30" without the
+ * year. Assembled from formatToParts, never from one formatted string: Intl joins the date and the time with
+ * ", " in V8 and " at " in JavaScriptCore, so Safari showed "12 Nov 2026 at 16:29" for the same instant.
+ * The zone is always printed so a screenshot pasted into Slack cannot be misread by someone in another zone.
+ * hourCycle h23 (not hour12: false) because the latter can print midnight as "24:05".
  */
-export function formatAbsolute(value: string | null | undefined, timeZone?: string): string {
-  const parsed = parseServerTime(value);
-  if (!parsed) {
-    return "Unknown";
-  }
-  return new Intl.DateTimeFormat("en-GB", {
+function formatInstant(instant: Date, withYear: boolean, timeZone?: string): string {
+  const parts = new Intl.DateTimeFormat("en-GB", {
     day: "numeric",
     month: "short",
-    year: "numeric",
+    year: withYear ? "numeric" : undefined,
     hour: "2-digit",
     minute: "2-digit",
-    hour12: false,
+    hourCycle: "h23",
     timeZoneName: "short",
     timeZone,
-  }).format(parsed);
+  }).formatToParts(instant);
+  const part = (type: Intl.DateTimeFormatPartTypes) => parts.find((entry) => entry.type === type)?.value ?? "";
+  const date = [part("day"), part("month"), withYear ? part("year") : ""].filter(Boolean).join(" ");
+  return `${date}, ${part("hour")}:${part("minute")} ${part("timeZoneName")}`;
+}
+
+/** "12 Nov 2026, 16:29 GMT+5:30" for a server timestamp; "Unknown" when it is missing or unreadable. */
+export function formatAbsolute(value: string | null | undefined, timeZone?: string): string {
+  const parsed = parseServerTime(value);
+  return parsed ? formatInstant(parsed, true, timeZone) : "Unknown";
+}
+
+/** "12 Nov, 16:29 GMT+5:30" for an instant in epoch milliseconds, for chart axes where the year is noise. */
+export function formatDayTime(epochMs: number, timeZone?: string): string {
+  return formatInstant(new Date(epochMs), false, timeZone);
 }
 
 /**

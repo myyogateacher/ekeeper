@@ -69,7 +69,7 @@ and its table test in `permissions.test.ts`.
 ## Tests and checks
 
 ```bash
-npm test --prefix frontend      # node:test over src/**/*.test.ts, Node 22, no browser
+npm test --prefix frontend      # node:test over src/**/*.test.ts, Node 22.6+, no browser
 npm run build --prefix frontend  # tsc --noEmit, then vite build
 ```
 

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { formatAbsolute, formatRelative, localDayRange, parseServerTime } from "./time.ts";
+import { formatAbsolute, formatDayTime, formatRelative, localDayRange, parseServerTime } from "./time.ts";
 
 // The bug this module exists for: ClickHouse sends UTC digits with no zone, and the old formatDate read
 // them as local time. In Asia/Kolkata that showed 10:59 for an event at 16:29 local.
@@ -11,6 +11,16 @@ test("a ClickHouse timestamp without a zone is read as UTC, never as the viewer'
     formatAbsolute("2026-11-12 10:59:55.890", "Asia/Kolkata"),
     "12 Nov 2026, 16:29 GMT+5:30",
   );
+});
+
+// Intl joins the date and the time with ", " in V8 (Chrome, Edge, node) and " at " in JavaScriptCore (Safari,
+// bun) when asked for one formatted string, so the text is assembled from its parts instead. This test runs
+// under `node --test` and `bun test` so a regression on either engine is caught. Midnight guards the "24:05"
+// that a 12 hour clock forced to 24 hour can print.
+test("absolute times read the same in every JS engine, and midnight is 00:05 not 24:05", () => {
+  assert.equal(formatAbsolute("2026-11-12 00:05:00.000", "UTC"), "12 Nov 2026, 00:05 UTC");
+  assert.equal(formatAbsolute("2026-11-12 10:59:55.890", "Asia/Kolkata"), "12 Nov 2026, 16:29 GMT+5:30");
+  assert.equal(formatDayTime(Date.parse("2026-11-11T10:30:00Z"), "Asia/Kolkata"), "11 Nov, 16:00 GMT+5:30");
 });
 
 test("an ISO timestamp that carries its zone is not shifted", () => {
