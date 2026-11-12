@@ -16,9 +16,43 @@ function ensureChunkUploadRoot() {
   mkdirSync(chunkUploadRoot, { recursive: true });
 }
 
+// A chunk name comes from the caller (the multipart filename on upload, the chunks list on assemble) and is
+// joined onto a disk path, so a name like "../ekeeper.db" would write, read or delete a file outside this
+// folder for anyone holding the upload token, which every app's CI holds. The Sentry clients name each chunk by
+// its SHA-1, 40 lowercase hex characters, so nothing else is a chunk. Checked here because the write, the reads
+// and the delete all build their path through this one function.
+const CHUNK_NAME = /^[0-9a-f]{40}$/;
+
 function chunkPath(checksum: string) {
+  if (!CHUNK_NAME.test(checksum)) {
+    throw new HttpError(400, "Chunk names must be SHA-1 checksums");
+  }
   ensureChunkUploadRoot();
   return path.join(chunkUploadRoot, checksum);
+}
+
+// Bundles assembled recently, so a repeat assemble call answers ok instead of not_found. Assembling deletes the
+// chunks, and the JS sentry CLI never uploads again while it polls, so a second build uploading the same bundle
+// at the same time (same files, same release: a re-run of one commit) got not_found on every poll until its
+// 300 s deadline, "Artifact bundle assembly timed out" (measured 301 s). Sentry's own endpoint caches the result
+// per checksum the same way. Keyed on projects and release too, because the cached answer stands in for saving
+// the maps. In memory because eKeeper runs as one process; after a restart a repeat call re-uploads and
+// re-assembles, which saveMinimapArtifact already handles by replacing the row. 10 minutes is twice the client's
+// 300 s polling deadline.
+const ASSEMBLED_TTL_MS = 10 * 60 * 1000;
+const recentlyAssembled = new Map<string, number>();
+
+function assembledKey(checksum: string, projects: string[], version: string | undefined) {
+  return `${checksum}|${[...projects].sort().join(",")}|${version ?? ""}`;
+}
+
+function wasRecentlyAssembled(key: string, now: number) {
+  for (const [entry, at] of recentlyAssembled) {
+    if (now - at > ASSEMBLED_TTL_MS) {
+      recentlyAssembled.delete(entry);
+    }
+  }
+  return recentlyAssembled.has(key);
 }
 
 function sha1(buffer: Uint8Array) {
@@ -449,6 +483,20 @@ async function assembleArtifactBundle(ctx: Context) {
   if (!payload.checksum || !Array.isArray(payload.chunks) || payload.chunks.length === 0) {
     throw new HttpError(400, "Artifact bundle checksum and chunks are required");
   }
+  // Refused up front rather than left to chunkPath: the missing-chunk check below swallows its error and would
+  // echo the bad name back as missing.
+  if (!payload.chunks.every((checksum) => typeof checksum === "string" && CHUNK_NAME.test(checksum))) {
+    throw new HttpError(400, "Chunk names must be SHA-1 checksums");
+  }
+
+  const key = assembledKey(payload.checksum, projects, payload.version);
+  if (wasRecentlyAssembled(key, Date.now())) {
+    // A concurrent build's chunks may have landed after the first assemble consumed them; nothing reads them now.
+    for (const checksum of payload.chunks) {
+      rmSync(chunkPath(checksum), { force: true });
+    }
+    return ctx.json({ state: "ok", missingChunks: [] });
+  }
 
   const missingChunks = payload.chunks.filter((checksum) => {
     try {
@@ -465,7 +513,11 @@ async function assembleArtifactBundle(ctx: Context) {
       checksum: payload.checksum,
       missingChunks,
     });
-    return ctx.json({ state: "not_found", missingChunks }, 409);
+    // 200, not 409. The sentry CLI that @sentry/vite-plugin 11.9.0 drives treats any non-2xx answer as a failed
+    // request ("API request failed: 409 Conflict") and stops, so with 409 it never reached the step that
+    // uploads the chunks named here. This is the answer to the first assemble call, made before any chunk is
+    // uploaded: the client uploads exactly missingChunks and then calls assemble again.
+    return ctx.json({ state: "not_found", missingChunks });
   }
 
   const chunkBuffers = payload.chunks.map((checksum) => new Uint8Array(readFileSync(chunkPath(checksum))));
@@ -517,8 +569,16 @@ async function assembleArtifactBundle(ctx: Context) {
     }
   }
 
+  recentlyAssembled.set(key, Date.now());
+
+  // "ok", not "created": the bundle is fully assembled and its maps are saved before this response goes out,
+  // which is the state Sentry reports for a finished bundle. The JS sentry CLI ends on "ok" in every mode but on
+  // "created" only when it was not asked to wait; a waiting client would spend one more poll, answered ok from
+  // recentlyAssembled. missingChunks is sent as Sentry's own endpoint sends it: sentry-cli 2.x cannot parse an
+  // answer without it, while the JS CLI treats it as optional.
   return ctx.json({
-    state: "created",
+    state: "ok",
+    missingChunks: [],
     artifactBundle: {
       checksum: payload.checksum,
       release: payload.version ?? null,
