@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { clearPathAfterLogin, isAppPath, peekPathAfterLogin, rememberPathForLogin } from "./after-login.ts";
+import { clearPathAfterLogin, isAppPath, isLandingPath, peekPathAfterLogin, rememberPathForLogin } from "./after-login.ts";
 
 // The remembered path is navigated to after sign-in, so anything that could leave the app (a
 // protocol-relative or backslash path, a full URL) must be refused, or a crafted link becomes a redirect
@@ -56,4 +56,23 @@ test("a stored path that is not an app path is never returned, and /login is nev
   const store = withSessionStorage();
   rememberPathForLogin("/login?next=1");
   assert.equal(store.size, 0);
+});
+
+// A path that renders RedirectAfterLogin cannot be the place it sends the user: the router is already on
+// that route, the redirect's <Navigate> does not fire again, and the page renders nothing. /dashboard is where
+// every sign-in lands (backend/src/routes/auth.ts:25) and the old home page, so a signed-out user opening it
+// is the likely case (PROD-10519 review: blank page after signing in). Both routes that render the redirect
+// are checked, in the spellings the router treats as the same route (trailing slash, case, query, hash).
+test("a route that itself redirects after login is never remembered as the page to return to", () => {
+  for (const landing of ["/dashboard", "/dashboard/", "/Dashboard", "/dashboard?x=1", "/dashboard#top", "/login", "/login/", "/login?next=1"]) {
+    const store = withSessionStorage();
+    rememberPathForLogin(landing);
+    assert.equal(store.size, 0, landing);
+    assert.equal(isLandingPath(landing), true, landing);
+  }
+  for (const page of ["/errors", "/errors?x=1", "/errors/p1/g1", "/dashboardx", "/settings/members"]) {
+    const store = withSessionStorage();
+    rememberPathForLogin(page);
+    assert.equal(store.size, 1, page);
+  }
 });

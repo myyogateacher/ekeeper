@@ -6,6 +6,7 @@ import {
   ISSUE_LIST_MAX_ROWS,
   SAVED_VIEWS,
   applyBrowserFilters,
+  applyListPatch,
   listShortcut,
   matchSavedView,
   mergePages,
@@ -170,4 +171,17 @@ test("the row cursor stops at the first and last row", () => {
   assert.equal(stepRow(2, 1, 3), 2);
   assert.equal(stepRow(1, 1, 3), 2);
   assert.equal(stepRow(-1, 1, 0), -1);
+});
+
+// The search box commits its text to the URL 200 ms after the last key. If the commit is built from the query
+// of the render that scheduled it, a filter changed inside that window is written back to its old value
+// (PROD-10519 review: Status set to Closed 50 ms after a keystroke ended as Open). Building from the URL as it
+// is when the commit fires keeps every other param.
+test("a patch is applied to the URL as it is now, so a filter changed meanwhile survives", () => {
+  const patched = applyListPatch("?projectId=A&status=closed", { q: "x" });
+  assert.equal(patched.get("status"), "closed");
+  assert.equal(patched.get("projectId"), "A");
+  assert.equal(patched.get("q"), "x");
+  assert.equal(applyListPatch("?q=old&sort=7d", { q: "" }).toString(), "sort=7d");
+  assert.equal(applyListPatch("", { status: "open" }).toString(), "");
 });

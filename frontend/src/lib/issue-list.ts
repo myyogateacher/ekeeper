@@ -111,6 +111,15 @@ export function serializeListQuery(query: ListQuery): URLSearchParams {
 }
 
 /**
+ * The list URL after applying `patch` to the URL as it is now. Callers pass the live `location.search`, not
+ * the query of the render that created them: the search box commits 200 ms after the last key, and a filter
+ * changed inside that window would otherwise be written back to its old value.
+ */
+export function applyListPatch(search: string, patch: Partial<ListQuery>): URLSearchParams {
+  return serializeListQuery({ ...parseListQuery(new URLSearchParams(search)), ...patch });
+}
+
+/**
  * Saved views are presets of status and assignee, not a param of their own, so a URL cannot carry two
  * contradicting statuses. Closed also widens the range: a closed issue is often last seen long ago.
  */

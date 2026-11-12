@@ -4,8 +4,19 @@
 // closes) and only same-origin app paths are restored, so it cannot be used as an open redirect.
 const KEY = "ekeeper:after-login";
 
+/**
+ * The two routes that render the post-login redirect: /login (when already signed in) and /dashboard, where
+ * the backend lands every sign-in. Neither can be the page to return to, because the router is already on it
+ * and the redirect's <Navigate> does not fire again, so the page stays blank. Compared the way the router
+ * matches: query and hash ignored, trailing slashes ignored, case ignored.
+ */
+export function isLandingPath(path: string): boolean {
+  const pathname = path.split(/[?#]/, 1)[0].replace(/\/+$/, "").toLowerCase();
+  return pathname === "/dashboard" || pathname === "/login";
+}
+
 export function rememberPathForLogin(path: string): void {
-  if (!isAppPath(path) || path.startsWith("/login")) {
+  if (!isAppPath(path) || isLandingPath(path)) {
     return;
   }
   try {

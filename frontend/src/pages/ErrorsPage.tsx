@@ -15,6 +15,7 @@ import {
   SAVED_VIEWS,
   SEVERITIES,
   applyBrowserFilters,
+  applyListPatch,
   isNewIssue,
   listShortcut,
   listStats,
@@ -54,8 +55,11 @@ export function ErrorsPage() {
   // render would re-run the browser filter over up to 500 rows on each keystroke and hover.
   const now = useMemo(() => Date.now(), [set]);
 
+  // Built from the live URL, not from `query`: this runs from event handlers and from the search timer, and
+  // the render that created it can be a transition or 200 ms behind. A patch layered on that stale query wrote
+  // old filter values back (Status set to Closed just after a keystroke ended as Open).
   const update = (patch: Partial<ListQuery>, options?: { replace?: boolean }) =>
-    setSearchParams(serializeListQuery({ ...query, ...patch }), { replace: options?.replace });
+    setSearchParams(applyListPatch(window.location.search, patch), { replace: options?.replace });
 
   const rows = useMemo(() => (set ? applyBrowserFilters(set.rows, query, now) : []), [set, query, now]);
   const stats = listStats(rows, now);
@@ -64,16 +68,31 @@ export function ErrorsPage() {
   const projectNames = useMemo(() => new Map((projects?.projects ?? []).map((project) => [project.id, project.name])), [projects]);
   const projectCount = projects?.projects.length;
 
-  // Search is a local draft committed to the URL after 200 ms with replace, so typing never fights the
-  // router and back does not step through every keystroke.
+  // Search is a local draft committed to the URL 200 ms after the last key, with replace, so typing never
+  // fights the router and back does not step through every keystroke.
+  //
+  // `committed` is the last text this box wrote to the URL. React Router renders each navigation inside a
+  // transition, so the user can type more keys before their own commit renders; adopting every URL change into
+  // the draft let that late echo of "err" overwrite the newer "erro", and its cleanup then cancelled the timer
+  // for the newer text (letters were lost at 200 to 260 ms per key). Only a URL change this box did not write
+  // (back, a saved view, Clear filters) replaces the draft.
   const [draft, setDraft] = useState(query.q);
+  const committed = useRef(query.q);
   const searchRef = useRef<HTMLInputElement>(null);
-  useEffect(() => setDraft(query.q), [query.q]);
   useEffect(() => {
-    if (draft === query.q) return;
-    const timer = setTimeout(() => update({ q: draft }, { replace: true }), 200);
+    if (query.q === committed.current) return;
+    committed.current = query.q;
+    setDraft(query.q);
+  }, [query.q]);
+  useEffect(() => {
+    // Compared with what was last written, not with the URL, which can still show the text before it.
+    if (draft === committed.current) return;
+    const timer = setTimeout(() => {
+      committed.current = draft;
+      update({ q: draft }, { replace: true });
+    }, 200);
     return () => clearTimeout(timer);
-    // update is rebuilt every render from query; draft is the only trigger.
+    // update reads the live URL, so only a new draft needs to restart the timer.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [draft]);
 
