@@ -158,8 +158,9 @@ export interface IssueStats {
   // Rolling windows ending now, the same definition as ErrorGroupSummary.count24h and count7d.
   events24h: number;
   events7d: number;
-  // Exactly 24 counts, oldest first, one per UTC clock hour. The last entry is the hour containing now, so it
-  // covers only the minutes elapsed in that hour, and the sum can be below events24h (a rolling 24 hours).
+  // Exactly 24 counts, oldest first, in rolling hours from one server clock reading shared with events24h:
+  // hourly24h[i] counts events in [now - (24 - i)h, now - (23 - i)h). The last entry has no upper bound, so an
+  // event stamped ahead of the server clock lands in it, which keeps sum(hourly24h) equal to events24h.
   hourly24h: number[];
   firstSeen: string | null;
   lastSeen: string | null;
@@ -205,9 +206,11 @@ export interface AffectedUsersResponse {
 export interface IngestStatus {
   // ISO 8601 UTC with Z of the project's newest event; null when it has none.
   lastEventAt: string | null;
-  // The project's newest uploaded source map release; null when none was uploaded.
+  // The release of the project's newest event (argMax(release, timestamp)); null when the project has no event
+  // or that event has no release. This is the release the app is running, not the newest upload: a build can
+  // upload source maps before it has sent an event.
   latestRelease: string | null;
-  // Source map (.map) files uploaded for latestRelease; 0 when latestRelease is null.
+  // Source map (.map) files uploaded for exactly latestRelease; 0 when none, or when latestRelease is null.
   sourceMapFiles: number;
 }
 
