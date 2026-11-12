@@ -7,7 +7,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useSearchParams } from "react-router-dom";
 import { ArrowDown, Search, X } from "lucide-react";
 import type { ErrorGroupSummary } from "@ekeeper/shared";
-import { api, isApiStatus } from "@/lib/api";
+import { api } from "@/lib/api";
+import { isApiStatus } from "@/lib/api-error";
 import {
   DEFAULT_QUERY,
   RANGE_PRESETS,

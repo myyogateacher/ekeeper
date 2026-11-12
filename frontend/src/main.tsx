@@ -6,16 +6,21 @@ import { ToastContainer, toast } from "react-toastify";
 import "react-toastify/dist/ReactToastify.css";
 import "@fontsource-variable/inter";
 import App from "./App";
-import { isApiStatus } from "./lib/api";
+import { isApiStatus } from "./lib/api-error";
 import "./index.css";
 
+// A 401 on any query or mutation other than the session query itself (which resolves a 401 to null, see
+// lib/session.ts) means the session ended: expired, or its Redis key was deleted. Writing null into the
+// session query makes ProtectedLayout redirect to /login. It must never remove or invalidate that query:
+// ProtectedLayout has it mounted, so either one refetches it at once, which is how a signed-out user used
+// to loop on the loader.
+const endSession = () => queryClient.setQueryData(["me"], null);
+
 const queryClient: QueryClient = new QueryClient({
-  // A 401 anywhere means the session ended (expired or revoked in Redis). Dropping the cached "me" makes
-  // ProtectedLayout send the user to /login instead of every query failing in place.
   queryCache: new QueryCache({
     onError: (error) => {
       if (isApiStatus(error, 401)) {
-        queryClient.removeQueries({ queryKey: ["me"], exact: true });
+        endSession();
       }
     },
   }),
@@ -24,7 +29,7 @@ const queryClient: QueryClient = new QueryClient({
   mutationCache: new MutationCache({
     onError: (error, _variables, _context, mutation) => {
       if (isApiStatus(error, 401)) {
-        queryClient.removeQueries({ queryKey: ["me"], exact: true });
+        endSession();
       }
       if (mutation.options.onError) {
         return;

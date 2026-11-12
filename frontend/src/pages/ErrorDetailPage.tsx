@@ -5,7 +5,8 @@ import { useQuery } from "@tanstack/react-query";
 import { Link, useParams, useSearchParams } from "react-router-dom";
 import { ChevronLeft, Download, Link as LinkIcon } from "lucide-react";
 import type { ErrorEventDetail } from "@ekeeper/shared";
-import { api, isApiStatus } from "@/lib/api";
+import { api } from "@/lib/api";
+import { isApiStatus } from "@/lib/api-error";
 import {
   BREADCRUMB_PREVIEW,
   breadcrumbPreview,

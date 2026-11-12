@@ -14,6 +14,8 @@ import type {
   User,
   UserRole,
 } from "@ekeeper/shared";
+import { ApiError } from "@/lib/api-error";
+import { userOrSignedOut } from "@/lib/session";
 import {
   ISSUE_LIST_PAGE_SIZE,
   mergePages,
@@ -21,21 +23,6 @@ import {
   type ApiFilters,
   type IssueSet,
 } from "@/lib/issue-list";
-
-/**
- * Carries the HTTP status so callers can tell a refusal from an outage: the query client never retries a
- * 4xx, a 401 sends the user to /login, and a 403 on an issue renders "This issue isn't available" instead
- * of a generic failure. Before this, every failure was a plain Error and those cases were indistinguishable.
- */
-export class ApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
 
 async function request<T>(input: string, init?: RequestInit): Promise<T> {
   const isFormData = typeof FormData !== "undefined" && init?.body instanceof FormData;
@@ -59,12 +46,9 @@ async function request<T>(input: string, init?: RequestInit): Promise<T> {
   return response.json() as Promise<T>;
 }
 
-export function isApiStatus(error: unknown, ...statuses: number[]): boolean {
-  return error instanceof ApiError && statuses.includes(error.status);
-}
-
 export const api = {
-  me: () => request<MeResponse>("/api/me"),
+  // Signed out resolves to null instead of a 401 error: see lib/session.ts for the loop that prevents.
+  me: () => userOrSignedOut(() => request<MeResponse>("/api/me")),
   users: () => request<{ users: User[] }>("/api/users"),
   createUser: (payload: Pick<User, "email" | "name" | "avatarUrl" | "role" | "status">) =>
     request<{ user: User }>("/api/users", { method: "POST", body: JSON.stringify(payload) }),
