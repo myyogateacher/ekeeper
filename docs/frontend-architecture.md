@@ -39,11 +39,16 @@ Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.
   under `@layer components`. Controls grow to 44px under 720px wide.
 - The issue grid collapses on the list's own width (container query), not the viewport, because the
   sidebar takes 220px at tablet widths.
+- The owner picker and the status split button are disclosures of plain buttons (`components/usePopover.ts`:
+  focus into the panel on open, Escape back to the trigger, Tab out closes), not `role="menu"`.
 
 ## Data
 
-- TanStack Query. 401 clears the session and returns to `/login`; 400, 401, 403 and 404 are never retried; anything
-  else retries twice.
+- TanStack Query. 400, 401, 403 and 404 are never retried; anything else retries twice.
+- Session: `api.me` resolves a 401 to `null` (`lib/session.ts`), so signed out is a cached value, not an error.
+  A 401 on any other query or mutation writes `null` into the `["me"]` query (`endSession` in `main.tsx`) and
+  `ProtectedLayout` redirects to `/login`. Never remove or invalidate `["me"]` from a handler: the layout has
+  it mounted and refetches it at once, which looped a signed-out user on the loader.
   Any failed mutation shows a toast unless the mutation handles its own error.
 - **Issues list** loads up to 500 rows of the current view (five pages of 100) through
   `fetchIssueSet`. Status, assignee, project, affected user and range go to the API; search, severity,

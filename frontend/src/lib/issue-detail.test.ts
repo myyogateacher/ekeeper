@@ -9,6 +9,7 @@ import {
   occurrenceStats,
   splitTitle,
   statusActions,
+  undoState,
 } from "./issue-detail.ts";
 
 const NOW = Date.parse("2026-11-12T12:00:00.000Z");
@@ -112,4 +113,19 @@ test("a breadcrumb stamped after the error reads with a plus, and an unreadable 
   assert.equal(breadcrumbOffset("2026-11-12 11:37:48.751", at), "+0.3s");
   assert.equal(breadcrumbOffset("", at), null);
   assert.equal(breadcrumbOffset("2026-11-12 11:37:48.451", "not a date"), null);
+});
+
+// Undo must send the state held before the change, not a guess from the new one: closing a reopened issue and
+// undoing has to land on reopened, not on open, or Undo silently rewrites the issue's history. The state
+// before is read from the row at click time, so this is the one place the rule lives.
+test("Undo restores the state held before the change, whether that was open or reopened", () => {
+  assert.equal(undoState("open", statusActions("open").primary.state), "open");
+  assert.equal(undoState("reopened", statusActions("reopened").primary.state), "reopened");
+  assert.equal(undoState("reopened", statusActions("reopened").secondary!.state), "reopened");
+  assert.equal(undoState("closed", statusActions("closed").primary.state), "closed");
+});
+
+test("no Undo is offered when the state before is unknown or did not change", () => {
+  assert.equal(undoState(undefined, "closed"), null);
+  assert.equal(undoState("open", "open"), null);
 });

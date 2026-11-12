@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { toast } from "react-toastify";
 import type { IssueState } from "@ekeeper/shared";
 import { api } from "@/lib/api";
+import { undoState } from "@/lib/issue-detail";
 
 interface WorkflowChange {
   projectId: string;
@@ -38,18 +39,18 @@ export function useIssueWorkflow() {
         toast(change.payload.assignedUserId === null ? "Owner removed" : "Owner updated");
         return;
       }
-      const previous = change.previousState;
+      const undoTo = undoState(change.previousState, next);
       toast(
         ({ closeToast }) => (
           <span className="flex items-center gap-3">
             <span>{messageFor(next)}</span>
-            {previous && previous !== next ? (
+            {undoTo ? (
               <button
                 type="button"
                 className="font-semibold underline"
                 onClick={() => {
                   closeToast?.();
-                  mutation.mutate({ ...change, payload: { state: previous }, previousState: next });
+                  mutation.mutate({ ...change, payload: { state: undoTo }, previousState: next });
                 }}
               >
                 Undo

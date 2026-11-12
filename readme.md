@@ -9,6 +9,12 @@ It combines:
 - issue assignment and lifecycle workflow
 - an issues inbox with saved views, URL-held filters and keyboard navigation, in dark and light themes
 
+![eKeeper issues list](images/issues-list.png)
+
+![eKeeper issue detail](images/issue-detail.png)
+
+The screenshots show synthetic data from a local test setup.
+
 ## Features
 
 ### Monitoring

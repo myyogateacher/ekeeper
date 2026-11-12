@@ -89,6 +89,16 @@ export function statusActions(state: IssueState): { primary: StatusAction; secon
   };
 }
 
+/**
+ * The state an Undo toast sends back: exactly the state the issue held before the change, or null when there
+ * is nothing to undo (the caller did not know the previous state, or the change did not alter it). Not derived
+ * from the new state: Close on a reopened issue and Close on an open one both land on closed, and only the
+ * remembered state says which to return to.
+ */
+export function undoState(before: IssueState | undefined, after: IssueState): IssueState | null {
+  return before && before !== after ? before : null;
+}
+
 /** Raw fields may arrive as JSON text or as objects depending on the column; both read the same. */
 export function parseMaybeJson<T>(value: unknown, fallback: T): T {
   if (typeof value === "string") {
