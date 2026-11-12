@@ -119,11 +119,15 @@ When issue detail is requested:
 2. it reads the event release from the stored payload
 3. it finds uploaded source maps for the matching eKeeper project and release
 4. it rewrites stack frames to original source positions where mappings exist
-5. it returns the enriched event while preserving the raw payload
+5. for the 50 frames nearest the crash it adds `pre_context`, `context_line` and `post_context` (3 lines each side, each cut at 300 characters) from the map's `sourcesContent`; a map without it leaves the frame with no source lines, and any lines the SDK sent on a mapped frame are dropped because they describe the minified file
+6. it marks a frame whose filename, after mapping, has a `node_modules` path segment as `in_app: false` with the npm `package`; this runs for every event, including ones with no release or no maps. The browser SDK sets `in_app: true` on every frame, so the path is the only evidence
+7. it returns the enriched event while preserving the raw payload
 
 This keeps ingest fast and makes source map uploads retroactively useful for older events.
 
-The MCP `get_event` tool calls the same `deobfuscateEvent`, so it returns the same readable frames as the UI.
+The rules for steps 5 and 6 live in `backend/src/lib/stack-frames.ts` as pure helpers; the frontend reads `in_app` and `package` as given and does not re-derive them. Every frame is untrusted JSON from a public DSN, so a frame, an exception value or a stacktrace that is not an object passes through unchanged.
+
+The MCP `get_event` tool calls the same `deobfuscateEvent`, so it returns the same readable frames, source lines and `in_app` flags as the UI.
 
 ## Migration Strategy
 

@@ -8,6 +8,7 @@ import { config } from "../config";
 import { all, one, run } from "../db/sqlite";
 import { HttpError } from "./http";
 import { createId } from "./ids";
+import { classifyExceptionFrames, classifyStacktraceFrames, firstAnnotatedFrame, replaceSourceContext } from "./stack-frames";
 import type { MinimapArtifact } from "@ekeeper/shared";
 
 type UnknownRecord = Record<string, unknown>;
@@ -172,7 +173,14 @@ function mapFrame(
   debugMetaByCodeFile: Map<string, string>,
   cache: Map<string, SourceMapConsumer>,
   sourceMapCache: Map<string, ParsedSourceMapArtifact>,
+  withSource: boolean,
 ): UnknownRecord {
+  // `frames` is whatever the SDK sent (a public DSN can store `[null]`), so a non-object frame is passed
+  // through. Without this guard the read of `frame.filename` below throws, the detail route answers 500,
+  // and issue-sync's call in the ingest flush throws before the bucket is acknowledged (defect register 92).
+  if (typeof frame !== "object" || frame === null) {
+    return frame;
+  }
   const filename = typeof frame.filename === "string" ? frame.filename : "";
   const line = typeof frame.lineno === "number" ? frame.lineno : Number(frame.lineno);
   const column = typeof frame.colno === "number" ? frame.colno : Number(frame.colno);
@@ -218,7 +226,7 @@ function mapFrame(
     return frame;
   }
 
-  return {
+  const mapped = {
     ...frame,
     filename: original.source,
     function: original.name ?? frame.function,
@@ -228,6 +236,14 @@ function mapFrame(
     compiledFilename: filename,
     sourceMapArtifact: artifact.artifactName,
   };
+  // A mapped frame never keeps the SDK's own source lines (they describe the minified file), so they are
+  // replaced even past the frame limit. The source text is read only for the frames nearest the crash:
+  // sourceContentFor is a lookup into the map already held in memory, null when the map has no sourcesContent.
+  return replaceSourceContext(
+    mapped,
+    withSource ? consumer.sourceContentFor(original.source, true) : null,
+    mapped.lineno,
+  );
 }
 
 function mapFrames(
@@ -239,8 +255,9 @@ function mapFrames(
   sourceMapCache: Map<string, ParsedSourceMapArtifact>,
 ) {
   let applied = false;
-  const mapped = frames.map((frame) => {
-    const nextFrame = mapFrame(frame, artifactMap, debugIdArtifactMap, debugMetaByCodeFile, cache, sourceMapCache);
+  const sourceFrom = firstAnnotatedFrame(frames.length);
+  const mapped = frames.map((frame, index) => {
+    const nextFrame = mapFrame(frame, artifactMap, debugIdArtifactMap, debugMetaByCodeFile, cache, sourceMapCache, index >= sourceFrom);
     if (nextFrame !== frame) {
       applied = true;
     }
@@ -671,7 +688,25 @@ export function startMinimapRetentionScheduler() {
   return setInterval(runScheduledCleanup, SCHEDULED_CLEANUP_INTERVAL_MS);
 }
 
+// Two jobs on read, kept apart because only the first one says "a source map applied": mapEventFrames rewrites
+// frames through uploaded source maps, then the node_modules rule marks framework frames on every path out of
+// it, including the early returns for an event with no release, no project or no maps. A frame demoted by the
+// rule is a new object, so doing it inside mapFrame would make `applied` true for an event no map touched.
 export function deobfuscateEvent(input: {
+  projectId: string;
+  rawPayload: string;
+  stacktrace: string | UnknownRecord | null;
+  exception: string | UnknownRecord;
+}): DeobfuscationResult {
+  const result = mapEventFrames(input);
+  return {
+    ...result,
+    stacktrace: classifyStacktraceFrames(result.stacktrace),
+    exception: classifyExceptionFrames(result.exception),
+  };
+}
+
+function mapEventFrames(input: {
   projectId: string;
   rawPayload: string;
   stacktrace: string | UnknownRecord | null;
@@ -727,7 +762,7 @@ export function deobfuscateEvent(input: {
   const nextException = { ...exception };
   if (Array.isArray(nextException.values)) {
     nextException.values = (nextException.values as UnknownRecord[]).map((value) => {
-      if (!value.stacktrace || typeof value.stacktrace !== "object" || !Array.isArray((value.stacktrace as UnknownRecord).frames)) {
+      if (typeof value !== "object" || value === null || !value.stacktrace || typeof value.stacktrace !== "object" || !Array.isArray((value.stacktrace as UnknownRecord).frames)) {
         return value;
       }
 
