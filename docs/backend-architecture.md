@@ -129,6 +129,16 @@ The rules for steps 5 and 6 live in `backend/src/lib/stack-frames.ts` as pure he
 
 The MCP `get_event` tool calls the same `deobfuscateEvent`, so it returns the same readable frames, source lines and `in_app` flags as the UI.
 
+## Issue Detail Response
+
+`GET /api/projects/:projectId/errors/:groupId[?eventId=]` answers `{ error, stats, navigation, duplicateGroups }`; the types are in `shared/src/contracts.ts`. It used to carry every occurrence of the group, with no limit, on each load and each switch between events. It no longer does:
+- `stats`: total, rolling 24 hour and 7 day counts, first and last seen, and `hourly24h`, 24 counts one per UTC clock hour with the last entry the hour containing now. The hour is cut in SQL against `now('UTC')`, never against the app clock or the server time zone
+- `navigation`: the shown event's neighbours, the group's newest and oldest event ids, and its position counted from the newest. Events order by `(timestamp, event_id)`, the table's sort key order, so two events in the same millisecond still have a defined neighbour. It is `null` exactly when `error` is `null`
+- `error.affectedUsers`: distinct non-empty `user_id` over the whole group, the same expression as the issues list (`AFFECTED_USERS_SQL` in `routes/api.ts`)
+- `error.closedAt`: when the issue was closed, from `issue_workflows.closed_at`; `null` unless closed. A new event reopens a closed issue and clears it (`ingest-buffer.ts`)
+
+Every read is a range over the sort key prefix `(project_id, group_id)`, so none scans another group's rows. Times added here are ISO 8601 UTC with `Z`; `error.timestamp` and the similar issues times keep ClickHouse's zoneless UTC digits.
+
 ## Migration Strategy
 
 Boot-time migrations are coordinated from:

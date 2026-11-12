@@ -26,13 +26,17 @@ import {
   parseLabels,
   syncGithubIssueState,
 } from "../lib/issue-sync";
+import { buildEventNavigation, buildIssueStats, type HourlyRow, type NavigationRow, type StatsTotalsRow } from "../lib/issue-stats";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
   DashboardProjectCard,
   DuplicateIssueGroup,
+  ErrorDetailResponse,
   ErrorEventDetail,
   ErrorGroupSummary,
+  EventNavigation,
   IssueState,
+  IssueStats,
   MinimapArtifact,
   Project,
   ProjectGithubIntegration,
@@ -111,6 +115,87 @@ export async function queryAffectedUsers(groups: Array<{ projectId: string; grou
   });
   const [row] = (await result.json()) as Array<{ affectedUsers: string | number }>;
   return Number(row?.affectedUsers ?? 0);
+}
+
+/**
+ * Whole-group figures for the issue page in two sort key range reads (project_id, group_id, then timestamp), run
+ * together. Nothing here returns a row per event, which the detail endpoint used to do for every occurrence of
+ * the group on every load and every switch between events.
+ */
+export async function queryGroupStats(projectId: string, groupId: string): Promise<IssueStats> {
+  const client = getClickHouseClient();
+  const query_params = { projectId, groupId };
+  // events24h and events7d are the rolling windows queryErrorGroups calls count24h and count7d, so the list and
+  // the page agree. The aliases are not column names (defect register 20).
+  const totalsPromise = client.query({
+    query: `
+      SELECT
+        count() AS totalEvents,
+        countIf(timestamp >= now() - INTERVAL 1 DAY) AS events24h,
+        countIf(timestamp >= now() - INTERVAL 7 DAY) AS events7d,
+        toUnixTimestamp64Milli(min(timestamp)) AS firstSeenMs,
+        toUnixTimestamp64Milli(max(timestamp)) AS lastSeenMs
+      FROM events
+      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+    `,
+    query_params,
+    format: "JSONEachRow",
+  });
+  // The hour is counted in SQL against the server's own `now('UTC')`, so the app clock never decides which bucket
+  // an event lands in. 'UTC' is explicit: toStartOfHour(now()) follows the server time zone, and a server in
+  // Asia/Kolkata would cut hours at :30 UTC. The window is two constant bounds on timestamp, a key range that
+  // reads at most the last 24 hours of this group; the upper bound drops events stamped ahead of the clock.
+  const hourlyPromise = client.query({
+    query: `
+      SELECT
+        dateDiff('hour', toStartOfHour(timestamp, 'UTC'), toStartOfHour(now('UTC'), 'UTC'), 'UTC') AS hoursAgo,
+        count() AS eventCount
+      FROM events
+      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+        AND timestamp >= toStartOfHour(now('UTC'), 'UTC') - INTERVAL 23 HOUR
+        AND timestamp < toStartOfHour(now('UTC'), 'UTC') + INTERVAL 1 HOUR
+      GROUP BY hoursAgo
+    `,
+    query_params,
+    format: "JSONEachRow",
+  });
+  const [totalsResult, hourlyResult] = await Promise.all([totalsPromise, hourlyPromise]);
+  const [totals] = (await totalsResult.json()) as StatsTotalsRow[];
+  const hourly = (await hourlyResult.json()) as HourlyRow[];
+  // An aggregate with no GROUP BY returns exactly one row, with zeros, for a group that has no events.
+  return buildIssueStats(totals!, hourly);
+}
+
+/**
+ * Where one event sits in its group, newest first, in one aggregate over the group's rows. Events order by
+ * (timestamp, event_id), the table's sort key order, so two events in the same millisecond still have a defined
+ * neighbour and position; the detail route's own "latest event" read uses the same order. Reads timestamp and
+ * event_id only. `current` is the shown event as read from this table, which is why it is always in the group.
+ */
+export async function queryEventNavigation(
+  projectId: string,
+  groupId: string,
+  current: { eventId: string; timestamp: string },
+): Promise<EventNavigation> {
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query: `
+      SELECT
+        count() AS totalEvents,
+        countIf((timestamp, event_id) > ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS newerCount,
+        countIf((timestamp, event_id) < ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS olderCount,
+        argMax(event_id, (timestamp, event_id)) AS latestEventId,
+        argMin(event_id, (timestamp, event_id)) AS oldestEventId,
+        argMinIf(event_id, (timestamp, event_id), (timestamp, event_id) > ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS newerEventId,
+        argMaxIf(event_id, (timestamp, event_id), (timestamp, event_id) < ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS olderEventId
+      FROM events
+      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+    `,
+    query_params: { projectId, groupId, currentAt: current.timestamp, currentEventId: current.eventId },
+    format: "JSONEachRow",
+  });
+  const [row] = (await result.json()) as NavigationRow[];
+  return buildEventNavigation(row!);
 }
 
 const DUPLICATE_URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/;
@@ -880,6 +965,13 @@ apiRouter.get("/error-assignees", (ctx) => {
   return ctx.json({ users });
 });
 
+// The columns the event read below selects, as ErrorEventDetail types them. Everything else on the response is
+// added in the handler, and `satisfies ErrorEventDetail` there fails to compile when a field is missing.
+type DetailEventRow = Pick<
+  ErrorEventDetail,
+  "eventId" | "groupId" | "message" | "exception" | "stacktrace" | "browser" | "device" | "os" | "runtime" | "tags" | "contexts" | "rawPayload" | "timestamp"
+>;
+
 apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
   const projectId = ctx.req.param("projectId");
   const groupId = ctx.req.param("groupId");
@@ -887,20 +979,9 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
   const client = getClickHouseClient();
   const eventIdParam = ctx.req.query("eventId");
 
-  // Fetch all occurrence summaries (eventId + timestamp) for navigation
-  const occurrenceResult = await client.query({
-    query: `
-      SELECT event_id AS eventId, timestamp
-      FROM events
-      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
-      ORDER BY timestamp DESC
-    `,
-    query_params: { projectId, groupId },
-    format: "JSONEachRow",
-  });
-  const occurrences = (await occurrenceResult.json()) as Array<{ eventId: string; timestamp: string }>;
-
-  // Fetch the requested event (by eventId) or the latest one
+  // The requested event (by eventId) or the latest one. The latest is picked by (timestamp, event_id) descending,
+  // the same order queryEventNavigation numbers events in, so "latest" is never two different events when two
+  // share a millisecond.
   const eventQuery = eventIdParam
     ? `
       SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
@@ -914,40 +995,56 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, event_id DESC
       LIMIT 1
     `;
-  const eventResult = await client.query({
-    query: eventQuery,
-    query_params: { projectId, groupId, eventId: eventIdParam ?? "" },
-    format: "JSONEachRow",
-  });
-  const events = (await eventResult.json()) as Array<Omit<ErrorEventDetail, "breadcrumbs">>;
+  // The group's stats do not depend on which event is shown, so they run beside the event read.
+  const [eventResult, stats] = await Promise.all([
+    client.query({
+      query: eventQuery,
+      query_params: { projectId, groupId, eventId: eventIdParam ?? "" },
+      format: "JSONEachRow",
+    }),
+    queryGroupStats(projectId, groupId),
+  ]);
+  const events = (await eventResult.json()) as DetailEventRow[];
 
   const latestEvent = events[0];
 
-  // Fetch breadcrumbs scoped to the specific event
-  const breadcrumbResult = await client.query({
-    query: `
-      SELECT timestamp, category, level, message, type, data
-      FROM breadcrumbs
-      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
-        AND event_id = {eventId:String}
-      ORDER BY timestamp DESC
-      LIMIT 100
-    `,
-    query_params: { projectId, groupId, eventId: latestEvent?.eventId ?? "" },
-    format: "JSONEachRow",
-  });
+  // Everything below needs the event: its breadcrumbs, its place in the group, the group's users, and the other
+  // groups with its message. They are independent reads, so they run together; a failure in any of the first three
+  // is a 500 like the event read, the similar issues read degrades to [] (safeQueryDuplicateIssueGroups).
+  const [breadcrumbs, navigation, affectedUsers, duplicateGroups] = latestEvent
+    ? await Promise.all([
+        client
+          .query({
+            query: `
+              SELECT timestamp, category, level, message, type, data
+              FROM breadcrumbs
+              WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+                AND event_id = {eventId:String}
+              ORDER BY timestamp DESC
+              LIMIT 100
+            `,
+            query_params: { projectId, groupId, eventId: latestEvent.eventId },
+            format: "JSONEachRow",
+          })
+          .then((result) => result.json() as Promise<ErrorEventDetail["breadcrumbs"]>),
+        queryEventNavigation(projectId, groupId, latestEvent),
+        queryAffectedUsers([{ projectId, groupId }]),
+        safeQueryDuplicateIssueGroups(projectId, groupId, latestEvent.message),
+      ])
+    : [[], null, 0, []];
 
-  const breadcrumbs = (await breadcrumbResult.json()) as ErrorEventDetail["breadcrumbs"];
   const workflow = one<{
     state: IssueState;
     assignedUserId: string | null;
     assignedUserName: string | null;
+    closedAt: string | null;
   }>(
     `
-      SELECT iw.state as state, iw.assigned_user_id as assignedUserId, u.name as assignedUserName
+      SELECT iw.state as state, iw.assigned_user_id as assignedUserId, u.name as assignedUserName,
+        iw.closed_at as closedAt
       FROM issue_workflows iw
       LEFT JOIN users u ON u.id = iw.assigned_user_id
       WHERE iw.project_id = ? AND iw.group_id = ?
@@ -963,14 +1060,8 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
       })
     : null;
   const githubLink = getGithubLink(projectId, groupId);
-  const [affectedUsers, duplicateGroups] = latestEvent
-    ? await Promise.all([
-        queryAffectedUsers([{ projectId, groupId }]),
-        safeQueryDuplicateIssueGroups(projectId, groupId, latestEvent.message),
-      ])
-    : [0, [] as DuplicateIssueGroup[]];
   const error = latestEvent
-    ? {
+    ? ({
         ...latestEvent,
         projectId,
         breadcrumbs,
@@ -979,14 +1070,17 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         state: workflow?.state ?? "open",
         assignedUserId: workflow?.assignedUserId ?? null,
         assignedUserName: workflow?.assignedUserName ?? null,
+        // closed_at holds a value only while the state is closed: upsertIssueWorkflow writes null for any other
+        // state, and the reopen on a new event in ingest-buffer.ts clears it.
+        closedAt: workflow?.closedAt ?? null,
         sourceMapApplied: deobfuscated?.applied ?? false,
         sourceMapRelease: deobfuscated?.release ?? null,
         githubIssueNumber: githubLink?.githubIssueNumber ?? null,
         githubIssueUrl: githubLink?.githubIssueUrl ?? null,
         affectedUsers,
-      }
+      } satisfies ErrorEventDetail)
     : null;
-  return ctx.json({ error, occurrences, duplicateGroups });
+  return ctx.json({ error, stats, navigation, duplicateGroups } satisfies ErrorDetailResponse);
 });
 
 apiRouter.patch("/projects/:projectId/errors/:groupId/workflow", async (ctx) => {
