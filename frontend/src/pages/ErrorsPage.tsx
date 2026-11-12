@@ -27,6 +27,7 @@ import {
   parseListQuery,
   serializeListQuery,
   showAllTimeHref,
+  showListFigures,
   stepRow,
   type ListQuery,
   type SortKey,
@@ -69,10 +70,14 @@ export function ErrorsPage() {
 
   const rows = useMemo(() => (set ? applyBrowserFilters(set.rows, query, now) : []), [set, query, now]);
   const stats = listStats(rows, now);
+  // The header figures are claims about the rows on screen. While the previous project's or filter's rows are
+  // still shown as placeholder data they would describe the wrong list, so none is printed (showListFigures).
+  const figures = showListFigures(set, isPlaceholderData);
   // "N users affected" is the server's distinct count over the rows on screen, never a sum of the Users column
-  // (one user can hit several issues). No figure while the list is loading or incomplete, or while the count
-  // itself is loading or failed: a missing figure is honest, a stale or partial one is not.
-  const affected = useAffectedUsers(useMemo(() => affectedUsersScope(set, rows), [set, rows]));
+  // (one user can hit several issues). No figure while the list is loading, showing placeholder rows or
+  // incomplete, or while the count itself is loading or failed: a missing figure is honest, a stale or partial
+  // one is not.
+  const affected = useAffectedUsers(useMemo(() => affectedUsersScope(set, rows, isPlaceholderData), [set, rows, isPlaceholderData]));
   // Carried by every row link so the issue page can step to the previous and next issue of this list.
   const listState = useMemo(() => listOriginState(query), [query]);
   const view = matchSavedView(query);
@@ -143,7 +148,7 @@ export function ErrorsPage() {
     <div className="flex flex-col gap-3.5">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <h1 className="page-title">{title}</h1>
-        {set ? (
+        {figures ? (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[13px] text-muted">
             <span>
               <b className="font-medium text-fg">{formatNumber(stats.issues)}</b> {pluralize(stats.issues, "issue")}

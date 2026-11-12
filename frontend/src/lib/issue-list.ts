@@ -393,15 +393,27 @@ export interface IssueKey {
 }
 
 /**
+ * Whether the list header may print its figures (issues, new in 24h, need triage, events in 7d, users
+ * affected). Not while the list is loading (`set` undefined), and not while `isPlaceholder` is true: the list
+ * keeps the previous query's rows on screen, dimmed, while a new project or filter loads (useIssueSet's
+ * keepPreviousData), so a figure printed then would sit under the new filter's title with another project's
+ * number in it (defect register 91, QA F1: the old project's "15 users affected" under the new project). The
+ * dimmed table stays; only the claims about it go.
+ */
+export function showListFigures(set: IssueSet | undefined, isPlaceholder: boolean): boolean {
+  return set !== undefined && !isPlaceholder;
+}
+
+/**
  * The issues the list header's "N users affected" is asked about: exactly the rows on screen, or null when the
  * figure must not be shown. Distinct users cannot be summed across groups (one user can hit several), so the
  * count comes from the server over this set (POST /api/errors/affected-users) and the client never adds
- * per-row counts. Null while the list is loading (`set` undefined), when it holds only the busiest 500 of a
- * longer list (`truncated`, so the figure would count a different set than the title promises), when its pages
+ * per-row counts. Null whenever showListFigures says no, when the set holds only the busiest 500 of a longer
+ * list (`truncated`, so the figure would count a different set than the title promises), when its pages
  * disagreed (`complete` false), and when no row is left to ask about.
  */
-export function affectedUsersScope(set: IssueSet | undefined, rows: ErrorGroupSummary[]): IssueKey[] | null {
-  if (!set || set.truncated || !set.complete || rows.length === 0) return null;
+export function affectedUsersScope(set: IssueSet | undefined, rows: ErrorGroupSummary[], isPlaceholder: boolean): IssueKey[] | null {
+  if (!set || !showListFigures(set, isPlaceholder) || set.truncated || !set.complete || rows.length === 0) return null;
   return rows.map(({ projectId, groupId }) => ({ projectId, groupId }));
 }
 

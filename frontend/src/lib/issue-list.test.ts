@@ -20,6 +20,7 @@ import {
   savedViewHref,
   serializeListQuery,
   showAllTimeHref,
+  showListFigures,
   stepRow,
   toApiFilters,
   viewCounts,
@@ -252,16 +253,33 @@ test("Show all time keeps every other filter, and is offered only while a range 
 test("users affected is asked only about a complete, uncapped list, over exactly the rows on screen", () => {
   const rows = [row("a"), row("b", { projectId: "p2" })];
   const set = (over: object) => ({ rows, total: 2, truncated: false, complete: true, ...over });
-  assert.deepEqual(affectedUsersScope(set({}), rows), [{ projectId: "p1", groupId: "a" }, { projectId: "p2", groupId: "b" }]);
-  assert.deepEqual(affectedUsersScope(set({}), rows.slice(1)), [{ projectId: "p2", groupId: "b" }], "a search that narrows the rows narrows the set asked about");
-  assert.equal(affectedUsersScope(undefined, []), null, "still loading");
-  assert.equal(affectedUsersScope(set({ truncated: true, total: 900 }), rows), null, "only the busiest 500 are loaded");
-  assert.equal(affectedUsersScope(set({ complete: false }), rows), null, "pages disagreed");
-  assert.equal(affectedUsersScope(set({}), []), null, "nothing left to ask about");
+  assert.deepEqual(affectedUsersScope(set({}), rows, false), [{ projectId: "p1", groupId: "a" }, { projectId: "p2", groupId: "b" }]);
+  assert.deepEqual(affectedUsersScope(set({}), rows.slice(1), false), [{ projectId: "p2", groupId: "b" }], "a search that narrows the rows narrows the set asked about");
+  assert.equal(affectedUsersScope(undefined, [], false), null, "still loading");
+  assert.equal(affectedUsersScope(set({ truncated: true, total: 900 }), rows, false), null, "only the busiest 500 are loaded");
+  assert.equal(affectedUsersScope(set({ complete: false }), rows, false), null, "pages disagreed");
+  assert.equal(affectedUsersScope(set({}), [], false), null, "nothing left to ask about");
+});
+
+// QA F1 (defect register 91): switching project kept the old project's "15 users affected", "13 issues" and
+// "33 events in 7d" in the header while the dimmed old rows stayed as placeholder data under the new title.
+// A figure under a filter must never be another list's number, so none is printed or asked for while the rows
+// on screen are placeholder data. The same complete, uncapped set that is asked about one render later proves
+// the rule is the placeholder flag and nothing else.
+test("no header figure is printed or requested while the rows on screen are the previous list's placeholder", () => {
+  const rows = [row("a")];
+  const complete = { rows, total: 1, truncated: false, complete: true };
+  assert.equal(showListFigures(complete, false), true);
+  assert.equal(showListFigures(complete, true), false, "placeholder rows of the previous project");
+  assert.equal(showListFigures(undefined, false), false, "first load, no rows at all");
+  assert.equal(showListFigures(undefined, true), false);
+  assert.equal(showListFigures({ ...complete, truncated: true, total: 900 }, false), true, "capped lists still print their own issue counts; only the users figure needs a complete set");
+  assert.equal(affectedUsersScope(complete, rows, true), null, "the users request is not made for placeholder rows");
+  assert.deepEqual(affectedUsersScope(complete, rows, false), [{ projectId: "p1", groupId: "a" }], "and is made once the new list has arrived");
 });
 
 test("the keys sent to the server carry only the two ids, never the row", () => {
-  const [key] = affectedUsersScope({ rows: [row("a")], total: 1, truncated: false, complete: true }, [row("a")])!;
+  const [key] = affectedUsersScope({ rows: [row("a")], total: 1, truncated: false, complete: true }, [row("a")], false)!;
   assert.deepEqual(Object.keys(key).sort(), ["groupId", "projectId"]);
 });
 

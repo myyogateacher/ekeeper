@@ -195,7 +195,7 @@ function Header({
         {titleMessage ? <span className="font-normal">: {titleMessage}</span> : null}
       </h1>
       {closed ? <p className="m-0 text-xs text-muted">{closed}</p> : null}
-      {crash ? <div className="mono break-all text-muted">{crash}</div> : null}
+      {crash ? <div className="mono text-muted [overflow-wrap:anywhere]">{crash}</div> : null}
       <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-[13px] text-muted">
         <span className={`tag ${level === "fatal" ? "bg-fatal/10 text-fatal" : "bg-raised text-fg"}`}>
           <SeverityDot level={level} />

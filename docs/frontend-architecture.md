@@ -82,8 +82,9 @@ Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.
   The issue page reads that list's rows back from the query cache with `issueSetKey`, in the list's own order and
   filters, and never fetches. A deep link or a reload has no state or no cache, so no stepper.
 - **Users affected in the list header** is `POST /api/errors/affected-users` over the rows on screen
-  (`affectedUsersScope`). Distinct users cannot be summed across issues, so the figure is hidden while the list is
-  loading, capped at 500 or inconsistent, and while the request itself is loading or failed.
+  (`affectedUsersScope`). Distinct users cannot be summed across issues, so every header figure is hidden while the
+  list is loading or shows the previous project's or filter's rows as placeholder data (`showListFigures`), and the
+  users figure also while the list is capped at 500 or inconsistent, or the request itself is loading or failed.
 - **Settings, Connect an app**: the Verify step reads `GET /api/projects/:projectId/ingest-status` and says when
   the last event arrived and how many source map files exist for that event's release (`lib/ingest-status.ts`).
 - **Times**: ClickHouse sends UTC without a zone. Always go through `lib/time.ts` (`parseServerTime`,
