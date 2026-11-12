@@ -29,6 +29,7 @@ import {
 import { buildEventNavigation, buildIssueStats, type HourlyRow, type NavigationRow, type StatsTotalsRow } from "../lib/issue-stats";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
+  AffectedUsersResponse,
   DashboardProjectCard,
   DuplicateIssueGroup,
   ErrorDetailResponse,
@@ -84,6 +85,18 @@ const minimapUploadSchema = z.object({
   release: z.string().min(1),
   dist: z.string().min(1).nullable().optional(),
   artifactName: z.string().min(1),
+});
+
+// The issues list shows at most this many rows (ISSUE_LIST_MAX_ROWS in frontend/src/lib/issue-list.ts), and the
+// header total covers the rows on screen, so a request never needs more. It is also the bound on the tuple set
+// handed to ClickHouse as one query parameter, which travels in the URL. The id caps are generous on purpose:
+// events.group_id is unbounded for an explicit fingerprint stored before PROD-10529, and a cap that rejected a
+// real group would fail the whole header, but a bounded body keeps one request from carrying megabytes.
+const AFFECTED_USERS_MAX_GROUPS = 500;
+const affectedUsersSchema = z.object({
+  groups: z
+    .array(z.object({ projectId: z.string().min(1).max(128), groupId: z.string().min(1).max(4096) }))
+    .max(AFFECTED_USERS_MAX_GROUPS),
 });
 
 // One definition of "users affected" for every screen that shows it: the issues list, its header total, the
@@ -890,6 +903,31 @@ apiRouter.post("/minimaps/cleanup-old", (ctx) => {
     console.error("[minimaps] async cleanup failed", error);
   });
   return ctx.json({ started: true, eligible }, 202);
+});
+
+// Distinct users over the union of the given groups, for the issues list header. Not a GET: the set is up to 500
+// (project, group) pairs, too much for a query string. Every project named must pass the same read check the
+// detail route applies, and the check runs before any query, so a project the caller cannot read is never counted
+// and the answer cannot reveal how many users it has.
+apiRouter.post("/errors/affected-users", async (ctx) => {
+  requireAuth(ctx);
+  let body: unknown;
+  try {
+    body = await ctx.req.json();
+  } catch {
+    throw new HttpError(400, "Request body must be JSON");
+  }
+  const parsed = affectedUsersSchema.safeParse(body);
+  if (!parsed.success) {
+    const issue = parsed.error.issues[0];
+    throw new HttpError(400, `Invalid request: ${issue?.path.join(".") || "body"}: ${issue?.message}`);
+  }
+
+  const { groups } = parsed.data;
+  for (const projectId of new Set(groups.map((group) => group.projectId))) {
+    requireProjectAccess(ctx, projectId, false);
+  }
+  return ctx.json({ affectedUsers: await queryAffectedUsers(groups) } satisfies AffectedUsersResponse);
 });
 
 apiRouter.get("/projects/all/errors", async (ctx) => {

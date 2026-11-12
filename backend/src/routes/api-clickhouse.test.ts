@@ -565,3 +565,113 @@ describe("GET /api/projects/:projectId/errors/:groupId", () => {
     expect((await detail(path, appAs("viewer"))).status).toBe(200);
   });
 });
+
+describe("POST /api/errors/affected-users", () => {
+  beforeEach(() => {
+    aliasSetting = 0;
+    sessionTimezone = undefined;
+  });
+
+  // A query that reaches ClickHouse while this is set fails with a 500, so a 4xx proves the request was refused
+  // before any query ran.
+  const noQueryMayRun = () => {
+    shadowTables = "events AS (SELECT throwIf(1) AS event_id)";
+  };
+  const post = (body: unknown, app = appAs("admin")) =>
+    app.request("/api/errors/affected-users", { method: "POST", headers: { "content-type": "application/json" }, body: typeof body === "string" ? body : JSON.stringify(body) });
+  const group = (projectId: string, groupId: string) => ({ projectId, groupId });
+
+  test("counts a user once across the listed groups of several projects", async () => {
+    shadow([
+      { project: "pA", group: "g1", user: "shared" },
+      { project: "pA", group: "g1", user: "only1" },
+      { project: "pA", group: "g2", user: "shared" },
+      { project: "pB", group: "g1", user: "shared" },
+      { project: "pB", group: "not-listed", user: "not-asked" },
+    ]);
+
+    const response = await post({ groups: [group("pA", "g1"), group("pA", "g2"), group("pB", "g1")] });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ affectedUsers: 2 });
+  });
+
+  test("no groups is 0 and asks ClickHouse nothing", async () => {
+    noQueryMayRun();
+
+    const response = await post({ groups: [] });
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ affectedUsers: 0 });
+  });
+
+  test("500 groups are accepted, 501 are refused", async () => {
+    const many = (count: number) => Array.from({ length: count }, (_, index) => group("pA", `g${index}`));
+    shadow(many(500).map((entry, index) => ({ project: entry.projectId, group: entry.groupId, user: `u${index % 7}` })));
+
+    const ok = await post({ groups: many(500) });
+    noQueryMayRun();
+    const tooMany = await post({ groups: many(501) });
+
+    expect(ok.status).toBe(200);
+    expect(await ok.json()).toEqual({ affectedUsers: 7 });
+    expect(tooMany.status).toBe(400);
+    expect(((await tooMany.json()) as { message: string }).message).toContain("groups");
+  });
+
+  test("a body that is not the schema is a 400 before any query: not JSON, no groups, wrong types, empty ids", async () => {
+    noQueryMayRun();
+    const bodies: unknown[] = [
+      "not json",
+      "",
+      {},
+      { groups: "x" },
+      { groups: null },
+      [],
+      { groups: [{ projectId: "pA" }] },
+      { groups: [{ groupId: "g1" }] },
+      { groups: [{ projectId: "", groupId: "g1" }] },
+      { groups: [{ projectId: "pA", groupId: "" }] },
+      { groups: [{ projectId: 1, groupId: "g1" }] },
+      { groups: [{ projectId: "pA", groupId: ["g1"] }] },
+      { groups: [null] },
+      { groups: [{ projectId: "pA", groupId: "x".repeat(4097) }] },
+    ];
+
+    for (const body of bodies) {
+      const response = await post(body);
+      expect([response.status, JSON.stringify(body)]).toEqual([400, JSON.stringify(body)]);
+    }
+  });
+
+  test("every project named must be readable: one the caller cannot read refuses the whole request, before any query", async () => {
+    noQueryMayRun();
+    const groups = [group("pA", "g1"), group("pB", "g1")];
+
+    const refused = await post({ groups }, appAs("manager", ["pA"]));
+
+    expect(refused.status).toBe(403);
+    expect(await refused.json()).toEqual({ message: "Project access denied" });
+  });
+
+  test("a manager with a membership in every project named, a workspace viewer and an admin are served", async () => {
+    shadow([{ project: "pA", group: "g1", user: "u1" }, { project: "pB", group: "g1", user: "u2" }]);
+    const body = { groups: [group("pA", "g1"), group("pB", "g1")] };
+
+    for (const app of [appAs("manager", ["pA", "pB"]), appAs("viewer"), appAs("admin")]) {
+      const response = await post(body, app);
+      expect([response.status, await response.json()]).toEqual([200, { affectedUsers: 2 }]);
+    }
+  });
+
+  test("without a session it is 401", async () => {
+    noQueryMayRun();
+    const app = new Hono();
+    app.onError((error, ctx) => (error instanceof HttpError ? ctx.json({ message: error.message }, error.status as 401) : ctx.json({}, 500)));
+    app.route("/api", apiRouter);
+
+    const response = await post({ groups: [] }, app);
+
+    expect(response.status).toBe(401);
+  });
+});
