@@ -6,10 +6,7 @@ import { rememberPathForLogin, takePathAfterLogin } from "@/lib/after-login";
 import { ErrorDetailPage } from "@/pages/ErrorDetailPage";
 import { ErrorsPage } from "@/pages/ErrorsPage";
 import { LoginPage } from "@/pages/LoginPage";
-import { MinimapsPage } from "@/pages/MinimapsPage";
-import { ProjectsPage } from "@/pages/ProjectsPage";
 import { SettingsPage } from "@/pages/SettingsPage";
-import { UsersPage } from "@/pages/UsersPage";
 
 function ProtectedLayout() {
   const navigate = useNavigate();
@@ -91,10 +88,12 @@ export default function App() {
         <Route path="/dashboard" element={<AfterLoginRedirect />} />
         <Route path="/errors" element={<ErrorsPage />} />
         <Route path="/errors/:projectId/:groupId" element={<ErrorDetailPage />} />
-        <Route path="/projects" element={<ProjectsPage />} />
-        <Route path="/users" element={<UsersPage />} />
-        <Route path="/minimaps" element={<MinimapsPage />} />
-        <Route path="/settings" element={<SettingsPage />} />
+        {/* The old top level pages moved into Settings; their URLs stay working for bookmarks. */}
+        <Route path="/projects" element={<Navigate to="/settings/projects" replace />} />
+        <Route path="/users" element={<Navigate to="/settings/members" replace />} />
+        <Route path="/minimaps" element={<Navigate to="/settings/source-maps" replace />} />
+        <Route path="/settings" element={<Navigate to="/settings/projects" replace />} />
+        <Route path="/settings/:section" element={<SettingsPage />} />
       </Route>
       <Route path="*" element={<Navigate to="/errors" replace />} />
     </Routes>
