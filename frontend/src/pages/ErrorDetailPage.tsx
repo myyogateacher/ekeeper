@@ -1,613 +1,474 @@
-import { useState } from "react";
-import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
-import { Link, useParams } from "react-router-dom";
-import { ChevronLeft as HiChevronLeft, ChevronRight as HiChevronRight, Download as HiArrowDownTray } from "lucide-react";
-import { api } from "@/lib/api";
-import { formatDate } from "@/lib/utils";
-import type { IssueState } from "@ekeeper/shared";
+// Issue detail. Follows the shape of ErrorsPage.tsx (the canonical page): rules live in lib/issue-detail.ts
+// with tests, the selected event lives in the URL (?event=), and writes go through useIssueWorkflow.
+import { useMemo, useState, type ReactNode } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Link, useParams, useSearchParams } from "react-router-dom";
+import { ChevronLeft, Download, Link as LinkIcon } from "lucide-react";
+import type { ErrorEventDetail } from "@ekeeper/shared";
+import { api, isApiStatus } from "@/lib/api";
+import {
+  BREADCRUMB_PREVIEW,
+  breadcrumbPreview,
+  eventLevel,
+  eventNav,
+  exceptionParts,
+  framesCrashFirst,
+  occurrenceStats,
+  parseMaybeJson,
+  statusActions,
+} from "@/lib/issue-detail";
+import { canWriteProject } from "@/lib/permissions";
+import { formatAbsolute, formatRelative } from "@/lib/time";
+import { formatNumber } from "@/lib/utils";
+import { useMe } from "@/components/session";
+import { AssignMenu } from "@/components/AssignMenu";
+import { useIssueWorkflow } from "@/components/workflow";
+import { EmptyState } from "@/components/EmptyState";
+import { SeverityDot } from "@/components/Severity";
+import { copyText } from "@/components/clipboard";
 
 type UnknownRecord = Record<string, unknown>;
 
-function parseMaybeJson<T>(value: unknown, fallback: T): T {
-  if (typeof value === "string") {
-    try {
-      return JSON.parse(value) as T;
-    } catch {
-      return fallback;
-    }
-  }
-
-  if (value && typeof value === "object") {
-    return value as T;
-  }
-
-  return fallback;
-}
-
-function displayValue(value: unknown): string {
-  if (value === null || value === undefined || value === "") {
-    return "Unknown";
-  }
-
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
-    return String(value);
-  }
-
-  return JSON.stringify(value);
-}
-
-function normalizeStructuredValue(value: unknown): unknown {
-  if (typeof value === "string") {
-    try {
-      return normalizeStructuredValue(JSON.parse(value));
-    } catch {
-      return value;
-    }
-  }
-
-  if (Array.isArray(value)) {
-    return value.map((item) => normalizeStructuredValue(item));
-  }
-
-  if (value && typeof value === "object") {
-    return Object.fromEntries(
-      Object.entries(value as UnknownRecord).map(([key, nestedValue]) => [key, normalizeStructuredValue(nestedValue)]),
-    );
-  }
-
-  return value;
-}
-
-function renderKeyValueList(record: UnknownRecord, valueClassName = "break-all text-slate-200") {
-  return Object.entries(record).map(([key, currentValue]) => (
-    <div key={key} className="flex min-w-0 flex-col gap-1 text-sm">
-      <span className="text-slate-400">{key}</span>
-      {(() => {
-        const normalizedValue = normalizeStructuredValue(currentValue);
-
-        if (normalizedValue && typeof normalizedValue === "object" && !Array.isArray(normalizedValue)) {
-          return (
-        <div className="rounded-2xl border border-white/10 bg-slate-950/20 p-3">
-          <div className="grid gap-2">
-                {Object.entries(normalizedValue as UnknownRecord).map(([nestedKey, nestedValue]) => (
-              <div key={nestedKey} className="flex min-w-0 flex-col gap-1 text-xs">
-                <span className="text-slate-500">{nestedKey}</span>
-                <span className={`break-all ${valueClassName}`}>{displayValue(nestedValue)}</span>
-              </div>
-            ))}
-          </div>
-        </div>
-          );
-        }
-
-        if (Array.isArray(normalizedValue)) {
-          return (
-            <pre className="overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/20 p-3 text-xs text-slate-200">
-              {JSON.stringify(normalizedValue, null, 2)}
-            </pre>
-          );
-        }
-
-        return <span className={valueClassName}>{displayValue(normalizedValue)}</span>;
-      })()}
-    </div>
-  ));
-}
-
-function getExceptionParts(exceptionInput: unknown) {
-  const exception = parseMaybeJson<UnknownRecord>(exceptionInput, {});
-  const values = Array.isArray(exception.values) ? (exception.values as UnknownRecord[]) : [];
-  const primary = values[0] ?? exception;
-
-  return {
-    exception,
-    primary,
-    type: typeof primary.type === "string" ? primary.type : "Error",
-    value: typeof primary.value === "string" ? primary.value : "No exception message",
-    mechanism:
-      primary.mechanism && typeof primary.mechanism === "object"
-        ? (primary.mechanism as UnknownRecord)
-        : null,
-  };
-}
-
-function getFrames(stacktraceInput: unknown, exceptionInput: unknown) {
-  const parsedStacktrace = parseMaybeJson<UnknownRecord | null>(stacktraceInput, null);
-  const fromStacktrace = parsedStacktrace && Array.isArray(parsedStacktrace.frames)
-    ? (parsedStacktrace.frames as UnknownRecord[])
-    : null;
-
-  if (fromStacktrace) {
-    return fromStacktrace;
-  }
-
-  const { primary } = getExceptionParts(exceptionInput);
-  const nested = primary.stacktrace && typeof primary.stacktrace === "object"
-    ? (primary.stacktrace as UnknownRecord)
-    : null;
-
-  return nested && Array.isArray(nested.frames) ? (nested.frames as UnknownRecord[]) : [];
-}
+const STATE_TAG: Record<string, string> = {
+  open: "bg-open/10 text-open",
+  reopened: "bg-reopened/10 text-reopened",
+  closed: "bg-closed/10 text-closed",
+};
 
 export function ErrorDetailPage() {
+  const me = useMe();
   const { projectId = "", groupId = "" } = useParams();
-  const queryClient = useQueryClient();
-  const [selectedEventId, setSelectedEventId] = useState<string | undefined>(undefined);
-  const { data, isFetching, isError, error: detailError } = useQuery({
-    queryKey: ["error-detail", projectId, groupId, selectedEventId],
-    queryFn: () => api.errorDetail(projectId, groupId, selectedEventId),
+  const [searchParams, setSearchParams] = useSearchParams();
+  const eventId = searchParams.get("event") ?? undefined;
+  // placeholderData keeps the previous event on screen while the next one loads, so the page does not
+  // flash a skeleton on every Older click.
+  const { data, isLoading, isError, error, isPlaceholderData, refetch } = useQuery({
+    queryKey: ["error-detail", projectId, groupId, eventId],
+    queryFn: () => api.errorDetail(projectId, groupId, eventId),
     enabled: Boolean(projectId && groupId),
-    placeholderData: (previousData) => previousData,
+    placeholderData: (previous) => previous,
   });
-  const { data: assignees } = useQuery({
-    queryKey: ["error-assignees", projectId],
-    queryFn: () => api.errorAssignees(projectId),
-    enabled: Boolean(projectId),
-  });
+  const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
+  const now = useMemo(() => Date.now(), [data]);
 
-  const workflowMutation = useMutation({
-    mutationFn: (payload: { state?: IssueState; assignedUserId?: string | null }) =>
-      api.updateIssueWorkflow(projectId, groupId, payload),
-    onSuccess: async () => {
-      await Promise.all([
-        queryClient.invalidateQueries({ queryKey: ["error-detail", projectId, groupId] }),
-        queryClient.invalidateQueries({ queryKey: ["errors"] }),
-      ]);
-    },
-  });
+  const back = (
+    <Link to="/errors" className="inline-flex items-center gap-1 text-[13px] text-muted hover:text-fg">
+      <ChevronLeft className="h-4 w-4" aria-hidden /> Issues
+    </Link>
+  );
 
-  const error = data?.error;
-  const occurrences = data?.occurrences ?? [];
-  const duplicateGroups = data?.duplicateGroups ?? [];
-  const totalOccurrences = occurrences.length;
-  const currentIndex = error
-    ? occurrences.findIndex((o) => o.eventId === error.eventId)
-    : 0;
-
-  function goToOccurrence(index: number) {
-    const target = occurrences[index];
-    if (target) {
-      setSelectedEventId(target.eventId);
-    }
-  }
-
-  if (isError) {
+  if (isLoading) {
     return (
-      <div className="glass-panel p-6">
-        <h2 className="text-2xl font-semibold text-white">Failed to load error detail</h2>
-        <p className="mt-2 text-sm text-slate-400">
-          {detailError instanceof Error ? detailError.message : "Request failed"}
-        </p>
+      <div className="flex flex-col gap-4" aria-busy>
+        {back}
+        <div className="h-7 w-2/3 rounded bg-raised" />
+        <div className="card h-40" />
+        <div className="card h-80" />
+      </div>
+    );
+  }
+  // An unknown group answers 200 with error: null, a project the viewer cannot read answers 403
+  // (backend/src/routes/api.ts:831): both read the same, so the page never confirms an issue exists.
+  if ((isError && isApiStatus(error, 403, 404)) || (!isError && !data?.error)) {
+    return (
+      <div className="flex flex-col gap-4">
+        {back}
+        <div className="card">
+          <EmptyState title="This issue isn't available" action={<Link className="btn" to="/errors">Back to issues</Link>}>
+            It may have been removed, or you may not have access to its project.
+          </EmptyState>
+        </div>
+      </div>
+    );
+  }
+  if (isError || !data?.error) {
+    return (
+      <div className="flex flex-col gap-4">
+        {back}
+        <div className="card">
+          <EmptyState title="Couldn't load this issue" action={<button type="button" className="btn" onClick={() => void refetch()}>Try again</button>} />
+        </div>
       </div>
     );
   }
 
-  if (!error) {
-    return (
-      <div className="glass-panel p-6">
-        <h2 className="text-2xl font-semibold text-white">No error detail available</h2>
-      </div>
-    );
-  }
-
-  const currentError = error;
-
-  const { primary, type, value, mechanism } = getExceptionParts(currentError.exception);
-  const frames = getFrames(currentError.stacktrace, currentError.exception);
-  const tags = parseMaybeJson<Record<string, string>>(currentError.tags, {});
-  const contexts = parseMaybeJson<UnknownRecord>(currentError.contexts, {});
-  const rawEvent = parseMaybeJson<UnknownRecord>(currentError.rawPayload, {});
-  const request = parseMaybeJson<UnknownRecord>((parseMaybeJson<UnknownRecord>(currentError.rawPayload, {})).request, {});
-  const requestHeaders =
-    request.headers && typeof request.headers === "object" ? (request.headers as UnknownRecord) : {};
-  const contextEntries = Object.entries(contexts).filter(([key]) => key !== "trace");
-  const rawExtra = rawEvent.extra && typeof rawEvent.extra === "object" ? (normalizeStructuredValue(rawEvent.extra) as UnknownRecord) : {};
-  const rawTags = rawEvent.tags && typeof rawEvent.tags === "object" ? (normalizeStructuredValue(rawEvent.tags) as UnknownRecord) : tags;
-  const rawUser = rawEvent.user && typeof rawEvent.user === "object" ? (normalizeStructuredValue(rawEvent.user) as UnknownRecord) : {};
-  const normalizedBreadcrumbs = currentError.breadcrumbs.map((breadcrumb) => ({
-    ...breadcrumb,
-    data: normalizeStructuredValue(breadcrumb.data),
-  }));
-  const parsedRawEvent = rawEvent;
-
-  function downloadRawEvent() {
-    const blob = new Blob([JSON.stringify(parsedRawEvent, null, 2)], { type: "application/json" });
-    const objectUrl = URL.createObjectURL(blob);
-    const link = document.createElement("a");
-    link.href = objectUrl;
-    link.download = `event-${currentError.eventId || currentError.groupId}.json`;
-    link.click();
-    URL.revokeObjectURL(objectUrl);
-  }
+  const event = data.error;
+  const projectName = projects?.projects.find((project) => project.id === projectId)?.name ?? projectId;
+  const selectEvent = (id: string | null) => {
+    if (!id) return;
+    const next = new URLSearchParams(searchParams);
+    next.set("event", id);
+    setSearchParams(next, { replace: true });
+  };
 
   return (
-    <div className="min-w-0 space-y-6">
-      <section className="glass-panel p-6">
-        <p className="text-xs uppercase tracking-[0.25em] text-slate-400">Issue detail</p>
-        <div className="mt-4 flex flex-col gap-4 lg:flex-row lg:items-start lg:justify-between">
-          <div>
-            <h2 className="text-3xl font-semibold text-white">{error.message}</h2>
-            <p className="mt-2 text-sm text-slate-300">
-              {type} • Event captured {formatDate(error.timestamp)}
-              {totalOccurrences > 0 ? ` • ${totalOccurrences} occurrence${totalOccurrences === 1 ? "" : "s"} total` : ""}
-            </p>
-          </div>
-          <div className="flex items-center gap-3">
-            {totalOccurrences > 1 ? (
-              <div className="flex items-center gap-1">
-                <button
-                  type="button"
-                  className="button-secondary h-9 w-9 !p-0 disabled:opacity-30"
-                  disabled={currentIndex <= 0}
-                  onClick={() => goToOccurrence(currentIndex - 1)}
-                  aria-label="Newer occurrence"
-                >
-                  <HiChevronLeft className="mx-auto h-4 w-4" />
-                </button>
-                <span className={`min-w-[5rem] text-center text-sm text-slate-300 ${isFetching ? "animate-pulse" : ""}`}>
-                  {currentIndex + 1} / {totalOccurrences}
-                </span>
-                <button
-                  type="button"
-                  className="button-secondary h-9 w-9 !p-0 disabled:opacity-30"
-                  disabled={currentIndex >= totalOccurrences - 1}
-                  onClick={() => goToOccurrence(currentIndex + 1)}
-                  aria-label="Older occurrence"
-                >
-                  <HiChevronRight className="mx-auto h-4 w-4" />
-                </button>
-              </div>
-            ) : null}
-            <div className="rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm text-slate-200">
-              Group <span className="font-mono text-xs">{error.groupId}</span>
-            </div>
-            {error.githubIssueUrl ? (
-              <a
-                className="rounded-2xl border border-emerald-300/30 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100 transition hover:bg-emerald-400/20"
-                href={error.githubIssueUrl}
-                target="_blank"
-                rel="noreferrer"
-              >
-                GitHub #{error.githubIssueNumber}
-              </a>
-            ) : null}
-          </div>
+    <div className={`flex flex-col gap-4 ${isPlaceholderData ? "opacity-70" : ""}`}>
+      {back}
+      <Header event={event} projectId={projectId} projectName={projectName} canWrite={canWriteProject(me, projectId)} meId={me.user.id} />
+      <Stats occurrences={data.occurrences} now={now} />
+      <EventBar event={event} projectId={projectId} occurrences={data.occurrences} onSelect={selectEvent} />
+      <div className="grid min-w-0 gap-4 [grid-template-columns:minmax(0,1fr)_300px] max-[1100px]:[grid-template-columns:minmax(0,1fr)]">
+        <div className="flex min-w-0 flex-col gap-4">
+          <StackTrace event={event} />
+          <Breadcrumbs event={event} />
         </div>
-        <div className="mt-6 grid gap-4 lg:grid-cols-3">
-          <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-400">State</p>
-            <select
-              className="input mt-3"
-              value={error.state}
-              onChange={(event) =>
-                workflowMutation.mutate({ state: event.target.value as IssueState })
-              }
-            >
-              <option value="open">Open</option>
-              <option value="closed">Closed</option>
-              <option value="reopened">Reopened</option>
-            </select>
-          </div>
-          <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Assigned team member</p>
-            <select
-              className="input mt-3"
-              value={error.assignedUserId ?? ""}
-              onChange={(event) =>
-                workflowMutation.mutate({ assignedUserId: event.target.value || null })
-              }
-            >
-              <option value="">Unassigned</option>
-              {(assignees?.users ?? []).map((user) => (
-                <option key={user.id} value={user.id}>
-                  {user.name}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-            <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Workflow</p>
-            <div className="mt-3 flex flex-wrap gap-2">
-              {error.state === "closed" ? (
-                <button className="button-secondary" onClick={() => workflowMutation.mutate({ state: "reopened" })}>
-                  Reopen
-                </button>
-              ) : (
-                <button className="button-primary" onClick={() => workflowMutation.mutate({ state: "closed" })}>
-                  Close issue
-                </button>
-              )}
-            </div>
-            <p className="mt-3 text-sm text-slate-300">
-              Assigned to {error.assignedUserName ?? "nobody"} • currently {error.state}.
-            </p>
-          </div>
-        </div>
-        <div className="mt-4 flex flex-wrap gap-2">
-          <a className="button-secondary" href="#stacktrace">
-            Jump to stack trace
-          </a>
-          <a className="button-secondary" href="#breadcrumbs">
-            Jump to breadcrumbs
-          </a>
-          <button className="button-secondary gap-2" type="button" onClick={downloadRawEvent}>
-            <HiArrowDownTray className="h-4 w-4" />
-            Download raw event
-          </button>
-        </div>
-        {error.sourceMapApplied ? (
-          <div className="mt-4 rounded-2xl border border-emerald-300/20 bg-emerald-400/10 px-4 py-3 text-sm text-emerald-100">
-            Source maps were applied to this event using release {error.sourceMapRelease ?? "unknown"}.
-          </div>
-        ) : (
-          <div className="mt-4 rounded-2xl border border-white/10 bg-slate-950/20 px-4 py-3 text-sm text-slate-300">
-            No matching minimap was found for this event, so stack frames are shown in their raw uploaded form.
-          </div>
-        )}
-        {duplicateGroups.length > 0 ? (
-          <div className="mt-4 rounded-3xl border border-amber-300/20 bg-amber-400/10 p-4">
-            <div className="flex flex-col gap-1 sm:flex-row sm:items-center sm:justify-between">
-              <h3 className="text-sm font-semibold text-amber-100">Duplicate issue groups</h3>
-              <p className="text-xs uppercase tracking-[0.2em] text-amber-100/70">
-                {duplicateGroups.length} related group{duplicateGroups.length === 1 ? "" : "s"}
-              </p>
-            </div>
-            <div className="mt-3 grid gap-3">
-              {duplicateGroups.map((group) => (
-                <Link
-                  key={group.groupId}
-                  className="block min-w-0 rounded-2xl border border-white/10 bg-slate-950/30 p-4 transition hover:border-amber-200/40 hover:bg-slate-950/50"
-                  to={`/errors/${projectId}/${group.groupId}`}
-                >
-                  <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                    <div className="min-w-0">
-                      <p className="break-words text-sm font-medium text-white">{group.message}</p>
-                      <p className="mt-1 break-all font-mono text-[11px] text-slate-400">{group.groupId}</p>
-                    </div>
-                    <div className="grid shrink-0 grid-cols-2 gap-2 text-xs text-slate-300 sm:grid-cols-4 lg:text-right">
-                      <span>{group.events} events</span>
-                      <span>{group.affectedUsers} users</span>
-                      <span>{formatDate(group.lastSeen)}</span>
-                      <span className="break-all">{group.latestRelease ?? "No release"}</span>
-                    </div>
-                  </div>
-                </Link>
-              ))}
-            </div>
-          </div>
-        ) : null}
-      </section>
-
-      <section className="grid min-w-0 gap-6 xl:grid-cols-[minmax(0,1.15fr)_minmax(320px,0.85fr)]">
-        <div className="min-w-0 space-y-6">
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Request</h3>
-            <div className="mt-4 grid min-w-0 gap-4 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
-              <div className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">URL</p>
-                <p className="mt-2 break-all text-sm text-slate-200">{displayValue(request.url)}</p>
-              </div>
-              <div className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-                <p className="text-xs uppercase tracking-[0.22em] text-slate-400">Headers</p>
-                <div className="mt-3 space-y-2">
-                  {Object.keys(requestHeaders).length > 0 ? (
-                    renderKeyValueList(requestHeaders)
-                  ) : (
-                    <p className="text-sm text-slate-300">No request headers available.</p>
-                  )}
-                </div>
-              </div>
-            </div>
-          </div>
-
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Exception</h3>
-            <div className="mt-4 min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-5">
-              <p className="text-sm uppercase tracking-[0.22em] text-slate-400">Type</p>
-              <p className="mt-2 text-xl font-semibold text-white">{type}</p>
-              <p className="mt-4 text-sm uppercase tracking-[0.22em] text-slate-400">Message</p>
-              <p className="mt-2 text-sm leading-6 text-slate-200">{value}</p>
-              {mechanism ? (
-                <div className="mt-5 grid gap-3 sm:grid-cols-2">
-                  {Object.entries(mechanism).map(([key, mechanismValue]) => (
-                    <div key={key} className="min-w-0 rounded-2xl border border-white/10 bg-white/5 p-4">
-                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{key}</p>
-                      <div className="mt-2 min-w-0">
-                        {mechanismValue && typeof mechanismValue === "object" && !Array.isArray(mechanismValue) ? (
-                          <div className="grid gap-2">
-                            {renderKeyValueList(mechanismValue as UnknownRecord, "text-slate-200")}
-                          </div>
-                        ) : (
-                          <p className="break-words text-sm text-slate-200">{displayValue(mechanismValue)}</p>
-                        )}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-          </div>
-
-          <div id="stacktrace" className="glass-panel min-w-0 scroll-mt-6 p-6">
-            <h3 className="text-lg font-semibold text-white">Stack frames</h3>
-            <div className="mt-4 space-y-3">
-              {frames.length > 0 ? (
-                frames.map((frame, index) => (
-                  <div key={`${String(frame.filename ?? "frame")}-${index}`} className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-                    <div className="flex flex-col gap-3 lg:flex-row lg:items-start lg:justify-between">
-                      <div className="min-w-0">
-                        <p className="break-all text-sm font-semibold text-white">
-                          {displayValue(frame.function ?? "?")}
-                        </p>
-                        <p className="mt-1 break-all font-mono text-xs text-cyan-100/80">
-                          {displayValue(frame.filename ?? "unknown source")}
-                        </p>
-                        {frame.deobfuscated ? (
-                          <p className="mt-2 inline-flex rounded-full border border-emerald-300/20 bg-emerald-400/10 px-2.5 py-1 text-[11px] uppercase tracking-[0.18em] text-emerald-100">
-                            Deobfuscated
-                          </p>
-                        ) : null}
-                      </div>
-                      <div className="shrink-0 rounded-full border border-white/10 bg-white/5 px-3 py-1 text-xs text-slate-300">
-                        line {displayValue(frame.lineno ?? "?")} • col {displayValue(frame.colno ?? "?")}
-                      </div>
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <div className="rounded-3xl border border-white/10 bg-slate-950/20 p-4 text-sm text-slate-300">
-                  No parsed stack frames available for this event.
-                </div>
-              )}
-            </div>
-          </div>
-
-          <div id="breadcrumbs" className="glass-panel min-w-0 scroll-mt-6 p-6">
-            <h3 className="text-lg font-semibold text-white">Breadcrumbs</h3>
-            <div className="mt-4 space-y-3">
-              {normalizedBreadcrumbs.length > 0 ? (
-                normalizedBreadcrumbs.map((breadcrumb, index) => (
-                  <div key={`${breadcrumb.timestamp}-${index}`} className="min-w-0 rounded-2xl border border-white/10 bg-white/5 p-4">
-                    <div className="flex items-center justify-between gap-4">
-                      <p className="font-medium text-white">{breadcrumb.category}</p>
-                      <p className="text-xs uppercase tracking-[0.2em] text-slate-400">{breadcrumb.level}</p>
-                    </div>
-                    <p className="mt-2 text-sm text-slate-300">{breadcrumb.message}</p>
-                    {breadcrumb.data &&
-                    typeof breadcrumb.data === "object" &&
-                    !Array.isArray(breadcrumb.data) &&
-                    Object.keys(breadcrumb.data as UnknownRecord).length > 0 ? (
-                      <div className="mt-3 grid gap-2">
-                        {Object.entries(breadcrumb.data as UnknownRecord).map(([key, dataValue]) => {
-                          const normalizedValue = normalizeStructuredValue(dataValue);
-
-                          if (normalizedValue && typeof normalizedValue === "object") {
-                            return (
-                              <div key={key} className="flex min-w-0 flex-col gap-1 text-xs">
-                                <span className="text-slate-400">{key}</span>
-                                <pre className="overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/20 p-3 text-xs text-slate-200">
-                                  {JSON.stringify(normalizedValue, null, 2)}
-                                </pre>
-                              </div>
-                            );
-                          }
-
-                          return (
-                            <div key={key} className="flex min-w-0 flex-col gap-1 text-xs">
-                              <span className="text-slate-400">{key}</span>
-                              <span className="break-all text-slate-200">{displayValue(normalizedValue)}</span>
-                            </div>
-                          );
-                        })}
-                      </div>
-                    ) : Array.isArray(breadcrumb.data) ? (
-                      <div className="mt-3">
-                        <pre className="overflow-x-auto rounded-2xl border border-white/10 bg-slate-950/20 p-3 text-xs text-slate-200">
-                          {JSON.stringify(breadcrumb.data, null, 2)}
-                        </pre>
-                      </div>
-                    ) : breadcrumb.data ? (
-                      <div className="mt-3 flex min-w-0 flex-col gap-1 text-xs">
-                        <span className="text-slate-400">data</span>
-                        <span className="break-all text-slate-200">{displayValue(breadcrumb.data)}</span>
-                      </div>
-                    ) : null}
-                    <p className="mt-3 text-xs text-slate-400">{formatDate(breadcrumb.timestamp)}</p>
-                  </div>
-                ))
-              ) : (
-                <p className="text-sm text-slate-300">No breadcrumbs captured.</p>
-              )}
-            </div>
-          </div>
-        </div>
-
-        <div className="min-w-0 space-y-6">
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Runtime context</h3>
-            <dl className="mt-4 space-y-3 text-sm text-slate-300">
-              <div className="flex justify-between gap-4">
-                <dt>Browser</dt>
-                <dd>{error.browser ?? "Unknown"}</dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt>Device</dt>
-                <dd>{error.device ?? "Unknown"}</dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt>OS</dt>
-                <dd>{error.os ?? "Unknown"}</dd>
-              </div>
-              <div className="flex justify-between gap-4">
-                <dt>Runtime</dt>
-                <dd>{error.runtime ?? "Unknown"}</dd>
-              </div>
-            </dl>
-          </div>
-
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">User</h3>
-            <div className="mt-4 space-y-2">
-              {Object.keys(rawUser).length > 0 ? (
-                renderKeyValueList(rawUser)
-              ) : (
-                <p className="text-sm text-slate-300">No user context captured.</p>
-              )}
-            </div>
-          </div>
-
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Tags</h3>
-            <div className="mt-4 space-y-2">
-              {Object.keys(rawTags).length > 0 ? (
-                renderKeyValueList(rawTags)
-              ) : (
-                <p className="text-sm text-slate-300">No tags captured.</p>
-              )}
-            </div>
-          </div>
-
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Extra</h3>
-            <div className="mt-4 space-y-2">
-              {Object.keys(rawExtra).length > 0 ? (
-                renderKeyValueList(rawExtra)
-              ) : (
-                <p className="text-sm text-slate-300">No extra payload captured.</p>
-              )}
-            </div>
-          </div>
-
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Contexts</h3>
-            <div className="mt-4 space-y-3">
-              {contextEntries.length > 0 ? (
-                contextEntries.map(([key, contextValue]) => (
-                  <div key={key} className="min-w-0 rounded-3xl border border-white/10 bg-slate-950/20 p-4">
-                    <p className="text-xs uppercase tracking-[0.22em] text-slate-400">{key}</p>
-                    <div className="mt-3 space-y-2">
-                      {contextValue && typeof contextValue === "object" ? (
-                        renderKeyValueList(contextValue as UnknownRecord)
-                      ) : (
-                        <p className="text-sm text-slate-200">{displayValue(contextValue)}</p>
-                      )}
-                    </div>
-                  </div>
-                ))
-              ) : (
-                <p className="text-sm text-slate-300">No additional contexts captured.</p>
-              )}
-            </div>
-          </div>
-
-          <div className="glass-panel min-w-0 p-6">
-            <h3 className="text-lg font-semibold text-white">Raw event</h3>
-            <pre className="mt-4 overflow-x-auto rounded-3xl border border-white/10 bg-slate-950/20 p-4 text-xs text-slate-300">
-              {JSON.stringify(parsedRawEvent, null, 2)}
-            </pre>
-          </div>
-        </div>
-      </section>
+        <Rail event={event} similar={data.duplicateGroups} projectId={projectId} />
+      </div>
     </div>
   );
+}
+
+function Header({
+  event,
+  projectId,
+  projectName,
+  canWrite,
+  meId,
+}: {
+  event: ErrorEventDetail;
+  projectId: string;
+  projectName: string;
+  canWrite: boolean;
+  meId: string;
+}) {
+  const workflow = useIssueWorkflow();
+  // Same "<type>: <message>" the list shows, built from the parts ingest built the title from (ingest.ts:191).
+  const titleType = exceptionParts(event.exception).type;
+  const titleMessage = event.message;
+  const level = eventLevel(event.rawPayload);
+  const actions = statusActions(event.state);
+  const change = (state: typeof event.state) =>
+    workflow.mutate({ projectId, groupId: event.groupId, payload: { state }, previousState: event.state });
+
+  return (
+    <header className="flex flex-col gap-2.5">
+      <h1 className="page-title break-words">
+        <span className="font-semibold">{titleType}</span>
+        {titleMessage ? <span className="font-normal">: {titleMessage}</span> : null}
+      </h1>
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-2 text-[13px] text-muted">
+        <span className={`tag ${level === "fatal" ? "bg-fatal/10 text-fatal" : "bg-raised text-fg"}`}>
+          <SeverityDot level={level} />
+          <span className="ml-1.5">{level}</span>
+        </span>
+        <span className={`tag capitalize ${STATE_TAG[event.state] ?? ""}`}>{event.state}</span>
+        <span className="text-fg">{projectName}</span>
+        {event.githubIssueUrl ? (
+          <a className="underline underline-offset-4 hover:text-fg" href={event.githubIssueUrl} target="_blank" rel="noreferrer">
+            GitHub #{event.githubIssueNumber}
+          </a>
+        ) : (
+          <span>Not on GitHub yet</span>
+        )}
+        {event.state === "closed" ? <span>Reopens on its own if a new event arrives.</span> : null}
+        <span className="ml-auto flex flex-wrap items-center gap-2 max-[720px]:ml-0">
+          {canWrite ? (
+            <>
+              <AssignMenu
+                variant="button"
+                projectId={projectId}
+                groupId={event.groupId}
+                meId={meId}
+                assignedUserId={event.assignedUserId}
+                assignedUserName={event.assignedUserName}
+              />
+              {actions.secondary ? (
+                <button type="button" className="btn" disabled={workflow.isPending} onClick={() => change(actions.secondary!.state)}>
+                  {actions.secondary.label}
+                </button>
+              ) : null}
+              <button
+                type="button"
+                className={`btn ${actions.primary.state === "closed" ? "btn-primary" : ""}`}
+                disabled={workflow.isPending}
+                onClick={() => change(actions.primary.state)}
+              >
+                {actions.primary.label}
+              </button>
+            </>
+          ) : (
+            <span>Owner: {event.assignedUserName ?? "nobody"}</span>
+          )}
+        </span>
+      </div>
+    </header>
+  );
+}
+
+function Stats({ occurrences, now }: { occurrences: Array<{ eventId: string; timestamp: string }>; now: number }) {
+  const stats = occurrenceStats(occurrences, now);
+  const peak = Math.max(1, ...stats.hourly);
+  return (
+    <section className="card grid gap-4 p-4 [grid-template-columns:repeat(4,minmax(0,auto))_minmax(160px,1fr)] max-[860px]:[grid-template-columns:repeat(2,minmax(0,1fr))]">
+      <Stat label="Last 24h" value={formatNumber(stats.count24h)} />
+      <Stat label="Last 7 days" value={formatNumber(stats.count7d)} />
+      <Stat label="First seen" value={formatRelative(stats.firstSeen, now)} title={formatAbsolute(stats.firstSeen)} />
+      <Stat label="Last seen" value={formatRelative(stats.lastSeen, now)} title={formatAbsolute(stats.lastSeen)} />
+      <div
+        className="flex h-12 items-end gap-[2px] self-end max-[860px]:col-span-2"
+        role="img"
+        aria-label={`Events per hour over the last 24 hours, peak ${stats.hourly.reduce((a, b) => Math.max(a, b), 0)}`}
+      >
+        {stats.hourly.map((count, index) => (
+          <span
+            key={index}
+            title={`${count} event${count === 1 ? "" : "s"}, ${23 - index}h ago`}
+            className={`flex-1 rounded-sm ${count ? "bg-muted" : "bg-line"}`}
+            style={{ height: `${count ? Math.max(8, (count / peak) * 100) : 4}%` }}
+          />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
+  return (
+    <div className="flex flex-col gap-0.5 pr-4" title={title}>
+      <span className="text-xs text-muted">{label}</span>
+      <span className="text-lg font-semibold tabular-nums">{value}</span>
+    </div>
+  );
+}
+
+function EventBar({
+  event,
+  projectId,
+  occurrences,
+  onSelect,
+}: {
+  event: ErrorEventDetail;
+  projectId: string;
+  occurrences: Array<{ eventId: string; timestamp: string }>;
+  onSelect: (eventId: string | null) => void;
+}) {
+  const nav = eventNav(occurrences, event.eventId);
+  const download = () => {
+    const blob = new Blob([JSON.stringify(parseMaybeJson(event.rawPayload, {}), null, 2)], { type: "application/json" });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement("a");
+    link.href = url;
+    link.download = `event-${event.eventId}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+  };
+  const eventUrl = `${window.location.origin}/errors/${projectId}/${event.groupId}?event=${encodeURIComponent(event.eventId)}`;
+
+  return (
+    <div className="flex flex-wrap items-center gap-2 text-[13px]">
+      <span className="text-muted">
+        Event {nav.index >= 0 ? formatNumber(nav.index + 1) : "?"} of {formatNumber(nav.total)}
+        <span aria-hidden> · </span>
+        {formatAbsolute(event.timestamp)}
+      </span>
+      <span className="flex gap-1">
+        {(
+          [
+            ["Latest", nav.latest],
+            ["Newer", nav.newer],
+            ["Older", nav.older],
+            ["Oldest", nav.oldest],
+          ] as const
+        ).map(([label, target]) => (
+          <button key={label} type="button" className="btn btn-sm" disabled={!target} onClick={() => onSelect(target)}>
+            {label}
+          </button>
+        ))}
+      </span>
+      <span className="ml-auto flex gap-1 max-[720px]:ml-0">
+        <button type="button" className="btn btn-sm btn-ghost" onClick={() => void copyText(eventUrl, "Link copied")}>
+          <LinkIcon className="h-3.5 w-3.5" aria-hidden /> Copy link
+        </button>
+        <button type="button" className="btn btn-sm btn-ghost" onClick={download}>
+          <Download className="h-3.5 w-3.5" aria-hidden /> Raw event
+        </button>
+      </span>
+    </div>
+  );
+}
+
+function StackTrace({ event }: { event: ErrorEventDetail }) {
+  const frames = framesCrashFirst(event.stacktrace, event.exception);
+  return (
+    <section className="card" aria-labelledby="stacktrace-title">
+      <div className="card-head">
+        <h2 id="stacktrace-title" className="m-0 text-sm font-semibold">Stack trace</h2>
+        <span className="text-xs text-muted">crash site first</span>
+        {event.sourceMapApplied ? <span className="ml-auto text-xs text-muted">Source mapped, release {event.sourceMapRelease ?? "unknown"}</span> : null}
+      </div>
+      {!event.sourceMapApplied && frames.length > 0 ? (
+        <p className="warn-box m-3">
+          No source map matched this event, so frames show the minified file and position. Upload source maps for this release in Settings.
+        </p>
+      ) : null}
+      {frames.length === 0 ? (
+        <p className="px-4 py-6 text-[13px] text-muted">This event has no stack trace.</p>
+      ) : (
+        <ol className="m-0 list-none p-0">
+          {frames.map((frame, index) => (
+            <li key={index} className={`flex flex-wrap items-baseline gap-x-3 gap-y-0.5 border-b border-line px-4 py-2 last:border-b-0 ${index === 0 ? "bg-raised" : ""}`}>
+              <span className="mono min-w-0 break-all font-semibold">{text(frame.function) || "?"}</span>
+              <span className="mono min-w-0 flex-1 break-all text-muted">
+                {text(frame.filename) || "unknown file"}
+                {frame.lineno !== undefined ? `:${text(frame.lineno)}` : ""}
+                {frame.colno !== undefined ? `:${text(frame.colno)}` : ""}
+              </span>
+              {frame.deobfuscated ? <span className="tag bg-closed/10 text-closed">mapped</span> : null}
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function Breadcrumbs({ event }: { event: ErrorEventDetail }) {
+  const [showAll, setShowAll] = useState(false);
+  const crumbs = breadcrumbPreview(event.breadcrumbs, showAll);
+  return (
+    <section className="card" aria-labelledby="breadcrumbs-title">
+      <div className="card-head">
+        <h2 id="breadcrumbs-title" className="m-0 text-sm font-semibold">Breadcrumbs</h2>
+        <span className="text-xs text-muted">oldest first, ending at the error</span>
+        {event.breadcrumbs.length > BREADCRUMB_PREVIEW ? (
+          <button type="button" className="btn btn-sm btn-ghost ml-auto" onClick={() => setShowAll((value) => !value)}>
+            {showAll ? `Show last ${BREADCRUMB_PREVIEW}` : `Show all ${event.breadcrumbs.length}`}
+          </button>
+        ) : null}
+      </div>
+      {crumbs.length === 0 ? (
+        <p className="px-4 py-6 text-[13px] text-muted">No breadcrumbs captured.</p>
+      ) : (
+        <ol className="m-0 list-none p-0">
+          {crumbs.map((crumb, index) => (
+            <li key={index} className="grid gap-x-3 border-b border-line px-4 py-2 text-[13px] last:border-b-0 [grid-template-columns:110px_minmax(0,1fr)_auto] max-[720px]:[grid-template-columns:minmax(0,1fr)_auto]">
+              <span className="text-muted max-[720px]:hidden">{crumb.category}</span>
+              <span className="min-w-0 break-words">
+                <span className="hidden text-muted max-[720px]:inline">{crumb.category} </span>
+                {crumb.message || (Object.keys(crumb.data ?? {}).length ? <code className="mono text-muted">{formatValue(crumb.data)}</code> : "")}
+              </span>
+              <span className="text-xs text-muted" title={formatAbsolute(crumb.timestamp)}>
+                {crumb.level}
+              </span>
+            </li>
+          ))}
+        </ol>
+      )}
+    </section>
+  );
+}
+
+function Rail({
+  event,
+  similar,
+  projectId,
+}: {
+  event: ErrorEventDetail;
+  similar: Array<{ groupId: string; message: string; events: number; lastSeen: string }>;
+  projectId: string;
+}) {
+  const raw = parseMaybeJson<UnknownRecord>(event.rawPayload, {});
+  const user = parseMaybeJson<UnknownRecord>(raw.user, {});
+  const request = parseMaybeJson<UnknownRecord>(raw.request, {});
+  const extra = parseMaybeJson<UnknownRecord>(raw.extra, {});
+  const tags = Object.keys(parseMaybeJson<UnknownRecord>(raw.tags, {})).length ? parseMaybeJson<UnknownRecord>(raw.tags, {}) : event.tags;
+  const contexts = Object.fromEntries(Object.entries(event.contexts ?? {}).filter(([key]) => key !== "trace"));
+  // The list's affected user filter matches id, email or username (ErrorsPage `user` param), so any one links.
+  const userKey = text(user.id) || text(user.email) || text(user.username);
+
+  return (
+    <aside className="flex min-w-0 flex-col gap-4">
+      <RailCard title="User">
+        {Object.keys(user).length ? (
+          <>
+            <KeyValues record={user} />
+            {userKey ? (
+              <Link className="mt-2 inline-block text-[13px] text-accent underline underline-offset-4" to={`/errors?user=${encodeURIComponent(userKey)}&range=all`}>
+                Other issues for this user
+              </Link>
+            ) : null}
+          </>
+        ) : (
+          <p className="m-0 text-[13px] text-muted">No user captured.</p>
+        )}
+      </RailCard>
+      <RailCard title="Runtime">
+        <KeyValues record={{ Browser: event.browser, Device: event.device, OS: event.os, Runtime: event.runtime, URL: request.url }} />
+      </RailCard>
+      <RailCard title="Tags">
+        {Object.keys(tags).length ? <KeyValues record={tags} /> : <p className="m-0 text-[13px] text-muted">No tags.</p>}
+      </RailCard>
+      {similar.length ? (
+        <RailCard title="Similar issues">
+          <ul className="m-0 flex list-none flex-col gap-2 p-0">
+            {similar.map((group) => (
+              <li key={group.groupId} className="text-[13px]">
+                <Link className="block break-words hover:text-accent" to={`/errors/${projectId}/${group.groupId}`}>
+                  {group.message}
+                </Link>
+                <span className="text-xs text-muted">
+                  {formatNumber(group.events)} events · last {formatRelative(group.lastSeen, Date.now())}
+                </span>
+              </li>
+            ))}
+          </ul>
+        </RailCard>
+      ) : null}
+      <Collapsible title="Contexts" record={contexts} />
+      <Collapsible title="Extra" record={extra} />
+      <Collapsible title="Request headers" record={parseMaybeJson<UnknownRecord>(request.headers, {})} />
+    </aside>
+  );
+}
+
+function RailCard({ title, children }: { title: string; children: ReactNode }) {
+  return (
+    <section className="card p-4">
+      <h2 className="m-0 mb-2.5 text-xs font-semibold text-muted">{title}</h2>
+      {children}
+    </section>
+  );
+}
+
+function Collapsible({ title, record }: { title: string; record: UnknownRecord }) {
+  if (!Object.keys(record).length) return null;
+  return (
+    <details className="card p-4">
+      <summary className="cursor-pointer text-xs font-semibold text-muted">{title}</summary>
+      <div className="mt-2.5">
+        <KeyValues record={record} />
+      </div>
+    </details>
+  );
+}
+
+function KeyValues({ record }: { record: UnknownRecord }) {
+  const entries = Object.entries(record).filter(([, value]) => value !== null && value !== undefined && value !== "");
+  if (!entries.length) return <p className="m-0 text-[13px] text-muted">Unknown</p>;
+  return (
+    <dl className="m-0 grid gap-x-3 gap-y-1.5 text-[13px] [grid-template-columns:minmax(0,auto)_minmax(0,1fr)]">
+      {entries.map(([key, value]) => {
+        const shown = formatValue(value);
+        return (
+          <div key={key} className="contents">
+            <dt className="break-all text-muted">{key}</dt>
+            <dd className="m-0 min-w-0 break-all">
+              {shown.includes("\n") ? <pre className="mono m-0 whitespace-pre-wrap">{shown}</pre> : shown}
+            </dd>
+          </div>
+        );
+      })}
+    </dl>
+  );
+}
+
+/** SDK payloads nest JSON as text inside JSON; a string that parses to an object is pretty printed. */
+function formatValue(value: unknown): string {
+  const parsed = typeof value === "string" ? parseMaybeJson<unknown>(value, value) : value;
+  if (parsed && typeof parsed === "object") return JSON.stringify(parsed, null, 2);
+  return String(parsed);
+}
+
+function text(value: unknown): string {
+  return value === null || value === undefined ? "" : String(value);
 }

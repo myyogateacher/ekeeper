@@ -24,6 +24,7 @@ import {
   type ListQuery,
   type SortKey,
 } from "@/lib/issue-list";
+import { splitTitle } from "@/lib/issue-detail";
 import { canWriteProject, isAdmin } from "@/lib/permissions";
 import { formatAbsolute, formatRelative } from "@/lib/time";
 import { formatNumber } from "@/lib/utils";
@@ -359,12 +360,6 @@ function IssueRow({
       </span>
     </li>
   );
-}
-
-/** Titles are always "<type>: <message>" (backend/src/lib/ingest.ts:191); a title without one renders whole. */
-export function splitTitle(title: string): [string, string] {
-  const index = title.indexOf(": ");
-  return index > 0 ? [title.slice(0, index), title.slice(index + 2)] : [title, ""];
 }
 
 function Filters({
