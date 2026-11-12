@@ -368,28 +368,21 @@ function getReleaseArtifacts(projectId: string, release: string) {
 }
 
 /**
- * The project's newest uploaded release and how many source map files it holds, for the Settings "verify" line.
- * "Newest" is the release of the most recent upload, the same recency rankedReleasesCte uses for retention. A
- * file counts when parseSourceMapArtifact would read it as a map (name or path ends in .map), because that is
- * what deobfuscateEvent can use; a release holding only bundles has latestRelease set and 0 files. Scoped to
- * EKEEPER_ORG and project_id like getReleaseArtifacts, so it counts exactly the files a lookup can find.
+ * How many source map files are uploaded for exactly this release, for the Settings "verify" line. A file counts
+ * when parseSourceMapArtifact would read it as a map (name or path ends in .map), because that is what
+ * deobfuscateEvent can use; a release holding only bundles has 0. Scoped to EKEEPER_ORG and project_id, and the
+ * release is trimmed, exactly as getReleaseArtifacts looks a release up, so it counts the files a lookup finds.
+ * The release comes from the project's newest event, not from the newest upload: a build can upload its maps
+ * before it has sent an event, and the question the screen answers is whether the running app's release has maps.
  */
-export function getLatestReleaseMapCount(projectId: string): { release: string | null; mapFiles: number } {
-  const latest = one<{ release: string }>(
-    `SELECT release FROM minimap_artifacts WHERE org = ? AND project_id = ? ORDER BY uploaded_at DESC LIMIT 1`,
-    [config.EKEEPER_ORG, projectId],
-  );
-  if (!latest) {
-    return { release: null, mapFiles: 0 };
-  }
-
+export function countReleaseMapFiles(projectId: string, release: string): number {
   const counted = one<{ mapFiles: number }>(
     `SELECT COUNT(*) AS mapFiles FROM minimap_artifacts
      WHERE org = ? AND project_id = ? AND release = ?
        AND (substr(artifact_name, -4) = '.map' OR substr(file_path, -4) = '.map')`,
-    [config.EKEEPER_ORG, projectId, latest.release],
+    [config.EKEEPER_ORG, projectId, normalizeRelease(release)],
   );
-  return { release: latest.release, mapFiles: counted?.mapFiles ?? 0 };
+  return counted?.mapFiles ?? 0;
 }
 
 export function listMinimapArtifacts(

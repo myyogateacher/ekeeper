@@ -127,9 +127,9 @@ const closedAt = "2026-11-13T07:30:00.000Z";
 run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [routeProject, `Route ${routeSuffix}`, `route-${routeSuffix}`, "production", 1, routeNow, routeNow]);
 run(`INSERT INTO issue_workflows (project_id, group_id, state, assigned_user_id, created_at, updated_at, closed_at) VALUES (?, 'closed-group', 'closed', NULL, ?, ?, ?)`, [routeProject, routeNow, routeNow, closedAt]);
 run(`INSERT INTO issue_workflows (project_id, group_id, state, assigned_user_id, created_at, updated_at, closed_at) VALUES (?, 'reopened-group', 'reopened', NULL, ?, ?, NULL)`, [routeProject, routeNow, routeNow]);
-// Source map rows for the ingest-status route. The newest upload of routeProject is in release r_new, which holds
-// two maps and a bundle; r_old is older; one row belongs to another org and one to another project, both newer.
-// The files are never opened, so the paths point nowhere.
+// Source map rows for the ingest-status route. The release the tests' newest event runs is r_new, which holds two
+// maps and a bundle; r_old is older; r_unsent is the newest upload but no event runs it yet; one row belongs to
+// another org and one to another project, both newer. The files are never opened, so the paths point nowhere.
 const otherProject = `p_route_other_${routeSuffix}`;
 run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [otherProject, `Other ${routeSuffix}`, `other-${routeSuffix}`, "production", 1, routeNow, routeNow]);
 let artifactCounter = 0;
@@ -144,6 +144,7 @@ addArtifact(routeProject, "r_old", "~/assets/b.js.map", "2026-11-01T00:00:01.000
 addArtifact(routeProject, "r_new", "~/assets/a.js", "2026-11-12T00:00:00.000Z");
 addArtifact(routeProject, "r_new", "~/assets/a.js.map", "2026-11-12T00:00:01.000Z");
 addArtifact(routeProject, "r_new", "~/assets/b.js.map", "2026-11-12T00:00:02.000Z");
+addArtifact(routeProject, "r_unsent", "~/assets/a.js.map", "2026-11-13T00:00:00.000Z");
 addArtifact(routeProject, "r_other_org", "~/assets/a.js.map", "2026-11-13T00:00:00.000Z", "someone-else");
 addArtifact(otherProject, "r_other_project", "~/assets/a.js.map", "2026-11-13T00:00:00.000Z");
 afterAll(() => {
@@ -700,12 +701,22 @@ describe("GET /api/projects/:projectId/ingest-status", () => {
     const response = await app.request(`/api/projects/${projectId}/ingest-status`);
     return { status: response.status, body: await response.json() };
   };
+  const withProject = async (suffixName: string, run_: (projectId: string) => Promise<void>) => {
+    const projectId = `p_${suffixName}_${routeSuffix}`;
+    run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [projectId, `${suffixName} ${routeSuffix}`, `${suffixName}-${routeSuffix}`, "production", 1, routeNow, routeNow]);
+    try {
+      await run_(projectId);
+    } finally {
+      run(`DELETE FROM minimap_artifacts WHERE project_id = ?`, [projectId]);
+      run(`DELETE FROM projects WHERE id = ?`, [projectId]);
+    }
+  };
 
-  test("the newest event time as ISO with Z, the newest uploaded release and its source map files", async () => {
+  test("the newest event's time as ISO with Z, its release, and the map files of exactly that release", async () => {
     shadow([
-      { project: routeProject, group: "g1", at: at("2026-11-13 10:31:00.250") },
-      { project: routeProject, group: "g1", at: at("2026-11-12 09:00:00.000") },
-      { project: otherProject, group: "g1", at: at("2026-11-14 00:00:00.000") },
+      { project: routeProject, group: "g1", at: at("2026-11-13 10:31:00.250"), release: "r_new" },
+      { project: routeProject, group: "g1", at: at("2026-11-12 09:00:00.000"), release: "r_old" },
+      { project: otherProject, group: "g1", at: at("2026-11-14 00:00:00.000"), release: "r_other_project" },
     ]);
 
     expect(await status(routeProject)).toEqual({
@@ -714,30 +725,46 @@ describe("GET /api/projects/:projectId/ingest-status", () => {
     });
   });
 
-  test("a project with no event and no upload answers nulls and 0, not an error", async () => {
-    const empty = `p_empty_${routeSuffix}`;
-    run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [empty, `Empty ${routeSuffix}`, `empty-${routeSuffix}`, "production", 1, routeNow, routeNow]);
-    try {
-      shadow([{ project: routeProject, group: "g1" }]);
+  test("the release is the newest event's, not the newest upload: maps uploaded by a build that has sent no event are not counted", async () => {
+    shadow([{ project: routeProject, group: "g1", at: at("2026-11-13 10:31:00.250"), release: "r_old" }]);
 
-      expect(await status(empty)).toEqual({ status: 200, body: { lastEventAt: null, latestRelease: null, sourceMapFiles: 0 } });
-    } finally {
-      run(`DELETE FROM projects WHERE id = ?`, [empty]);
-    }
+    expect((await status(routeProject)).body).toMatchObject({ latestRelease: "r_old", sourceMapFiles: 2 });
+  });
+
+  test("a release with an event but no uploaded maps is reported with 0 files", async () => {
+    shadow([{ project: routeProject, group: "g1", release: "r_never_uploaded" }]);
+
+    expect((await status(routeProject)).body).toMatchObject({ latestRelease: "r_never_uploaded", sourceMapFiles: 0 });
+  });
+
+  test("a newest event with no release has a null release and 0 files, whatever was uploaded", async () => {
+    shadow([
+      { project: routeProject, group: "g1", at: at("2026-11-13 10:31:00.250"), release: "" },
+      { project: routeProject, group: "g1", at: at("2026-11-12 09:00:00.000"), release: "r_new" },
+    ]);
+
+    expect(await status(routeProject)).toEqual({ status: 200, body: { lastEventAt: "2026-11-13T10:31:00.250Z", latestRelease: null, sourceMapFiles: 0 } });
+  });
+
+  test("a project with no event answers nulls and 0 even when it has uploads, not an error", async () => {
+    shadow([{ project: "someone-else", group: "g1" }]);
+
+    expect(await status(routeProject)).toEqual({ status: 200, body: { lastEventAt: null, latestRelease: null, sourceMapFiles: 0 } });
   });
 
   test("a release that holds only bundles is reported with 0 map files", async () => {
-    const bundlesOnly = `p_bundles_${routeSuffix}`;
-    run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`, [bundlesOnly, `Bundles ${routeSuffix}`, `bundles-${routeSuffix}`, "production", 1, routeNow, routeNow]);
-    try {
-      addArtifact(bundlesOnly, "r_bundles", "~/assets/a.js", "2026-11-12T00:00:00.000Z");
-      shadow([{ project: routeProject, group: "g1" }]);
+    await withProject("bundles", async (projectId) => {
+      addArtifact(projectId, "r_bundles", "~/assets/a.js", "2026-11-12T00:00:00.000Z");
+      shadow([{ project: projectId, group: "g1", release: "r_bundles" }]);
 
-      expect((await status(bundlesOnly)).body).toMatchObject({ latestRelease: "r_bundles", sourceMapFiles: 0 });
-    } finally {
-      run(`DELETE FROM minimap_artifacts WHERE project_id = ?`, [bundlesOnly]);
-      run(`DELETE FROM projects WHERE id = ?`, [bundlesOnly]);
-    }
+      expect((await status(projectId)).body).toMatchObject({ latestRelease: "r_bundles", sourceMapFiles: 0 });
+    });
+  });
+
+  test("a release with surrounding spaces counts the files stored under the trimmed name, as a source map lookup does", async () => {
+    shadow([{ project: routeProject, group: "g1", release: " r_new " }]);
+
+    expect((await status(routeProject)).body).toMatchObject({ sourceMapFiles: 2 });
   });
 
   test("project access: a manager without a membership is refused, one with it and a viewer read", async () => {

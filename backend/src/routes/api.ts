@@ -12,7 +12,7 @@ import {
   cleanupExpiredMinimapsAsync,
   countExpiredMinimaps,
   deobfuscateEvent,
-  getLatestReleaseMapCount,
+  countReleaseMapFiles,
   isMinimapCleanupRunning,
   listMinimapArtifacts,
   saveMinimapArtifact,
@@ -194,26 +194,31 @@ export async function queryEventNavigation(
 }
 
 /**
- * The newest event time of a project as ISO 8601 UTC with Z, or null when it has none. The sort key leads with
- * project_id but timestamp is its third column, so this is not a read of one row: ClickHouse reads this project's
- * timestamp column and nothing else. That is one 8 byte column over one project, against 196,902 events across
- * every project in 120 days, and the Settings screen asks when a person opens it, so it was not worth a second
- * table; if a screen ever polls this, read project_daily_metrics for the day first.
+ * The project's newest event: its time as ISO 8601 UTC with Z, and its release (null when it has none). Both null
+ * when the project has no event. The sort key leads with project_id but timestamp is its third column, so this is
+ * not a read of one row: ClickHouse reads this project's timestamp and release columns and nothing else. That is
+ * two columns over one project, against 196,902 events across every project in 120 days, and the Settings screen
+ * asks when a person opens it, so it was not worth a second table; if a screen ever polls this, read
+ * project_daily_metrics for the day first.
  */
-export async function queryLastEventAt(projectId: string): Promise<string | null> {
+export async function queryLastEvent(projectId: string): Promise<{ lastEventAt: string | null; latestRelease: string | null }> {
   const client = getClickHouseClient();
   const result = await client.query({
     query: `
-      SELECT count() AS eventCount, toUnixTimestamp64Milli(max(timestamp)) AS lastEventMs
+      SELECT count() AS eventCount, toUnixTimestamp64Milli(max(timestamp)) AS lastEventMs, argMax(release, timestamp) AS latestRelease
       FROM events
       WHERE project_id = {projectId:String}
     `,
     query_params: { projectId },
     format: "JSONEachRow",
   });
-  const [row] = (await result.json()) as Array<{ eventCount: string | number; lastEventMs: string | number }>;
-  // max over no rows is the type's default, 1970-01-01, so the count decides whether there is a time at all.
-  return Number(row?.eventCount ?? 0) > 0 ? isoFromEpochMs(row!.lastEventMs) : null;
+  const [row] = (await result.json()) as Array<{ eventCount: string | number; lastEventMs: string | number; latestRelease: string }>;
+  // max over no rows is the type's default, 1970-01-01, so the count decides whether there is an event at all.
+  // events.release is '' for an event with no release, never NULL.
+  if (Number(row?.eventCount ?? 0) === 0) {
+    return { lastEventAt: null, latestRelease: null };
+  }
+  return { lastEventAt: isoFromEpochMs(row!.lastEventMs), latestRelease: row!.latestRelease || null };
 }
 
 const DUPLICATE_URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/;
@@ -940,12 +945,11 @@ apiRouter.post("/errors/affected-users", async (ctx) => {
 apiRouter.get("/projects/:projectId/ingest-status", async (ctx) => {
   const projectId = ctx.req.param("projectId");
   requireProjectAccess(ctx, projectId, false);
-  const sourceMaps = getLatestReleaseMapCount(projectId);
-  const lastEventAt = await queryLastEventAt(projectId);
+  const { lastEventAt, latestRelease } = await queryLastEvent(projectId);
   return ctx.json({
     lastEventAt,
-    latestRelease: sourceMaps.release,
-    sourceMapFiles: sourceMaps.mapFiles,
+    latestRelease,
+    sourceMapFiles: latestRelease ? countReleaseMapFiles(projectId, latestRelease) : 0,
   } satisfies IngestStatus);
 });
 
