@@ -38,7 +38,6 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
   // The default list view's own set (open and reopened, 7 days, all projects), so on the home page the
   // counts cost no extra request. Counts are hidden when this set is capped or inconsistent.
   const { data: baseSet } = useIssueSet(DEFAULT_QUERY, user.id);
-  const counts = baseSet ? viewCounts(baseSet, user.id) : null;
   const perProject = baseSet ? projectCounts(baseSet) : null;
 
   useEffect(() => {
@@ -61,6 +60,9 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
   const onIssues = location.pathname === "/errors";
   const listQuery = parseListQuery(new URLSearchParams(location.search));
   const activeView = onIssues ? matchSavedView(listQuery) : null;
+  // The saved-view links keep the open project (savedViewHref below), so their counts cover that project too.
+  const viewProject = onIssues ? listQuery.projectId : null;
+  const counts = baseSet ? viewCounts(baseSet, user.id, viewProject) : null;
 
   return (
     <div className="flex min-h-screen flex-wrap items-stretch">
@@ -106,7 +108,7 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
               return (
                 <Link
                   key={view.id}
-                  to={savedViewHref(view.id, onIssues ? listQuery.projectId : null)}
+                  to={savedViewHref(view.id, viewProject)}
                   aria-current={active ? "page" : undefined}
                   className={`${navItem} pl-9 ${active ? "bg-raised text-fg" : ""}`}
                 >

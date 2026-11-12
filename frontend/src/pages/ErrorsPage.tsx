@@ -11,11 +11,13 @@ import { api } from "@/lib/api";
 import { isApiStatus } from "@/lib/api-error";
 import {
   DEFAULT_QUERY,
+  ISSUE_LIST_MAX_ROWS,
   RANGE_PRESETS,
   SAVED_VIEWS,
   SEVERITIES,
   applyBrowserFilters,
   applyListPatch,
+  emptyListKind,
   isNewIssue,
   listShortcut,
   listStats,
@@ -127,8 +129,6 @@ export function ErrorsPage() {
     return () => document.removeEventListener("keydown", onKey);
   }, [rows.length]);
 
-  const filtersActive = serializeListQuery({ ...query, sort: DEFAULT_QUERY.sort }).toString() !== "";
-
   return (
     <div className="flex flex-col gap-3.5">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -173,7 +173,7 @@ export function ErrorsPage() {
 
       {set?.truncated ? (
         <p className="warn-box" role="status">
-          Showing the 500 busiest of {formatNumber(set.total)} issues by events in 7 days. Search, severity and sorting apply to these.
+          Showing the {ISSUE_LIST_MAX_ROWS} busiest of {formatNumber(set.total)} issues by events in 7 days. Search, severity and sorting apply to these.
           Narrow the project, status or range to see the rest.
         </p>
       ) : null}
@@ -220,15 +220,7 @@ export function ErrorsPage() {
             <EmptyState title="No projects yet">You don't have access to any project yet. Ask an admin to add you.</EmptyState>
           )
         ) : rows.length === 0 ? (
-          // Any non-default param means "nothing matches", including search or severity on the default
-          // view; only the bare default view can truthfully say nothing is open.
-          filtersActive ? (
-            <EmptyState title="No issues match these filters" action={<Link className="btn" to="/errors">Clear filters</Link>} />
-          ) : (
-            <EmptyState title="No open issues" action={<Link className="btn" to="/errors?status=closed&range=all">View closed issues</Link>}>
-              Closed issues reopen on their own if the error happens again.
-            </EmptyState>
-          )
+          <EmptyRows kind={emptyListKind(query)} range={query.range} />
         ) : (
           <ul className="m-0 list-none p-0">
             {rows.map((row, index) => (
@@ -556,6 +548,36 @@ function ChipSelect({
         ))}
       </select>
     </span>
+  );
+}
+
+function EmptyRows({ kind, range }: { kind: ReturnType<typeof emptyListKind>; range: ListQuery["range"] }) {
+  if (kind === "filters") {
+    return <EmptyState title="No issues match these filters" action={<Link className="btn" to="/errors">Clear filters</Link>} />;
+  }
+  const closed = <Link className="btn" to="/errors?status=closed&range=all">View closed issues</Link>;
+  if (kind === "nothing-open") {
+    return (
+      <EmptyState title="No open issues" action={closed}>
+        Closed issues reopen on their own if the error happens again.
+      </EmptyState>
+    );
+  }
+  // The range is the only narrowing, so older open issues may exist: say what was searched, and offer the
+  // wider search first.
+  const searched = RANGE_PRESETS.find((preset) => preset.id === range)?.label.toLowerCase() ?? "the chosen range";
+  return (
+    <EmptyState
+      title={`No open issues seen in the ${searched}`}
+      action={
+        <span className="flex flex-wrap justify-center gap-2">
+          <Link className="btn btn-primary" to="/errors?range=all">Show all time</Link>
+          {closed}
+        </span>
+      }
+    >
+      Open issues last seen earlier than that are not listed.
+    </EmptyState>
   );
 }
 

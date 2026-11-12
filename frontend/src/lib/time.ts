@@ -3,8 +3,8 @@
 // ClickHouse columns are DateTime64(3, 'UTC') and the API reads them as JSONEachRow with no output format,
 // so firstSeen, lastSeen, event and breadcrumb times arrive as "2026-11-12 10:59:55.890": UTC digits with
 // no zone. `new Date()` reads that shape as the viewer's local time, which put every time 5h30m early for
-// viewers in India. SQLite dates arrive as ISO with "Z" and must not be shifted. Precedent: this repo had
-// no shared parser; formatDate in lib/utils.ts called new Date(value) directly.
+// viewers in India. SQLite dates arrive as ISO with "Z" and must not be shifted. Before this module the repo
+// had no shared parser: a formatDate in lib/utils.ts called new Date(value) directly, and has been removed.
 const ZONELESS = /^(\d{4}-\d{2}-\d{2})[ T](\d{2}:\d{2}:\d{2}(?:\.\d+)?)$/;
 
 /** Parses a server timestamp. A value without a zone is UTC. Returns null for missing or invalid input. */

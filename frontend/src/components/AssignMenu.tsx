@@ -12,6 +12,7 @@ interface AssignMenuProps {
   assignedUserName: string | null;
   /** "avatar" in list rows, "button" in the issue header. */
   variant: "avatar" | "button";
+  disabled?: boolean;
 }
 
 /**
@@ -22,8 +23,9 @@ interface AssignMenuProps {
  * A disclosure of plain buttons (see usePopover), not role="menu": a menu role promises Arrow, Home and End
  * navigation that this panel does not implement, and a screen reader user would try it and get nothing.
  */
-export function AssignMenu({ projectId, groupId, meId, assignedUserId, assignedUserName, variant }: AssignMenuProps) {
+export function AssignMenu({ projectId, groupId, meId, assignedUserId, assignedUserName, variant, disabled = false }: AssignMenuProps) {
   const workflow = useIssueWorkflow();
+  const blocked = workflow.isPending || disabled;
   const [loadRequested, setLoadRequested] = useState(false);
   const { data, isLoading, isError } = useQuery({
     queryKey: ["error-assignees", projectId],
@@ -56,7 +58,7 @@ export function AssignMenu({ projectId, groupId, meId, assignedUserId, assignedU
           aria-label={label}
           aria-expanded={popover.open}
           title={assignedUserName ?? "Unassigned"}
-          disabled={workflow.isPending}
+          disabled={blocked}
           onClick={toggle}
           className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-semibold max-[720px]:h-11 max-[720px]:w-11 ${
             assignedUserName ? "border border-line bg-raised text-fg" : "border border-dashed border-muted text-muted"
@@ -65,7 +67,7 @@ export function AssignMenu({ projectId, groupId, meId, assignedUserId, assignedU
           {assignedUserName ? initials(assignedUserName) : "+"}
         </button>
       ) : (
-        <button ref={popover.trigger} type="button" className="btn" aria-expanded={popover.open} disabled={workflow.isPending} onClick={toggle}>
+        <button ref={popover.trigger} type="button" className="btn" aria-expanded={popover.open} disabled={blocked} onClick={toggle}>
           {assignedUserName ? `Owner: ${assignedUserName}` : "Assign"}
         </button>
       )}

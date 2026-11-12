@@ -13,7 +13,8 @@ import { isApiStatus } from "./api-error.ts";
  * invalidating it.
  *
  * Only 401 is mapped. A 403, a 5xx or a network failure rethrows, so an outage is not mistaken for
- * "signed out" and the user is not bounced to login for it.
+ * "signed out": ProtectedLayout shows a "Couldn't reach eKeeper" state with Try again instead of redirecting
+ * to /login.
  */
 export async function userOrSignedOut<T>(fetchMe: () => Promise<T>): Promise<T | null> {
   try {

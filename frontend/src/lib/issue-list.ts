@@ -82,8 +82,12 @@ export function parseListQuery(params: URLSearchParams): ListQuery {
     projectId: params.get("projectId")?.trim() || null,
     user: params.get("user")?.trim() || null,
     range: range === "custom" && !customOk ? DEFAULT_QUERY.range : range,
-    from: customOk ? from : null,
-    to: customOk ? to : null,
+    // From after To (a user picking the dates in the wrong order) is swapped here, once, so the chip and the
+    // API request see the same valid range. "YYYY-MM-DD" compares correctly as a string. Left as it came,
+    // localDayRange rejected it and the request went out with no bounds: issues from any time under a chip
+    // that still showed the dates.
+    from: customOk ? (from! <= to! ? from : to) : null,
+    to: customOk ? (from! <= to! ? to : from) : null,
     q: params.get("q") ?? "",
     severity: severity && (SEVERITIES as readonly string[]).includes(severity) ? severity : null,
     isNew: params.get("new") === "1",
@@ -300,19 +304,22 @@ export interface ViewCounts {
 }
 
 /**
- * Sidebar counts from the base set (open and reopened, 7 days, all projects). Returns null when that set
+ * Sidebar counts from the base set (open and reopened, 7 days, all projects), narrowed to `projectId` when set. Returns null when that set
  * is capped or inconsistent: a count taken from the 500 busiest issues can read "Assigned to me: 0" while
  * the view itself returns one, so no number is better than a wrong one.
  */
-export function viewCounts(base: IssueSet, meId: string): ViewCounts | null {
+export function viewCounts(base: IssueSet, meId: string, projectId: string | null = null): ViewCounts | null {
   if (base.truncated || !base.complete) {
     return null;
   }
+  // Inside a project the saved-view links keep that project, so the counts must cover only it. The base set
+  // is complete here (checked above), which makes filtering it exact rather than another undercount.
+  const rows = projectId ? base.rows.filter((row) => row.projectId === projectId) : base.rows;
   return {
-    "all-open": base.rows.length,
-    "needs-triage": base.rows.filter((row) => !row.assignedUserId).length,
-    mine: base.rows.filter((row) => row.assignedUserId === meId).length,
-    reopened: base.rows.filter((row) => row.state === "reopened").length,
+    "all-open": rows.length,
+    "needs-triage": rows.filter((row) => !row.assignedUserId).length,
+    mine: rows.filter((row) => row.assignedUserId === meId).length,
+    reopened: rows.filter((row) => row.state === "reopened").length,
   };
 }
 
@@ -325,6 +332,19 @@ export function projectCounts(base: IssueSet): Map<string, number> | null {
     counts.set(row.projectId, (counts.get(row.projectId) ?? 0) + 1);
   }
   return counts;
+}
+
+/**
+ * Which empty state an empty list gets. "nothing-open" is only true when nothing narrows the list: any range
+ * but "any time" can hide open issues last seen earlier, including the default 7 days, so it must not claim
+ * nothing is open (PROD-10519 review: a manager whose only open issue was last seen 10 days ago saw "No open
+ * issues"). "range-hides" is the case where the range is the only narrowing; "filters" is any other filter,
+ * explicit custom dates included. Sort does not narrow.
+ */
+export function emptyListKind(query: ListQuery): "nothing-open" | "range-hides" | "filters" {
+  const withoutRange = serializeListQuery({ ...query, range: DEFAULT_QUERY.range, from: null, to: null, sort: DEFAULT_QUERY.sort });
+  if (withoutRange.toString() !== "" || query.range === "custom") return "filters";
+  return query.range === "all" ? "nothing-open" : "range-hides";
 }
 
 export interface KeyTarget {

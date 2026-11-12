@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { canReadProject, canWriteProject, visibleSettingsSections } from "./permissions.ts";
+import { canWriteProject, visibleSettingsSections } from "./permissions.ts";
 import type { ProjectMembershipRole, UserRole } from "@ekeeper/shared";
 
 function me(role: UserRole, memberships: Array<[string, ProjectMembershipRole]> = []) {
@@ -26,13 +26,6 @@ test("Close and Assign are offered exactly when the backend's project write rule
   for (const [label, user, expected] of cases) {
     assert.equal(canWriteProject(user, "A"), expected, label);
   }
-});
-
-test("project reads pass for admin and workspace viewer everywhere, and for others only where they are members", () => {
-  assert.equal(canReadProject(me("admin"), "A"), true);
-  assert.equal(canReadProject(me("viewer"), "A"), true);
-  assert.equal(canReadProject(me("manager", [["A", "viewer"]]), "A"), true);
-  assert.equal(canReadProject(me("manager", [["B", "manager"]]), "A"), false);
 });
 
 // Expected lists come from the requireWorkspaceRole calls on each section's read endpoint.

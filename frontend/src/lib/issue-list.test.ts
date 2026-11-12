@@ -7,6 +7,7 @@ import {
   SAVED_VIEWS,
   applyBrowserFilters,
   applyListPatch,
+  emptyListKind,
   listShortcut,
   matchSavedView,
   mergePages,
@@ -184,4 +185,50 @@ test("a patch is applied to the URL as it is now, so a filter changed meanwhile 
   assert.equal(patched.get("q"), "x");
   assert.equal(applyListPatch("?q=old&sort=7d", { q: "" }).toString(), "sort=7d");
   assert.equal(applyListPatch("", { status: "open" }).toString(), "");
+});
+
+// Inside a project the sidebar's saved-view links keep the project, so a count that covers every project
+// promises rows the link does not open ("Needs triage 12" opening a view of 3). The base set is complete
+// whenever counts show at all, so filtering it to the project is exact.
+test("inside a project the view counts cover that project only, so each matches the view its link opens", () => {
+  const base = {
+    rows: [
+      row("a1", { projectId: "A", assignedUserId: null }),
+      row("a2", { projectId: "A", assignedUserId: "me", state: "reopened" }),
+      row("b1", { projectId: "B", assignedUserId: null }),
+      row("b2", { projectId: "B", assignedUserId: null }),
+    ],
+    total: 4,
+    truncated: false,
+    complete: true,
+  };
+  assert.deepEqual(viewCounts(base, "me", null), { "all-open": 4, "needs-triage": 3, mine: 1, reopened: 1 });
+  assert.deepEqual(viewCounts(base, "me", "A"), { "all-open": 2, "needs-triage": 1, mine: 1, reopened: 1 });
+  assert.deepEqual(viewCounts(base, "me", "unknown"), { "all-open": 0, "needs-triage": 0, mine: 0, reopened: 0 });
+  assert.equal(viewCounts({ ...base, truncated: true }, "me", "A"), null);
+});
+
+// Custom dates picked in the wrong order (From after To) used to parse fine, fail localDayRange, and send no
+// bounds, so the list showed issues from any time while the chip still showed the dates picked.
+test("a custom range given in reverse order is swapped, so the chip and the API request agree", () => {
+  const query = parseListQuery(new URLSearchParams("range=custom&from=2026-11-12&to=2026-11-01"));
+  assert.equal(query.from, "2026-11-01");
+  assert.equal(query.to, "2026-11-12");
+  const filters = toApiFilters(query, "me", NOW);
+  assert.ok(filters.from && filters.to);
+  assert.ok(filters.from < filters.to);
+  assert.equal(parseListQuery(new URLSearchParams("range=custom&from=2026-11-01&to=2026-11-01")).from, "2026-11-01");
+});
+
+// "No open issues" is false while the default 7 day range hides open issues last seen earlier (a manager whose
+// only open issue was last seen 10 days ago). Only an unnarrowed "any time" list can say nothing is open.
+test("an empty list says nothing is open only when no range or other filter narrows it", () => {
+  assert.equal(emptyListKind(DEFAULT_QUERY), "range-hides");
+  assert.equal(emptyListKind({ ...DEFAULT_QUERY, range: "30d" }), "range-hides");
+  assert.equal(emptyListKind({ ...DEFAULT_QUERY, range: "24h", sort: "7d" }), "range-hides");
+  assert.equal(emptyListKind({ ...DEFAULT_QUERY, range: "all" }), "nothing-open");
+  assert.equal(emptyListKind({ ...DEFAULT_QUERY, range: "custom", from: "2026-11-01", to: "2026-11-02" }), "filters");
+  assert.equal(emptyListKind({ ...DEFAULT_QUERY, range: "all", status: "closed" }), "filters");
+  assert.equal(emptyListKind({ ...DEFAULT_QUERY, q: "x" }), "filters");
+  assert.equal(emptyListKind({ ...DEFAULT_QUERY, projectId: "A", range: "all" }), "filters");
 });

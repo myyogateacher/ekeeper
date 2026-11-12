@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
+import { EmptyState } from "@/components/EmptyState";
 import { RouteErrorBoundary } from "@/components/RouteErrorBoundary";
 import { api } from "@/lib/api";
 import { clearPathAfterLogin, peekPathAfterLogin, rememberPathForLogin } from "@/lib/after-login";
@@ -14,7 +15,7 @@ function ProtectedLayout() {
   const navigate = useNavigate();
   const location = useLocation();
   const queryClient = useQueryClient();
-  const { data, isLoading } = useQuery({
+  const { data, isLoading, isError, isFetching, refetch } = useQuery({
     queryKey: ["me"],
     queryFn: api.me,
     retry: false,
@@ -24,6 +25,26 @@ function ProtectedLayout() {
     return (
       <div className="flex min-h-screen items-center justify-center text-muted" role="status">
         Loading
+      </div>
+    );
+  }
+
+  // api.me resolves a 401 to null, so an error here is an outage (a 5xx during a deploy, no network), not a
+  // signed-out user. Sending them to /login would also remember the page and make them sign in again for a
+  // problem sign-in cannot fix. A background refetch that fails while `data` is cached keeps showing the app.
+  if (isError && !data) {
+    return (
+      <div className="flex min-h-screen items-center justify-center">
+        <EmptyState
+          title="Couldn't reach eKeeper"
+          action={
+            <button type="button" className="btn" disabled={isFetching} onClick={() => void refetch()}>
+              Try again
+            </button>
+          }
+        >
+          The server didn't answer. Check your connection and try again in a moment.
+        </EmptyState>
       </div>
     );
   }

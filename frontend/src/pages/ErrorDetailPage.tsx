@@ -45,13 +45,17 @@ export function ErrorDetailPage() {
   const { projectId = "", groupId = "" } = useParams();
   const [searchParams, setSearchParams] = useSearchParams();
   const eventId = searchParams.get("event") ?? undefined;
-  // placeholderData keeps the previous event on screen while the next one loads, so the page does not
-  // flash a skeleton on every Older click.
+  // placeholderData keeps the previous event of this issue on screen while the next one loads, so the page
+  // does not flash a skeleton on every Older click.
   const { data, isLoading, isError, error, isPlaceholderData, refetch } = useQuery({
     queryKey: ["error-detail", projectId, groupId, eventId],
     queryFn: () => api.errorDetail(projectId, groupId, eventId),
     enabled: Boolean(projectId && groupId),
-    placeholderData: (previous) => previous,
+    // Only an event switch inside the same issue keeps the previous data. Across issues (a similar-issue
+    // link, back to another group) it showed the old issue under the new URL with live Close and Older, so a
+    // Close in that window sent the old group's id (queryKey is ["error-detail", project, group, event]).
+    placeholderData: (previous, previousQuery) =>
+      previousQuery?.queryKey[1] === projectId && previousQuery?.queryKey[2] === groupId ? previous : undefined,
   });
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   const now = useMemo(() => Date.now(), [data]);
@@ -109,7 +113,7 @@ export function ErrorDetailPage() {
   return (
     <div className={`flex flex-col gap-4 ${isPlaceholderData ? "opacity-70" : ""}`}>
       {back}
-      <Header event={event} projectId={projectId} projectName={projectName} canWrite={canWriteProject(me, projectId)} meId={me.user.id} />
+      <Header event={event} projectId={projectId} projectName={projectName} canWrite={canWriteProject(me, projectId)} meId={me.user.id} loading={isPlaceholderData} />
       <Stats occurrences={data.occurrences} now={now} />
       <EventBar event={event} projectId={projectId} occurrences={data.occurrences} onSelect={selectEvent} />
       <div className="grid min-w-0 gap-4 [grid-template-columns:minmax(0,1fr)_300px] max-[1100px]:[grid-template-columns:minmax(0,1fr)]">
@@ -129,12 +133,15 @@ function Header({
   projectName,
   canWrite,
   meId,
+  loading,
 }: {
   event: ErrorEventDetail;
   projectId: string;
   projectName: string;
   canWrite: boolean;
   meId: string;
+  /** The next event of this issue is loading and the previous one is still shown: writes wait for it. */
+  loading: boolean;
 }) {
   const workflow = useIssueWorkflow();
   // Same "<type>: <message>" the list shows, built from the parts ingest built the title from (ingest.ts:191).
@@ -175,8 +182,9 @@ function Header({
                 meId={meId}
                 assignedUserId={event.assignedUserId}
                 assignedUserName={event.assignedUserName}
+                disabled={loading}
               />
-              <StatusControl state={event.state} pending={workflow.isPending} onChange={change} />
+              <StatusControl state={event.state} pending={workflow.isPending || loading} onChange={change} />
             </>
           ) : (
             <span>Owner: {event.assignedUserName ?? "nobody"}</span>

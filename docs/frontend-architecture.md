@@ -49,6 +49,14 @@ Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.
   A 401 on any other query or mutation writes `null` into the `["me"]` query (`endSession` in `main.tsx`) and
   `ProtectedLayout` redirects to `/login`. Never remove or invalidate `["me"]` from a handler: the layout has
   it mounted and refetches it at once, which looped a signed-out user on the loader.
+  A failure of `/api/me` that is not a 401 (a 5xx, no network) shows "Couldn't reach eKeeper" with Try again
+  and does not redirect.
+- Ids in URLs: ids are data, and a group id is a sender's fingerprint verbatim, so it can hold `/`, `..` or `?`.
+  Build request paths with the `path` tag and issue routes with `issuePath` (`lib/url.ts`); never interpolate an
+  id raw. `url.test.ts` fails on a raw interpolation in `api.ts`.
+- `RouteErrorBoundary` wraps the routed content (and the issue detail again): a render error shows a message with
+  a way back and is logged, instead of blanking the app. Parse payload JSON with `parseMaybeJson`, which only
+  returns the shape the caller reads.
   Any failed mutation shows a toast unless the mutation handles its own error.
 - **Issues list** loads up to 500 rows of the current view (five pages of 100) through
   `fetchIssueSet`. Status, assignee, project, affected user and range go to the API; search, severity,

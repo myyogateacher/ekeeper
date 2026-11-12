@@ -7,14 +7,6 @@ import type { MeResponse } from "@ekeeper/shared";
 
 type Me = Pick<MeResponse, "user" | "memberships">;
 
-/** requireProjectAccess(ctx, projectId, false), backend/src/lib/auth.ts:269-285. */
-export function canReadProject(me: Me, projectId: string): boolean {
-  if (me.user.role === "admin" || me.user.role === "viewer") {
-    return true;
-  }
-  return me.memberships.some((membership) => membership.projectId === projectId);
-}
-
 /**
  * requireProjectAccess(ctx, projectId, true): admin, or a manager membership on that project. The
  * workspace role does not matter beyond admin, so a workspace viewer with a manager membership CAN close
