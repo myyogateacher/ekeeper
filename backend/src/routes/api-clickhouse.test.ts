@@ -239,8 +239,11 @@ describe("queryGroupStats", () => {
     { project: "pA", group, at: ago("330 MINUTE") },
     { project: "pA", group, at: ago("1410 MINUTE") },
     { project: "pA", group, at: ago("24 HOUR") },
+    { project: "pA", group, at: ago("86399999 MILLISECOND") },
+    { project: "pA", group, at: ago("0 SECOND") },
   ];
   const outside: TestEvent[] = [
+    { project: "pA", group, at: ago("86400001 MILLISECOND") },
     { project: "pA", group, at: ago("86401 SECOND") },
     { project: "pA", group, at: ago("3 DAY") },
     { project: "pA", group, at: ago("8 DAY") },
@@ -254,10 +257,10 @@ describe("queryGroupStats", () => {
     const stats = await queryGroupStats("pA", group);
 
     const expected = new Array<number>(24).fill(0);
-    expected[23] = 4; // 30 min x2, exactly 1 h, and the event stamped 3 h ahead of the clock
+    expected[23] = 5; // 30 min x2, exactly 1 h, exactly now, and the event stamped 3 h ahead of the clock
     expected[22] = 2; // 61 min and exactly 2 h
     expected[18] = 1; // 5 h 30 min
-    expected[0] = 2; // 23 h 30 min and exactly 24 h
+    expected[0] = 3; // 23 h 30 min, exactly 24 h, and 1 ms newer than 24 h (an event 1 ms older is outside)
     expect(stats.hourly24h).toEqual(expected);
   });
 
@@ -267,7 +270,7 @@ describe("queryGroupStats", () => {
     const stats = await queryGroupStats("pA", group);
 
     expect(stats.hourly24h.reduce((sum, count) => sum + count, 0)).toBe(stats.events24h);
-    expect(stats.events24h).toBe(9);
+    expect(stats.events24h).toBe(11);
   });
 
   test("an event one second older than 24 hours is in no bar and not in events24h, but is in the 7 day count and the total", async () => {
@@ -284,10 +287,10 @@ describe("queryGroupStats", () => {
 
     const stats = await queryGroupStats("pA", group);
 
-    expect(stats.totalEvents).toBe(12);
-    expect(stats.events24h).toBe(9);
-    // the 9 in the last 24 hours, the one 24 h 1 s old, and the one 3 days old; not the one 8 days old
-    expect(stats.events7d).toBe(11);
+    expect(stats.totalEvents).toBe(15);
+    expect(stats.events24h).toBe(11);
+    // the 11 in the last 24 hours, the ones 24 h 1 ms and 24 h 1 s old, and the one 3 days old; not the one 8 days old
+    expect(stats.events7d).toBe(14);
   });
 
   test("firstSeen and lastSeen are ISO 8601 UTC with Z, not zoneless digits", async () => {
@@ -633,6 +636,39 @@ describe("POST /api/errors/affected-users", () => {
     expect(await ok.json()).toEqual({ affectedUsers: 7 });
     expect(tooMany.status).toBe(400);
     expect(((await tooMany.json()) as { message: string }).message).toContain("groups");
+  });
+
+  // ClickHouse refuses a query parameter over 131072 URL encoded bytes, and the pairs are one parameter
+  // (clickhouse-params.ts). The two lengths below straddle the 100,000 byte budget; a 40 character project id is
+  // what createId("project") makes, and 200 characters is the longest id the S4 allowlist keeps verbatim.
+  test("500 pairs of 40 character project ids and 130 character group ids are served by the engine end to end", async () => {
+    const groups = Array.from({ length: 500 }, (_, index) => group(`project_${index}`.padEnd(40, "p"), `legacy-${index}`.padEnd(130, "g")));
+    // Only 9 of the 500 groups have events: ClickHouse caps the query text at max_query_size (262144 bytes), which
+    // 500 shadow rows of every column would pass; the long parameter is the point of this test, not the table.
+    shadow(groups.slice(0, 9).map((entry, index) => ({ project: entry.projectId, group: entry.groupId, user: `u${index}` })));
+
+    const response = await post({ groups });
+
+    expect([response.status, await response.json()]).toEqual([200, { affectedUsers: 9 }]);
+  });
+
+  test("500 pairs of 40 character project ids and 200 character group ids are a 400 before any query, not the engine's 500", async () => {
+    noQueryMayRun();
+    const groups = Array.from({ length: 500 }, (_, index) => group(`project_${index}`.padEnd(40, "p"), `legacy-${index}`.padEnd(200, "g")));
+
+    const response = await post({ groups });
+
+    expect(response.status).toBe(400);
+    expect(((await response.json()) as { message: string }).message).toContain("too long");
+  });
+
+  test("500 pairs of the 40 and 32 character ids a real list has are served", async () => {
+    const groups = Array.from({ length: 500 }, (_, index) => group(`project_${index}`.padEnd(40, "p"), `${index}`.padStart(32, "0")));
+    shadow(groups.slice(0, 4).map((entry, index) => ({ project: entry.projectId, group: entry.groupId, user: `u${index}` })));
+
+    const response = await post({ groups });
+
+    expect([response.status, await response.json()]).toEqual([200, { affectedUsers: 4 }]);
   });
 
   test("a body that is not the schema is a 400 before any query: not JSON, no groups, wrong types, empty ids", async () => {

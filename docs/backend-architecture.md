@@ -76,7 +76,7 @@ These routes cover:
 - user and project administration
 - dashboard summaries
 - issue listing and issue detail
-- `POST /api/errors/affected-users`: distinct users over up to 500 listed (project, group) pairs, for the issues list header total. Every project named must be readable by the caller, or the request is a 403 before any query
+- `POST /api/errors/affected-users`: distinct users over up to 500 listed (project, group) pairs, for the issues list header total. Every project named must be readable by the caller, or the request is a 403 before any query; ids that together exceed about 100 KB URL encoded are a 400, because ClickHouse refuses a longer query parameter (`clickhouse-params.ts`)
 - `GET /api/projects/:projectId/ingest-status`: the project's newest event time, the release of that newest event, and how many `.map` files are uploaded for exactly that release, for the Settings verify step. Same read access as the project itself
 - workflow updates
 - minimap management

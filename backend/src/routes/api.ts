@@ -27,6 +27,7 @@ import {
   parseLabels,
   syncGithubIssueState,
 } from "../lib/issue-sync";
+import { MAX_QUERY_PARAM_BYTES, pairsParamBytes } from "../lib/clickhouse-params";
 import { EVENTS_24H_SQL, EVENTS_7D_SQL, buildEventNavigation, buildIssueStats, hourlyColumnsSql, isoFromEpochMs, type NavigationRow, type StatsRow } from "../lib/issue-stats";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
@@ -934,6 +935,11 @@ apiRouter.post("/errors/affected-users", async (ctx) => {
   }
 
   const { groups } = parsed.data;
+  // The pairs reach ClickHouse as one URL parameter, which it refuses past 128 KiB (clickhouse-params.ts). 500
+  // ordinary pairs are about 48 KB, so this only turns away a list of very long ids, as a 400 and not a 500.
+  if (pairsParamBytes(groups.map((group) => [group.projectId, group.groupId] as const)) > MAX_QUERY_PARAM_BYTES) {
+    throw new HttpError(400, "Invalid request: groups: the ids are too long to total in one request");
+  }
   for (const projectId of new Set(groups.map((group) => group.projectId))) {
     requireProjectAccess(ctx, projectId, false);
   }
