@@ -200,3 +200,13 @@ export function eventLevel(rawPayload: string): string {
   const level = parseMaybeJson<UnknownRecord>(rawPayload, {}).level;
   return typeof level === "string" && level ? level.toLowerCase() : "error";
 }
+
+/**
+ * A payload field as text. Objects and arrays are shown as their JSON, because String() on an object whose
+ * toString is not callable (a sender writing {"toString":1}) throws and took the whole issue page down. null
+ * and undefined are empty; everything else is a primitive and goes through String.
+ */
+export function displayText(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  return typeof value === "object" ? JSON.stringify(value) : String(value);
+}

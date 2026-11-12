@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import {
   breadcrumbOffset,
   breadcrumbPreview,
+  displayText,
   eventLevel,
   eventNav,
   exceptionParts,
@@ -165,4 +166,20 @@ test("an exception or level that is JSON null reads as the defaults, never throw
   assert.deepEqual(exceptionParts('{"values":[null]}'), { type: "Error", value: "No exception message", mechanism: null });
   assert.equal(eventLevel("null"), "error");
   assert.equal(eventLevel("[]"), "error");
+});
+
+// A frame field is whatever the sender wrote. {"toString":1} is an object whose toString is not callable, so
+// String() on it throws "Cannot convert object to primitive value", and the whole issue showed "couldn't be
+// displayed" (PROD-10519 security re-review). Objects are shown as their JSON; only primitives go through String.
+test("any value a payload field can hold displays as text without throwing", () => {
+  assert.throws(() => String({ toString: 1 }), TypeError);
+  assert.equal(displayText({ toString: 1 }), '{"toString":1}');
+  assert.equal(displayText({}), "{}");
+  assert.equal(displayText([]), "[]");
+  assert.equal(displayText([1, "a"]), '[1,"a"]');
+  assert.equal(displayText(null), "");
+  assert.equal(displayText(undefined), "");
+  assert.equal(displayText(42), "42");
+  assert.equal(displayText(true), "true");
+  assert.equal(displayText("text"), "text");
 });
