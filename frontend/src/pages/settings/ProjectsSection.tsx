@@ -87,7 +87,7 @@ export function ProjectsSection() {
             {section.projects.map((project) => (
               <li key={project.id} className="flex flex-wrap items-center gap-x-4 gap-y-1.5 border-b border-line px-4 py-3 last:border-b-0">
                 <div className="min-w-[180px] flex-1">
-                  <Link to={`/errors?projectId=${encodeURIComponent(project.id)}`} className="font-medium hover:text-accent">
+                  <Link to={`/errors?projectId=${encodeURIComponent(project.id)}`} className="font-medium hover:text-accent max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center">
                     {project.name}
                   </Link>
                   <div className="text-xs text-muted">
@@ -169,7 +169,7 @@ function ConnectApp({ section, admin }: { section: ReturnType<typeof useSectionP
         </li>
         <li>
           Trigger an error, then check{" "}
-          <Link className="text-accent underline underline-offset-4" to={`/errors?projectId=${encodeURIComponent(project.id)}&range=24h`}>
+          <Link className="text-accent underline underline-offset-4 max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center" to={`/errors?projectId=${encodeURIComponent(project.id)}&range=24h`}>
             {project.name} issues
           </Link>
           . Allow up to ten minutes: ingest writes events in five minute batches and skips the batch still filling.

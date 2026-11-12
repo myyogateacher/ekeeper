@@ -1,7 +1,8 @@
-import { useEffect, useRef, useState } from "react";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { api } from "@/lib/api";
 import { useIssueWorkflow } from "@/components/workflow";
+import { usePopover } from "@/components/usePopover";
 
 interface AssignMenuProps {
   projectId: string;
@@ -16,67 +17,60 @@ interface AssignMenuProps {
 /**
  * Owner picker. Only project members can be assigned (the backend rejects anyone else with 400,
  * backend/src/routes/api.ts:939-947), so the list comes from that project's assignees, loaded when the
- * menu opens. "Assign to me" appears only when the viewer is one of them.
+ * panel opens. "Assign to me" appears only when the viewer is one of them.
+ *
+ * A disclosure of plain buttons (see usePopover), not role="menu": a menu role promises Arrow, Home and End
+ * navigation that this panel does not implement, and a screen reader user would try it and get nothing.
  */
 export function AssignMenu({ projectId, groupId, meId, assignedUserId, assignedUserName, variant }: AssignMenuProps) {
-  const [open, setOpen] = useState(false);
-  const root = useRef<HTMLDivElement>(null);
   const workflow = useIssueWorkflow();
+  const [loadRequested, setLoadRequested] = useState(false);
   const { data, isLoading, isError } = useQuery({
     queryKey: ["error-assignees", projectId],
     queryFn: () => api.errorAssignees(projectId),
-    enabled: open,
+    enabled: loadRequested,
   });
-
-  useEffect(() => {
-    if (!open) return;
-    const onPointer = (event: PointerEvent) => {
-      if (!root.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setOpen(false);
-    };
-    document.addEventListener("pointerdown", onPointer);
-    document.addEventListener("keydown", onKey);
-    return () => {
-      document.removeEventListener("pointerdown", onPointer);
-      document.removeEventListener("keydown", onKey);
-    };
-  }, [open]);
+  // Focus waits for the members to arrive: until then the panel holds only a "Loading" line, no button.
+  const popover = usePopover(!isLoading);
 
   const users = data?.users ?? [];
   const me = users.find((user) => user.id === meId);
   const others = users.filter((user) => user.id !== meId);
   const assign = (userId: string | null) => {
-    setOpen(false);
+    popover.close();
     workflow.mutate({ projectId, groupId, payload: { assignedUserId: userId } });
+  };
+  const toggle = () => {
+    setLoadRequested(true);
+    popover.toggle();
   };
 
   const label = assignedUserName ? `Owner ${assignedUserName}, change owner` : "Unassigned, assign an owner";
 
   return (
-    <div ref={root} className="relative" data-popover-open={open || undefined}>
+    <div {...popover.rootProps} className="relative">
       {variant === "avatar" ? (
         <button
+          ref={popover.trigger}
           type="button"
           aria-label={label}
-          aria-expanded={open}
+          aria-expanded={popover.open}
           title={assignedUserName ?? "Unassigned"}
           disabled={workflow.isPending}
-          onClick={() => setOpen((value) => !value)}
-          className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-semibold max-[720px]:h-8 max-[720px]:w-8 ${
+          onClick={toggle}
+          className={`flex h-6 w-6 items-center justify-center rounded-full text-[11px] font-semibold max-[720px]:h-11 max-[720px]:w-11 ${
             assignedUserName ? "border border-line bg-raised text-fg" : "border border-dashed border-muted text-muted"
           }`}
         >
           {assignedUserName ? initials(assignedUserName) : "+"}
         </button>
       ) : (
-        <button type="button" className="btn" aria-expanded={open} disabled={workflow.isPending} onClick={() => setOpen((value) => !value)}>
+        <button ref={popover.trigger} type="button" className="btn" aria-expanded={popover.open} disabled={workflow.isPending} onClick={toggle}>
           {assignedUserName ? `Owner: ${assignedUserName}` : "Assign"}
         </button>
       )}
-      {open ? (
-        <div role="menu" className="absolute right-0 top-full z-30 mt-1 w-60 rounded-lg border border-line bg-surface p-1.5 shadow-lg">
+      {popover.open ? (
+        <div ref={popover.panel} role="group" aria-label="Choose an owner" className="absolute right-0 top-full z-30 mt-1 w-60 rounded-lg border border-line bg-surface p-1.5 shadow-lg">
           {isLoading ? <p className="px-2 py-2 text-[13px] text-muted">Loading members</p> : null}
           {isError ? <p className="px-2 py-2 text-[13px] text-fatal">Couldn't load members</p> : null}
           {me ? <MenuItem label="Assign to me" initials={initials(me.name)} active={assignedUserId === me.id} onClick={() => assign(me.id)} /> : null}
@@ -97,7 +91,7 @@ function MenuItem({ label, initials: letters, active, onClick }: { label: string
   return (
     <button
       type="button"
-      role="menuitem"
+      aria-current={active || undefined}
       onClick={onClick}
       className={`flex h-9 w-full items-center gap-2.5 rounded-md px-2 text-left text-[13px] hover:bg-raised max-[720px]:h-11 ${active ? "bg-raised" : ""}`}
     >

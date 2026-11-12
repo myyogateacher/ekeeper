@@ -9,6 +9,7 @@ import { api } from "@/lib/api";
 import { isApiStatus } from "@/lib/api-error";
 import {
   BREADCRUMB_PREVIEW,
+  breadcrumbOffset,
   breadcrumbPreview,
   eventLevel,
   eventNav,
@@ -16,13 +17,14 @@ import {
   framesCrashFirst,
   occurrenceStats,
   parseMaybeJson,
-  statusActions,
 } from "@/lib/issue-detail";
 import { canWriteProject } from "@/lib/permissions";
-import { formatAbsolute, formatRelative } from "@/lib/time";
+import { formatAbsolute, formatDayTime, formatRelative } from "@/lib/time";
+import { pluralize } from "@/lib/plural";
 import { formatNumber } from "@/lib/utils";
 import { useMe } from "@/components/session";
 import { AssignMenu } from "@/components/AssignMenu";
+import { StatusControl } from "@/components/StatusControl";
 import { useIssueWorkflow } from "@/components/workflow";
 import { EmptyState } from "@/components/EmptyState";
 import { SeverityDot } from "@/components/Severity";
@@ -53,7 +55,7 @@ export function ErrorDetailPage() {
   const now = useMemo(() => Date.now(), [data]);
 
   const back = (
-    <Link to="/errors" className="inline-flex items-center gap-1 text-[13px] text-muted hover:text-fg">
+    <Link to="/errors" className="inline-flex items-center gap-1 text-[13px] text-muted hover:text-fg max-[720px]:min-h-11">
       <ChevronLeft className="h-4 w-4" aria-hidden /> Issues
     </Link>
   );
@@ -137,7 +139,6 @@ function Header({
   const titleType = exceptionParts(event.exception).type;
   const titleMessage = event.message;
   const level = eventLevel(event.rawPayload);
-  const actions = statusActions(event.state);
   const change = (state: typeof event.state) =>
     workflow.mutate({ projectId, groupId: event.groupId, payload: { state }, previousState: event.state });
 
@@ -155,7 +156,7 @@ function Header({
         <span className={`tag capitalize ${STATE_TAG[event.state] ?? ""}`}>{event.state}</span>
         <span className="text-fg">{projectName}</span>
         {event.githubIssueUrl ? (
-          <a className="underline underline-offset-4 hover:text-fg" href={event.githubIssueUrl} target="_blank" rel="noreferrer">
+          <a className="underline underline-offset-4 hover:text-fg max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center" href={event.githubIssueUrl} target="_blank" rel="noreferrer">
             GitHub #{event.githubIssueNumber}
           </a>
         ) : (
@@ -173,19 +174,7 @@ function Header({
                 assignedUserId={event.assignedUserId}
                 assignedUserName={event.assignedUserName}
               />
-              {actions.secondary ? (
-                <button type="button" className="btn" disabled={workflow.isPending} onClick={() => change(actions.secondary!.state)}>
-                  {actions.secondary.label}
-                </button>
-              ) : null}
-              <button
-                type="button"
-                className={`btn ${actions.primary.state === "closed" ? "btn-primary" : ""}`}
-                disabled={workflow.isPending}
-                onClick={() => change(actions.primary.state)}
-              >
-                {actions.primary.label}
-              </button>
+              <StatusControl state={event.state} pending={workflow.isPending} onChange={change} />
             </>
           ) : (
             <span>Owner: {event.assignedUserName ?? "nobody"}</span>
@@ -198,36 +187,50 @@ function Header({
 
 function Stats({ occurrences, now }: { occurrences: Array<{ eventId: string; timestamp: string }>; now: number }) {
   const stats = occurrenceStats(occurrences, now);
-  const peak = Math.max(1, ...stats.hourly);
+  const peak = Math.max(0, ...stats.hourly);
   return (
-    <section className="card grid gap-4 p-4 [grid-template-columns:repeat(4,minmax(0,auto))_minmax(160px,1fr)] max-[860px]:[grid-template-columns:repeat(2,minmax(0,1fr))]">
-      <Stat label="Last 24h" value={formatNumber(stats.count24h)} />
-      <Stat label="Last 7 days" value={formatNumber(stats.count7d)} />
-      <Stat label="First seen" value={formatRelative(stats.firstSeen, now)} title={formatAbsolute(stats.firstSeen)} />
-      <Stat label="Last seen" value={formatRelative(stats.lastSeen, now)} title={formatAbsolute(stats.lastSeen)} />
-      <div
-        className="flex h-12 items-end gap-[2px] self-end max-[860px]:col-span-2"
-        role="img"
-        aria-label={`Events per hour over the last 24 hours, peak ${stats.hourly.reduce((a, b) => Math.max(a, b), 0)}`}
-      >
-        {stats.hourly.map((count, index) => (
-          <span
-            key={index}
-            title={`${count} event${count === 1 ? "" : "s"}, ${23 - index}h ago`}
-            className={`flex-1 rounded-sm ${count ? "bg-muted" : "bg-line"}`}
-            style={{ height: `${count ? Math.max(8, (count / peak) * 100) : 4}%` }}
-          />
-        ))}
+    <section className="card overflow-hidden" aria-label="Issue stats">
+      <div className="grid gap-px border-b border-line bg-line [grid-template-columns:repeat(4,minmax(0,1fr))] max-[860px]:[grid-template-columns:repeat(2,minmax(0,1fr))]">
+        <Stat label="Last 24h" value={formatNumber(stats.count24h)} />
+        <Stat label="Last 7 days" value={formatNumber(stats.count7d)} />
+        <Stat label="First seen" value={formatRelative(stats.firstSeen, now)} detail={formatAbsolute(stats.firstSeen)} />
+        <Stat label="Last seen" value={formatRelative(stats.lastSeen, now)} detail={formatAbsolute(stats.lastSeen)} />
+      </div>
+      <div className="px-4 pb-2.5 pt-3">
+        <div className="flex flex-wrap justify-between gap-x-3 gap-y-1 text-xs text-muted">
+          <span>Events per hour, last 24h</span>
+          <span>{peak > 0 ? `Peak ${formatNumber(peak)} per hour` : "No events in the last 24 hours"}</span>
+        </div>
+        <div
+          className="mt-2 flex h-14 items-end gap-[3px] border-b border-line"
+          role="img"
+          aria-label={`Events per hour over the last 24 hours, ${peak > 0 ? `peak ${peak}` : "none"}`}
+        >
+          {stats.hourly.map((count, index) => (
+            <span
+              key={index}
+              title={`${count} ${pluralize(count, "event")}, ${23 - index}h ago`}
+              className={`min-w-[2px] flex-1 rounded-t-sm ${count ? "bg-muted" : "bg-line"}`}
+              style={{ height: `${count ? Math.max(8, (count / peak) * 100) : 4}%` }}
+            />
+          ))}
+        </div>
+        {/* The first bar starts 24 hours before now: occurrenceStats buckets by whole hours counted back from now. */}
+        <div className="mt-1 flex justify-between text-[11px] text-muted">
+          <span>{formatDayTime(now - 24 * 3_600_000)}</span>
+          <span>now</span>
+        </div>
       </div>
     </section>
   );
 }
 
-function Stat({ label, value, title }: { label: string; value: string; title?: string }) {
+function Stat({ label, value, detail }: { label: string; value: string; detail?: string }) {
   return (
-    <div className="flex flex-col gap-0.5 pr-4" title={title}>
+    <div className="flex flex-col gap-0.5 bg-surface px-4 py-3">
       <span className="text-xs text-muted">{label}</span>
       <span className="text-lg font-semibold tabular-nums">{value}</span>
+      {detail ? <span className="text-xs text-muted">{detail}</span> : null}
     </div>
   );
 }
@@ -342,15 +345,16 @@ function Breadcrumbs({ event }: { event: ErrorEventDetail }) {
       ) : (
         <ol className="m-0 list-none p-0">
           {crumbs.map((crumb, index) => (
-            <li key={index} className="grid gap-x-3 border-b border-line px-4 py-2 text-[13px] last:border-b-0 [grid-template-columns:110px_minmax(0,1fr)_auto] max-[720px]:[grid-template-columns:minmax(0,1fr)_auto]">
+            <li key={index} className="grid gap-x-3 border-b border-line px-4 py-2 text-[13px] last:border-b-0 [grid-template-columns:64px_104px_minmax(0,1fr)_auto] max-[720px]:[grid-template-columns:64px_minmax(0,1fr)_auto]">
+              <span className="mono text-muted" title={formatAbsolute(crumb.timestamp)}>
+                {breadcrumbOffset(crumb.timestamp, event.timestamp) ?? ""}
+              </span>
               <span className="text-muted max-[720px]:hidden">{crumb.category}</span>
               <span className="min-w-0 break-words">
                 <span className="hidden text-muted max-[720px]:inline">{crumb.category} </span>
                 {crumb.message || (Object.keys(crumb.data ?? {}).length ? <code className="mono text-muted">{formatValue(crumb.data)}</code> : "")}
               </span>
-              <span className="text-xs text-muted" title={formatAbsolute(crumb.timestamp)}>
-                {crumb.level}
-              </span>
+              <span className="text-xs text-muted">{crumb.level}</span>
             </li>
           ))}
         </ol>
@@ -384,7 +388,7 @@ function Rail({
           <>
             <KeyValues record={user} />
             {userKey ? (
-              <Link className="mt-2 inline-block text-[13px] text-accent underline underline-offset-4" to={`/errors?user=${encodeURIComponent(userKey)}&range=all`}>
+              <Link className="mt-2 inline-block text-[13px] text-accent underline underline-offset-4 max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center" to={`/errors?user=${encodeURIComponent(userKey)}&range=all`}>
                 Other issues for this user
               </Link>
             ) : null}
@@ -404,11 +408,11 @@ function Rail({
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {similar.map((group) => (
               <li key={group.groupId} className="text-[13px]">
-                <Link className="block break-words hover:text-accent" to={`/errors/${projectId}/${group.groupId}`}>
+                <Link className="block break-words hover:text-accent max-[720px]:min-h-11" to={`/errors/${projectId}/${group.groupId}`}>
                   {group.message}
                 </Link>
                 <span className="text-xs text-muted">
-                  {formatNumber(group.events)} events · last {formatRelative(group.lastSeen, Date.now())}
+                  {formatNumber(group.events)} {pluralize(group.events, "event")} · last {formatRelative(group.lastSeen, Date.now())}
                 </span>
               </li>
             ))}
@@ -435,7 +439,7 @@ function Collapsible({ title, record }: { title: string; record: UnknownRecord }
   if (!Object.keys(record).length) return null;
   return (
     <details className="card p-4">
-      <summary className="cursor-pointer text-xs font-semibold text-muted">{title}</summary>
+      <summary className="cursor-pointer text-xs font-semibold text-muted max-[720px]:-m-4 max-[720px]:block max-[720px]:p-4">{title}</summary>
       <div className="mt-2.5">
         <KeyValues record={record} />
       </div>

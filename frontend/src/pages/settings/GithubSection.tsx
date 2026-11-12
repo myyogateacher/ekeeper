@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { toast } from "react-toastify";
 import { api } from "@/lib/api";
 import { canWriteProject } from "@/lib/permissions";
+import { pluralize } from "@/lib/plural";
 import { useMe } from "@/components/session";
 import { ProjectPicker, SectionHeader, useSectionProject } from "./shared";
 
@@ -66,7 +67,7 @@ export function GithubSection() {
     mutationFn: () => api.backfillGithubIntegration(projectId),
     onSuccess: (result) =>
       toast.info(
-        `Backfill done. Created ${result.created} GitHub issue${result.created === 1 ? "" : "s"}` +
+        `Backfill done. Created ${result.created} GitHub ${pluralize(result.created, "issue")}` +
           (result.failed > 0 ? `, ${result.failed} failed` : "") +
           `, ${result.alreadyLinked} already linked.`,
       ),
@@ -185,7 +186,7 @@ export function GithubSection() {
       </form>
 
       <details className="card p-4 text-[13px]">
-        <summary className="cursor-pointer font-semibold">How to set up the token and webhook</summary>
+        <summary className="cursor-pointer font-semibold max-[720px]:-m-4 max-[720px]:block max-[720px]:p-4">How to set up the token and webhook</summary>
         <ol className="m-0 mt-3 flex list-decimal flex-col gap-2 pl-5">
           <li>
             GitHub, your avatar, Settings, Developer settings, Personal access tokens, Tokens (classic), Generate new token. Tick the{" "}

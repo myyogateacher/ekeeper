@@ -1,4 +1,4 @@
-import { useEffect, useState, type PropsWithChildren } from "react";
+import { useEffect, useRef, useState, type PropsWithChildren } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { Link, NavLink, useLocation } from "react-router-dom";
 import { Inbox, LogOut, Menu, SlidersHorizontal, X } from "lucide-react";
@@ -33,6 +33,7 @@ const navItem =
 export function AppShell({ children, user, onLogout }: AppShellProps) {
   const location = useLocation();
   const [menuOpen, setMenuOpen] = useState(false);
+  const menuButton = useRef<HTMLButtonElement>(null);
   const { data: projects } = useQuery({ queryKey: ["projects"], queryFn: api.projects });
   // The default list view's own set (open and reopened, 7 days, all projects), so on the home page the
   // counts cost no extra request. Counts are hidden when this set is capped or inconsistent.
@@ -43,6 +44,19 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
   useEffect(() => {
     setMenuOpen(false);
   }, [location.pathname, location.search]);
+
+  // Escape closes the phone menu and puts focus back on its button, so a keyboard user is not left on a link
+  // inside a panel that just disappeared.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      setMenuOpen(false);
+      menuButton.current?.focus();
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [menuOpen]);
 
   const onIssues = location.pathname === "/errors";
   const listQuery = parseListQuery(new URLSearchParams(location.search));
@@ -58,13 +72,14 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
       </a>
       <aside className="sticky top-0 flex h-screen w-[220px] shrink-0 flex-col border-r border-line bg-surface px-3 py-4 max-[720px]:static max-[720px]:h-auto max-[720px]:w-full max-[720px]:border-b max-[720px]:border-r-0 max-[720px]:py-2">
         <div className="flex items-center gap-2.5 px-2.5 pb-4 max-[720px]:px-1 max-[720px]:pb-0">
-          <Link to="/errors" className="flex flex-1 items-center gap-2.5">
+          <Link to="/errors" className="flex flex-1 items-center gap-2.5 max-[720px]:min-h-11">
             <span className="flex h-[26px] w-[26px] items-center justify-center rounded-md bg-accent text-xs font-bold text-accent-ink">
               eK
             </span>
             <span className="text-[15px] font-semibold">eKeeper</span>
           </Link>
           <button
+            ref={menuButton}
             type="button"
             className="btn btn-ghost btn-icon hidden max-[720px]:inline-flex"
             aria-label={menuOpen ? "Close menu" : "Open menu"}

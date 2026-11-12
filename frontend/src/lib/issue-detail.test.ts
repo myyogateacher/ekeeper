@@ -1,6 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
+  breadcrumbOffset,
   breadcrumbPreview,
   eventLevel,
   eventNav,
@@ -91,4 +92,24 @@ test("an event with no level, or an unreadable payload, reads as error", () => {
   assert.equal(eventLevel(JSON.stringify({ level: "Warning" })), "warning");
   assert.equal(eventLevel(JSON.stringify({})), "error");
   assert.equal(eventLevel("not json"), "error");
+});
+
+// The canvas shows each breadcrumb as its distance before the error ("-8.4s"), so a reader sees what led to it
+// and how fast. Crumb and event times are both ClickHouse zone-less strings; only the difference matters.
+test("a breadcrumb reads as its distance before the error, in seconds, then minutes, then hours", () => {
+  const at = "2026-11-12 11:37:48.451";
+  assert.equal(breadcrumbOffset("2026-11-12 11:37:40.051", at), "-8.4s");
+  assert.equal(breadcrumbOffset("2026-11-12 11:37:48.251", at), "-0.2s");
+  assert.equal(breadcrumbOffset("2026-11-12 11:37:48.451", at), "0.0s");
+  // 59.96 s rounds to 60.0 s; it must read as a minute, not "-60.0s".
+  assert.equal(breadcrumbOffset("2026-11-12 11:36:48.491", at), "-1m 00s");
+  assert.equal(breadcrumbOffset("2026-11-12 11:35:43.451", at), "-2m 05s");
+  assert.equal(breadcrumbOffset("2026-11-12 10:32:48.451", at), "-1h 05m");
+});
+
+test("a breadcrumb stamped after the error reads with a plus, and an unreadable time reads as nothing", () => {
+  const at = "2026-11-12 11:37:48.451";
+  assert.equal(breadcrumbOffset("2026-11-12 11:37:48.751", at), "+0.3s");
+  assert.equal(breadcrumbOffset("", at), null);
+  assert.equal(breadcrumbOffset("2026-11-12 11:37:48.451", "not a date"), null);
 });

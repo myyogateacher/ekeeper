@@ -8,6 +8,6 @@ const DOT_CLASS: Record<string, string> = {
 };
 
 /** Colour is never the only signal: every caller prints the level as text beside the dot. */
-export function SeverityDot({ level }: { level: string }) {
-  return <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${DOT_CLASS[level] ?? DOT_CLASS.error}`} />;
+export function SeverityDot({ level, className = "" }: { level: string; className?: string }) {
+  return <span aria-hidden className={`h-2 w-2 shrink-0 rounded-full ${DOT_CLASS[level] ?? DOT_CLASS.error} ${className}`} />;
 }

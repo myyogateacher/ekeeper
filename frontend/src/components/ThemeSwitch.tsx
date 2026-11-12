@@ -11,7 +11,7 @@ export function ThemeSwitch() {
           key={option}
           type="button"
           aria-pressed={theme === option}
-          className={`h-7 px-2.5 text-xs font-medium capitalize max-[720px]:h-10 ${
+          className={`h-7 px-2.5 text-xs font-medium capitalize max-[720px]:h-11 max-[720px]:min-w-11 ${
             theme === option ? "bg-raised text-fg" : "text-muted hover:text-fg"
           }`}
           onClick={() => {

@@ -38,7 +38,7 @@ export function SettingsPage() {
     <div className="flex flex-col gap-4">
       <h1 className="page-title">Settings</h1>
       <div className="grid gap-6 [grid-template-columns:180px_minmax(0,1fr)] max-[860px]:[grid-template-columns:minmax(0,1fr)]">
-        <nav aria-label="Settings sections" className="flex flex-col gap-0.5 max-[860px]:flex-row max-[860px]:overflow-x-auto">
+        <nav aria-label="Settings sections" className="flex flex-col gap-0.5 max-[860px]:flex-row max-[860px]:flex-wrap">
           {SETTINGS_SECTIONS.filter((entry) => visible.includes(entry.id)).map((entry) => (
             <NavLink
               key={entry.id}

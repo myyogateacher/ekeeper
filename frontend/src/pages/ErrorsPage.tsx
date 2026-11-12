@@ -28,6 +28,7 @@ import {
 import { splitTitle } from "@/lib/issue-detail";
 import { canWriteProject, isAdmin } from "@/lib/permissions";
 import { formatAbsolute, formatRelative } from "@/lib/time";
+import { pluralize } from "@/lib/plural";
 import { formatNumber } from "@/lib/utils";
 import { useMe } from "@/components/session";
 import { useIssueSet } from "@/components/useIssueSet";
@@ -113,20 +114,20 @@ export function ErrorsPage() {
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <h1 className="page-title">{title}</h1>
         {set ? (
-          <div className="flex flex-wrap gap-x-4 gap-y-0.5 text-[13px] text-muted">
+          <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[13px] text-muted">
             <span>
-              <b className="font-medium text-fg">{formatNumber(stats.issues)}</b> issues
+              <b className="font-medium text-fg">{formatNumber(stats.issues)}</b> {pluralize(stats.issues, "issue")}
             </span>
-            <button type="button" className="underline underline-offset-4 hover:text-fg" onClick={() => update({ isNew: true })}>
+            <button type="button" className="underline underline-offset-4 hover:text-fg max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center max-[720px]:gap-1" onClick={() => update({ isNew: true })}>
               <b className="font-medium text-fg">{stats.newIn24h}</b> new in 24h
             </button>
             {query.status !== "closed" ? (
-              <Link className="underline underline-offset-4 hover:text-fg" to={`/errors?${serializeListQuery({ ...query, assignee: "none" })}`}>
+              <Link className="underline underline-offset-4 hover:text-fg max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center max-[720px]:gap-1" to={`/errors?${serializeListQuery({ ...query, assignee: "none" })}`}>
                 <b className="font-medium text-fg">{stats.needTriage}</b> need triage
               </Link>
             ) : null}
             <span>
-              <b className="font-medium text-fg">{formatNumber(stats.events7d)}</b> events in 7d
+              <b className="font-medium text-fg">{formatNumber(stats.events7d)}</b> {pluralize(stats.events7d, "event")} in 7d
             </span>
           </div>
         ) : null}
@@ -289,16 +290,21 @@ function IssueRow({
 
   return (
     <li className="issue-grid group relative min-h-[52px] border-b border-line last:border-b-0 hover:bg-raised focus-within:bg-raised">
-      <div className="relative flex min-w-0 flex-col gap-0.5 py-2">
-        <div className="flex min-w-0 items-center gap-2">
-          <SeverityDot level={level} />
+      <div className="relative flex min-w-0 flex-col gap-0.5 py-2 max-[720px]:pb-2 max-[720px]:pt-0">
+        <div className="issue-line flex min-w-0 items-center gap-2">
+          <SeverityDot level={level} className="issue-dot" />
           <Link
             ref={linkRef}
             to={`/errors/${row.projectId}/${row.groupId}`}
-            className="block min-w-0 truncate text-fg hover:text-accent focus-visible:outline-none"
+            className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none"
           >
-            <b className="font-semibold">{type}</b>
-            {message ? `: ${message}` : ""}
+            {/* The text sits in its own span so the two line clamp clips the span, not the link: the link's
+                vertical padding (the 44px phone target) is inside its overflow box, so clamping the link
+                itself let a third line show through the padding. */}
+            <span className="issue-title-text block truncate">
+              <b className="font-semibold">{type}</b>
+              {message ? `: ${message}` : ""}
+            </span>
           </Link>
           {row.state === "reopened" ? <span className="tag bg-reopened/10 text-reopened">Reopened</span> : null}
           {isNewIssue(row, now) ? <span className="tag text-accent ring-1 ring-inset ring-accent">New</span> : null}
@@ -317,16 +323,16 @@ function IssueRow({
             </span>
           ) : null}
         </div>
-        <div className="flex flex-wrap items-center gap-x-1.5 pl-4 text-xs leading-4 text-muted">
+        <div className="issue-meta flex flex-wrap items-center gap-x-1.5 pl-4 text-xs leading-4 text-muted">
           <span className="text-fg">{projectName}</span>
-          <span aria-hidden>·</span>
+          <span aria-hidden className="issue-sep">·</span>
           <span>{level}</span>
-          <span aria-hidden>·</span>
+          <span aria-hidden className="issue-sep">·</span>
           <span title={formatAbsolute(row.firstSeen)}>first seen {formatRelative(row.firstSeen, now)}</span>
           {row.githubIssueUrl ? (
             <>
-              <span aria-hidden>·</span>
-              <a className="underline" href={row.githubIssueUrl} target="_blank" rel="noreferrer">
+              <span aria-hidden className="issue-sep">·</span>
+              <a className="underline max-[720px]:inline-flex max-[720px]:min-h-11 max-[720px]:items-center" href={row.githubIssueUrl} target="_blank" rel="noreferrer">
                 GitHub #{row.githubIssueNumber}
               </a>
             </>
@@ -444,7 +450,7 @@ function Filters({
           <input
             id="range-from"
             type="date"
-            className="bg-transparent text-xs text-fg"
+            className="bg-transparent text-xs text-fg max-[720px]:-my-px max-[720px]:self-stretch"
             value={query.from ?? ""}
             onChange={(event) => event.target.value && update({ from: event.target.value })}
           />
@@ -453,7 +459,7 @@ function Filters({
           <input
             id="range-to"
             type="date"
-            className="bg-transparent text-xs text-fg"
+            className="bg-transparent text-xs text-fg max-[720px]:-my-px max-[720px]:self-stretch"
             value={query.to ?? ""}
             onChange={(event) => event.target.value && update({ to: event.target.value })}
           />
@@ -473,10 +479,10 @@ function Filters({
           onChange={(event) => setUserDraft(event.target.value)}
           onBlur={() => userDraft.trim() !== (query.user ?? "") && update({ user: userDraft.trim() || null })}
           placeholder="id, email or username"
-          className="w-36 bg-transparent text-xs text-fg outline-none placeholder:text-muted"
+          className="w-36 bg-transparent text-xs text-fg outline-none placeholder:text-muted max-[720px]:-my-px max-[720px]:self-stretch"
         />
         {query.user ? (
-          <button type="button" aria-label="Clear affected user filter" onClick={() => update({ user: null })}>
+          <button type="button" aria-label="Clear affected user filter" className="max-[720px]:-my-px max-[720px]:inline-flex max-[720px]:w-11 max-[720px]:items-center max-[720px]:justify-center max-[720px]:self-stretch" onClick={() => update({ user: null })}>
             <X className="h-3.5 w-3.5" aria-hidden />
           </button>
         ) : null}
@@ -514,7 +520,7 @@ function ChipSelect({
         id={id}
         value={value}
         onChange={(event) => onChange(event.target.value)}
-        className="cursor-pointer bg-transparent font-medium capitalize text-fg outline-none"
+        className="cursor-pointer bg-transparent font-medium capitalize text-fg outline-none max-[720px]:-my-px max-[720px]:self-stretch"
       >
         {options.map(([optionValue, optionLabel]) => (
           <option key={optionValue} value={optionValue}>

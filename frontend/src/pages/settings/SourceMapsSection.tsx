@@ -3,6 +3,7 @@ import { keepPreviousData, useMutation, useQuery, useQueryClient } from "@tansta
 import { api } from "@/lib/api";
 import { isAdmin } from "@/lib/permissions";
 import { formatAbsolute } from "@/lib/time";
+import { pluralize } from "@/lib/plural";
 import { formatNumber } from "@/lib/utils";
 import { useMe } from "@/components/session";
 import { EmptyState } from "@/components/EmptyState";
@@ -80,8 +81,8 @@ export function SourceMapsSection() {
     onSuccess: (result) => {
       setCleanupStatus(
         result.started
-          ? `Cleanup started. ${formatNumber(result.eligible)} files are being removed in the background.`
-          : `A cleanup is already running. ${formatNumber(result.eligible)} files are still eligible.`,
+          ? `Cleanup started. ${formatNumber(result.eligible)} ${pluralize(result.eligible, "file")} ${result.eligible === 1 ? "is" : "are"} being removed in the background.`
+          : `A cleanup is already running. ${formatNumber(result.eligible)} ${pluralize(result.eligible, "file")} ${result.eligible === 1 ? "is" : "are"} still eligible.`,
       );
       void queryClient.invalidateQueries({ queryKey: ["minimaps"] });
       if (pollRef.current) clearTimeout(pollRef.current);
@@ -169,7 +170,7 @@ export function SourceMapsSection() {
               disabled={cleanup.isPending || !data?.retentionEligible}
               onClick={() => {
                 setCleanupStatus(null);
-                if (window.confirm(`Remove ${formatNumber(data?.retentionEligible ?? 0)} old source map files from ${section.project?.name}?`)) {
+                if (window.confirm(`Remove ${formatNumber(data?.retentionEligible ?? 0)} old source map ${pluralize(data?.retentionEligible ?? 0, "file")} from ${section.project?.name}?`)) {
                   cleanup.mutate();
                 }
               }}

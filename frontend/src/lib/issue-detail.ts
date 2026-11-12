@@ -150,6 +150,26 @@ export function breadcrumbPreview(breadcrumbs: Breadcrumb[], showAll: boolean): 
   return showAll ? oldestFirst : oldestFirst.slice(-BREADCRUMB_PREVIEW);
 }
 
+/**
+ * A breadcrumb's distance from the error as the canvas draws it: "-8.4s" before, "0.0s" at, "+0.3s" after
+ * (a breadcrumb can be stamped a hair after the event when the SDK and the capture disagree). Past a minute it
+ * reads "-2m 05s", past an hour "-1h 05m". Rounds to tenths first and then picks the unit, so 59.96 s reads as
+ * a minute and never as "-60.0s". Null when either time is unreadable, so the cell is left empty instead of
+ * printing "NaN".
+ */
+export function breadcrumbOffset(crumbTime: string, eventTime: string): string | null {
+  const crumb = parseServerTime(crumbTime)?.getTime();
+  const event = parseServerTime(eventTime)?.getTime();
+  if (crumb === undefined || event === undefined) return null;
+  const tenths = Math.round(Math.abs(crumb - event) / 100);
+  if (tenths === 0) return "0.0s";
+  const sign = crumb < event ? "-" : "+";
+  if (tenths < 600) return `${sign}${(tenths / 10).toFixed(1)}s`;
+  const seconds = Math.round(tenths / 10);
+  if (seconds < 3600) return `${sign}${Math.floor(seconds / 60)}m ${String(seconds % 60).padStart(2, "0")}s`;
+  return `${sign}${Math.floor(seconds / 3600)}h ${String(Math.floor((seconds % 3600) / 60)).padStart(2, "0")}m`;
+}
+
 /** The event's level from the raw payload; ingest stores "error" when the SDK sent none (backend/src/lib/ingest.ts:210). */
 export function eventLevel(rawPayload: string): string {
   const level = parseMaybeJson<UnknownRecord>(rawPayload, {}).level;
