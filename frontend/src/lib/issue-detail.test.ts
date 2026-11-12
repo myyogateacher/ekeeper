@@ -72,17 +72,19 @@ test("a title with no type separator renders whole", () => {
   assert.deepEqual(splitTitle(": leading"), [": leading", ""]);
 });
 
-test("breadcrumb preview is the last seven, oldest first", () => {
+// Fixture in the server's order, newest first (routes/api.ts:881). c9 happened just before the error.
+test("breadcrumb preview is the seven just before the error, oldest first", () => {
   const crumbs = Array.from({ length: 10 }, (_, index) => ({
-    timestamp: at(0),
-    category: `c${index}`,
+    timestamp: at((index + 1) * 1000),
+    category: `c${9 - index}`,
     level: "info",
     message: "",
     type: "default",
     data: {},
   }));
   assert.deepEqual(breadcrumbPreview(crumbs, false).map((crumb) => crumb.category), ["c3", "c4", "c5", "c6", "c7", "c8", "c9"]);
-  assert.equal(breadcrumbPreview(crumbs, true).length, 10);
+  assert.deepEqual(breadcrumbPreview(crumbs, true).map((crumb) => crumb.category), ["c0", "c1", "c2", "c3", "c4", "c5", "c6", "c7", "c8", "c9"]);
+  assert.equal(crumbs[0].category, "c9", "input is not mutated");
 });
 
 test("an event with no level, or an unreadable payload, reads as error", () => {

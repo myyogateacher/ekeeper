@@ -140,9 +140,14 @@ export function framesCrashFirst(stacktraceInput: unknown, exceptionInput: unkno
 
 export const BREADCRUMB_PREVIEW = 7;
 
-/** The last seven breadcrumbs before the event, oldest first, so the preview ends where the error happened. */
+/**
+ * The seven breadcrumbs just before the event, oldest first, so the list reads down to the error. The
+ * server sends the newest 100 newest first (backend/src/routes/api.ts:881-882), so this flips the order
+ * before taking the tail; slicing the server order directly showed the seven furthest from the crash.
+ */
 export function breadcrumbPreview(breadcrumbs: Breadcrumb[], showAll: boolean): Breadcrumb[] {
-  return showAll ? breadcrumbs : breadcrumbs.slice(-BREADCRUMB_PREVIEW);
+  const oldestFirst = [...breadcrumbs].reverse();
+  return showAll ? oldestFirst : oldestFirst.slice(-BREADCRUMB_PREVIEW);
 }
 
 /** The event's level from the raw payload; ingest stores "error" when the SDK sent none (backend/src/lib/ingest.ts:210). */

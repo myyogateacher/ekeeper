@@ -198,7 +198,9 @@ export function ErrorsPage() {
             <EmptyState title="No projects yet">You don't have access to any project yet. Ask an admin to add you.</EmptyState>
           )
         ) : rows.length === 0 ? (
-          filtersActive && view !== "all-open" ? (
+          // Any non-default param means "nothing matches", including search or severity on the default
+          // view; only the bare default view can truthfully say nothing is open.
+          filtersActive ? (
             <EmptyState title="No issues match these filters" action={<Link className="btn" to="/errors">Clear filters</Link>} />
           ) : (
             <EmptyState title="No open issues" action={<Link className="btn" to="/errors?status=closed&range=all">View closed issues</Link>}>
