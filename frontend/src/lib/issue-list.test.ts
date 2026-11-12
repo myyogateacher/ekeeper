@@ -15,6 +15,7 @@ import {
   remainingPageOffsets,
   savedViewHref,
   serializeListQuery,
+  showAllTimeHref,
   stepRow,
   toApiFilters,
   viewCounts,
@@ -231,4 +232,13 @@ test("an empty list says nothing is open only when no range or other filter narr
   assert.equal(emptyListKind({ ...DEFAULT_QUERY, range: "all", status: "closed" }), "filters");
   assert.equal(emptyListKind({ ...DEFAULT_QUERY, q: "x" }), "filters");
   assert.equal(emptyListKind({ ...DEFAULT_QUERY, projectId: "A", range: "all" }), "filters");
+});
+
+// A filtered list that is empty because every match is older than the 7 day default has a way out that keeps
+// the filters (an admin on ?projectId= was offered only Clear filters, which leaves the project).
+test("Show all time keeps every other filter, and is offered only while a range narrows", () => {
+  assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, projectId: "A" }), "/errors?projectId=A&range=all");
+  assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, status: "closed", q: "x", range: "30d" }), "/errors?status=closed&range=all&q=x");
+  assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, range: "custom", from: "2026-11-01", to: "2026-11-02" }), "/errors?range=all");
+  assert.equal(showAllTimeHref({ ...DEFAULT_QUERY, range: "all" }), null);
 });

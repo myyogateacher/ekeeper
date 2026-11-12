@@ -347,6 +347,15 @@ export function emptyListKind(query: ListQuery): "nothing-open" | "range-hides" 
   return query.range === "all" ? "nothing-open" : "range-hides";
 }
 
+/**
+ * The URL of the current list with the range widened to any time and every other filter kept, or null when the
+ * range already is any time. Offered by the empty states so a filtered list whose matches are all older than
+ * the range is not answered with only "Clear filters", which also drops the project or status filter.
+ */
+export function showAllTimeHref(query: ListQuery): string | null {
+  return query.range === "all" ? null : `/errors?${serializeListQuery({ ...query, range: "all", from: null, to: null })}`;
+}
+
 export interface KeyTarget {
   key: string;
   tagName: string;

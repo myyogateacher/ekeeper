@@ -24,6 +24,7 @@ import {
   matchSavedView,
   parseListQuery,
   serializeListQuery,
+  showAllTimeHref,
   stepRow,
   type ListQuery,
   type SortKey,
@@ -220,7 +221,7 @@ export function ErrorsPage() {
             <EmptyState title="No projects yet">You don't have access to any project yet. Ask an admin to add you.</EmptyState>
           )
         ) : rows.length === 0 ? (
-          <EmptyRows kind={emptyListKind(query)} range={query.range} />
+          <EmptyRows query={query} />
         ) : (
           <ul className="m-0 list-none p-0">
             {rows.map((row, index) => (
@@ -551,10 +552,9 @@ function ChipSelect({
   );
 }
 
-function EmptyRows({ kind, range }: { kind: ReturnType<typeof emptyListKind>; range: ListQuery["range"] }) {
-  if (kind === "filters") {
-    return <EmptyState title="No issues match these filters" action={<Link className="btn" to="/errors">Clear filters</Link>} />;
-  }
+function EmptyRows({ query }: { query: ListQuery }) {
+  const kind = emptyListKind(query);
+  const allTime = showAllTimeHref(query);
   const closed = <Link className="btn" to="/errors?status=closed&range=all">View closed issues</Link>;
   if (kind === "nothing-open") {
     return (
@@ -563,15 +563,30 @@ function EmptyRows({ kind, range }: { kind: ReturnType<typeof emptyListKind>; ra
       </EmptyState>
     );
   }
-  // The range is the only narrowing, so older open issues may exist: say what was searched, and offer the
-  // wider search first.
-  const searched = RANGE_PRESETS.find((preset) => preset.id === range)?.label.toLowerCase() ?? "the chosen range";
+  if (kind === "filters") {
+    // Any range but any-time can be what hides the matches, so widening it is offered first and keeps the
+    // other filters; Clear filters would also drop the project or status the user chose.
+    return (
+      <EmptyState
+        title="No issues match these filters"
+        action={
+          <span className="flex flex-wrap justify-center gap-2">
+            {allTime ? <Link className="btn btn-primary" to={allTime}>Show all time</Link> : null}
+            <Link className="btn" to="/errors">Clear filters</Link>
+          </span>
+        }
+      />
+    );
+  }
+  // The range is the only narrowing (so it is not any-time and allTime is set): older open issues may exist,
+  // so say what was searched and offer the wider search first.
+  const searched = RANGE_PRESETS.find((preset) => preset.id === query.range)?.label.toLowerCase() ?? "the chosen range";
   return (
     <EmptyState
       title={`No open issues seen in the ${searched}`}
       action={
         <span className="flex flex-wrap justify-center gap-2">
-          <Link className="btn btn-primary" to="/errors?range=all">Show all time</Link>
+          <Link className="btn btn-primary" to={allTime!}>Show all time</Link>
           {closed}
         </span>
       }
