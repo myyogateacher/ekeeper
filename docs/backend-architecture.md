@@ -93,7 +93,7 @@ The backend accepts:
 - envelope payloads
 
 Normalization converts incoming events into:
-- a stable group id
+- a stable group id: a hash of the exception type, normalized message and last frames, or, when the SDK sends an explicit `fingerprint`, that fingerprint joined with `:`. An explicit fingerprint is chosen by whoever holds the DSN and the group id is put into URLs, a GitHub label and an issue body, so it is kept verbatim only if it is at most 200 characters of letters, digits, space, `_`, `:` and `-` with no leading or trailing space; anything else becomes a 32 character hash (`explicitGroupId` in `ingest.ts`). Groups already in production use the safe shape and keep their ids. Narrowing the safe set would split groups from their status, assignee and GitHub link, which are keyed by group id
 - a normalized event title/message
 - tags, contexts, breadcrumbs, runtime metadata
 - raw payload preservation for drill-down views
