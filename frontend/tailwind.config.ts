@@ -33,9 +33,11 @@ export default {
     },
     extend: {
       fontFamily: {
-        // Inter when the machine has it, otherwise the system UI face. Self-hosting Inter needs a new
-        // dependency, which this change does not add (see the PR body).
-        sans: ["Inter", "ui-sans-serif", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
+        // "Inter Variable" is the family name @fontsource-variable/inter registers (imported once in main.tsx),
+        // not "Inter": a font-family of plain "Inter" would match only a copy installed on the viewer's machine
+        // and silently skip the self-hosted file. The system stack is the fallback while the file loads
+        // (font-display: swap) and for any glyph outside the shipped subsets.
+        sans: ["Inter Variable", "ui-sans-serif", "system-ui", "-apple-system", "Segoe UI", "sans-serif"],
         mono: ["ui-monospace", "SFMono-Regular", "Menlo", "monospace"],
       },
     },
