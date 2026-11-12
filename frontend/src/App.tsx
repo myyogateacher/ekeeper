@@ -2,6 +2,7 @@ import { useEffect, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { Navigate, Outlet, Route, Routes, useLocation, useNavigate } from "react-router-dom";
 import { AppShell } from "@/components/AppShell";
+import { RouteErrorBoundary } from "@/components/RouteErrorBoundary";
 import { api } from "@/lib/api";
 import { clearPathAfterLogin, peekPathAfterLogin, rememberPathForLogin } from "@/lib/after-login";
 import { ErrorDetailPage } from "@/pages/ErrorDetailPage";
@@ -42,7 +43,9 @@ function ProtectedLayout() {
         navigate("/login", { replace: true });
       }}
     >
-      <Outlet context={data} />
+      <RouteErrorBoundary title="This page couldn't be displayed">
+        <Outlet context={data} />
+      </RouteErrorBoundary>
     </AppShell>
   );
 }
@@ -96,7 +99,14 @@ export default function App() {
         <Route path="/" element={<Navigate to="/errors" replace />} />
         <Route path="/dashboard" element={<RedirectAfterLogin />} />
         <Route path="/errors" element={<ErrorsPage />} />
-        <Route path="/errors/:projectId/:groupId" element={<ErrorDetailPage />} />
+        <Route
+          path="/errors/:projectId/:groupId"
+          element={
+            <RouteErrorBoundary title="This issue couldn't be displayed">
+              <ErrorDetailPage />
+            </RouteErrorBoundary>
+          }
+        />
         {/* The old top level pages moved into Settings; their URLs stay working for bookmarks. */}
         <Route path="/projects" element={<Navigate to="/settings/projects" replace />} />
         <Route path="/users" element={<Navigate to="/settings/members" replace />} />

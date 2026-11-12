@@ -41,7 +41,19 @@ export function clearPathAfterLogin(): void {
   }
 }
 
-/** A path inside this app: starts with one slash, not "//host" (protocol-relative) or "/\host". */
+// Any origin works: it is only compared with itself to see whether a path stays on it.
+const PROBE_ORIGIN = "http://app.invalid";
+
+/**
+ * A path inside this app: starts with one slash and resolves to the same origin. The string checks refuse
+ * "//host" (protocol-relative) and "/\host" (browsers read the backslash as a slash). Control characters are
+ * refused outright, because URL parsing deletes tabs and newlines wherever they sit, so "/<tab>/host" is
+ * "//host" to a browser. The parse then confirms it from the browser's own rules rather than from a list of
+ * known tricks.
+ */
 export function isAppPath(path: string): boolean {
-  return path.startsWith("/") && !path.startsWith("//") && !path.startsWith("/\\");
+  if (!path.startsWith("/") || path.startsWith("//") || path.startsWith("/\\") || /[\u0000-\u001f\u007f]/.test(path)) {
+    return false;
+  }
+  return new URL(path, PROBE_ORIGIN).origin === PROBE_ORIGIN;
 }

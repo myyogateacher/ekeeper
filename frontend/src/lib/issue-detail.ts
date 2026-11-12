@@ -99,16 +99,26 @@ export function undoState(before: IssueState | undefined, after: IssueState): Is
   return before && before !== after ? before : null;
 }
 
-/** Raw fields may arrive as JSON text or as objects depending on the column; both read the same. */
-export function parseMaybeJson<T>(value: unknown, fallback: T): T {
-  if (typeof value === "string") {
-    try {
-      return JSON.parse(value) as T;
-    } catch {
-      return fallback;
-    }
+/** JSON text that parses to an object or an array. Scalars and null are not structure, so they give undefined. */
+export function parseJsonStructure(text: string): object | undefined {
+  try {
+    const parsed: unknown = JSON.parse(text);
+    return parsed !== null && typeof parsed === "object" ? parsed : undefined;
+  } catch {
+    // Not JSON text at all: the caller shows or ignores the original string.
+    return undefined;
   }
-  return value && typeof value === "object" ? (value as T) : fallback;
+}
+
+/**
+ * Raw fields may arrive as JSON text or as objects depending on the column; both read the same. The result is
+ * only returned when it has the shape the caller reads, which the `fallback` says: an array fallback accepts
+ * arrays, any other fallback accepts plain objects. JSON "null", "1", a string, or an array where an object
+ * was expected is the sender's junk, and handing it back made `user.id` throw on null and blank the page.
+ */
+export function parseMaybeJson<T>(value: unknown, fallback: T): T {
+  const structure = typeof value === "string" ? parseJsonStructure(value) : value !== null && typeof value === "object" ? value : undefined;
+  return structure !== undefined && Array.isArray(structure) === Array.isArray(fallback) ? (structure as T) : fallback;
 }
 
 export function exceptionParts(exceptionInput: unknown): { type: string; value: string; mechanism: UnknownRecord | null } {
@@ -130,6 +140,11 @@ export interface Frame {
   deobfuscated?: unknown;
 }
 
+/** Only object entries are frames; an SDK or a hostile sender can put null, numbers or strings in the list. */
+function realFrames(entries: unknown[]): Frame[] {
+  return entries.filter((entry): entry is Frame => entry !== null && typeof entry === "object" && !Array.isArray(entry));
+}
+
 /**
  * Frames with the crash site first. SDKs send frames outermost first, so the crash site is the last one
  * (backend/src/lib/issue-sync.ts:51); reading top down should start where it broke. The event's own
@@ -138,12 +153,12 @@ export interface Frame {
  */
 export function framesCrashFirst(stacktraceInput: unknown, exceptionInput: unknown): Frame[] {
   const stacktrace = parseMaybeJson<UnknownRecord | null>(stacktraceInput, null);
-  let frames = stacktrace && Array.isArray(stacktrace.frames) ? (stacktrace.frames as Frame[]) : null;
+  let frames = stacktrace && Array.isArray(stacktrace.frames) ? realFrames(stacktrace.frames) : null;
   if (!frames || frames.length === 0) {
     const exception = parseMaybeJson<UnknownRecord>(exceptionInput, {});
     const values = Array.isArray(exception.values) ? (exception.values as UnknownRecord[]) : [];
     const nested = (values[0] ?? exception).stacktrace as UnknownRecord | undefined;
-    frames = nested && Array.isArray(nested.frames) ? (nested.frames as Frame[]) : [];
+    frames = nested && Array.isArray(nested.frames) ? realFrames(nested.frames) : [];
   }
   return [...frames].reverse();
 }

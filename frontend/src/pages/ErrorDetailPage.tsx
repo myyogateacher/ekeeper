@@ -16,11 +16,13 @@ import {
   exceptionParts,
   framesCrashFirst,
   occurrenceStats,
+  parseJsonStructure,
   parseMaybeJson,
 } from "@/lib/issue-detail";
 import { canWriteProject } from "@/lib/permissions";
 import { formatAbsolute, formatDayTime, formatRelative } from "@/lib/time";
 import { pluralize } from "@/lib/plural";
+import { issuePath } from "@/lib/url";
 import { formatNumber } from "@/lib/utils";
 import { useMe } from "@/components/session";
 import { AssignMenu } from "@/components/AssignMenu";
@@ -256,7 +258,9 @@ function EventBar({
     link.click();
     URL.revokeObjectURL(url);
   };
-  const eventUrl = `${window.location.origin}/errors/${projectId}/${event.groupId}?event=${encodeURIComponent(event.eventId)}`;
+  // The page's own encoded path, not ids re-assembled into one: the ids in the route were decoded by the
+  // router, and the pathname the browser is already on is the form that provably opens this issue.
+  const eventUrl = `${window.location.origin}${window.location.pathname}?${new URLSearchParams({ event: event.eventId })}`;
 
   return (
     <div className="flex flex-wrap items-center gap-2 text-[13px]">
@@ -406,16 +410,23 @@ function Rail({
       {similar.length ? (
         <RailCard title="Similar issues">
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
-            {similar.map((group) => (
-              <li key={group.groupId} className="text-[13px]">
-                <Link className="block break-words hover:text-accent max-[720px]:min-h-11" to={`/errors/${projectId}/${group.groupId}`}>
-                  {group.message}
-                </Link>
-                <span className="text-xs text-muted">
-                  {formatNumber(group.events)} {pluralize(group.events, "event")} · last {formatRelative(group.lastSeen, Date.now())}
-                </span>
-              </li>
-            ))}
+            {similar.map((group) => {
+              const href = issuePath(projectId, group.groupId);
+              return (
+                <li key={group.groupId} className="text-[13px]">
+                  {href ? (
+                    <Link className="block break-words hover:text-accent max-[720px]:min-h-11" to={href}>
+                      {group.message}
+                    </Link>
+                  ) : (
+                    <span className="block break-words">{group.message}</span>
+                  )}
+                  <span className="text-xs text-muted">
+                    {formatNumber(group.events)} {pluralize(group.events, "event")} · last {formatRelative(group.lastSeen, Date.now())}
+                  </span>
+                </li>
+              );
+            })}
           </ul>
         </RailCard>
       ) : null}
@@ -467,11 +478,13 @@ function KeyValues({ record }: { record: UnknownRecord }) {
   );
 }
 
-/** SDK payloads nest JSON as text inside JSON; a string that parses to an object is pretty printed. */
+/**
+ * SDK payloads nest JSON as text inside JSON; text that parses to an object or array is pretty printed. Any
+ * other text, including "1" or "null", is shown as sent rather than as its parsed scalar.
+ */
 function formatValue(value: unknown): string {
-  const parsed = typeof value === "string" ? parseMaybeJson<unknown>(value, value) : value;
-  if (parsed && typeof parsed === "object") return JSON.stringify(parsed, null, 2);
-  return String(parsed);
+  const structure = typeof value === "string" ? parseJsonStructure(value) : value;
+  return structure !== null && typeof structure === "object" ? JSON.stringify(structure, null, 2) : String(value);
 }
 
 function text(value: unknown): string {

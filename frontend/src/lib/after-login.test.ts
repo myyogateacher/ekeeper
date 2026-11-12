@@ -13,6 +13,16 @@ test("only same-origin app paths are restored after login", () => {
   assert.equal(isAppPath("errors"), false);
 });
 
+// URL parsing deletes tabs and newlines wherever they sit, so "/\t/evil.example" is "//evil.example" to a
+// browser although it does not start with "//" as a string. A string prefix check alone let it through; the
+// parsed origin is the check that matches what the browser will do.
+test("a tab, newline or carriage return cannot smuggle a second slash past the check", () => {
+  for (const path of ["/\t/evil.example", "/\n/evil.example", "/\r/evil.example", "/\t\\evil.example", "/\u0000/evil.example"]) {
+    assert.equal(isAppPath(path), false, JSON.stringify(path));
+  }
+  assert.equal(isAppPath("/errors?x=a b"), true);
+});
+
 // sessionStorage is a browser global; node has none by default, so each test installs a plain Map behind
 // the same three calls the module makes.
 function withSessionStorage(initial: Record<string, string> = {}) {

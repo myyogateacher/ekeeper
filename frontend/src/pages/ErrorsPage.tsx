@@ -26,6 +26,7 @@ import {
   type SortKey,
 } from "@/lib/issue-list";
 import { splitTitle } from "@/lib/issue-detail";
+import { issuePath } from "@/lib/url";
 import { canWriteProject, isAdmin } from "@/lib/permissions";
 import { formatAbsolute, formatRelative } from "@/lib/time";
 import { pluralize } from "@/lib/plural";
@@ -287,28 +288,35 @@ function IssueRow({
   const workflow = useIssueWorkflow();
   const [type, message] = splitTitle(row.title);
   const level = (row.severity || "error").toLowerCase();
+  // Null for a group id no URL path can carry ("." or ".."): the row shows its title without a link and without
+  // write controls, since both would have to name the issue by that id.
+  const href = issuePath(row.projectId, row.groupId);
+  const writable = canWrite && href !== null;
+  // The text sits in its own span so the two line clamp clips the span, not the link: the link's vertical
+  // padding (the 44px phone target) is inside its overflow box, so clamping the link itself let a third line
+  // show through the padding.
+  const title = (
+    <span className="issue-title-text block truncate">
+      <b className="font-semibold">{type}</b>
+      {message ? `: ${message}` : ""}
+    </span>
+  );
 
   return (
     <li className="issue-grid group relative min-h-[52px] border-b border-line last:border-b-0 hover:bg-raised focus-within:bg-raised">
       <div className="relative flex min-w-0 flex-col gap-0.5 py-2 max-[720px]:pb-2 max-[720px]:pt-0">
         <div className="issue-line flex min-w-0 items-center gap-2">
           <SeverityDot level={level} className="issue-dot" />
-          <Link
-            ref={linkRef}
-            to={`/errors/${row.projectId}/${row.groupId}`}
-            className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none"
-          >
-            {/* The text sits in its own span so the two line clamp clips the span, not the link: the link's
-                vertical padding (the 44px phone target) is inside its overflow box, so clamping the link
-                itself let a third line show through the padding. */}
-            <span className="issue-title-text block truncate">
-              <b className="font-semibold">{type}</b>
-              {message ? `: ${message}` : ""}
-            </span>
-          </Link>
+          {href ? (
+            <Link ref={linkRef} to={href} className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none">
+              {title}
+            </Link>
+          ) : (
+            <span className="issue-title block min-w-0 text-fg">{title}</span>
+          )}
           {row.state === "reopened" ? <span className="tag bg-reopened/10 text-reopened">Reopened</span> : null}
           {isNewIssue(row, now) ? <span className="tag text-accent ring-1 ring-inset ring-accent">New</span> : null}
-          {canWrite && row.state !== "closed" ? (
+          {writable && row.state !== "closed" ? (
             <span className="absolute right-0 top-2 hidden bg-raised pl-3 group-focus-within:flex group-hover:flex max-[720px]:!hidden">
               <button
                 type="button"
@@ -346,7 +354,7 @@ function IssueRow({
       <span className="col-wide text-right tabular-nums text-muted">{formatNumber(row.count7d)}</span>
       <span className="col-wide text-right tabular-nums text-muted">{formatNumber(row.affectedUsers)}</span>
       <span>
-        {canWrite ? (
+        {writable ? (
           <AssignMenu
             variant="avatar"
             projectId={row.projectId}

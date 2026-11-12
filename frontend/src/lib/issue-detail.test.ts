@@ -5,8 +5,10 @@ import {
   breadcrumbPreview,
   eventLevel,
   eventNav,
+  exceptionParts,
   framesCrashFirst,
   occurrenceStats,
+  parseMaybeJson,
   splitTitle,
   statusActions,
   undoState,
@@ -128,4 +130,39 @@ test("Undo restores the state held before the change, whether that was open or r
 test("no Undo is offered when the state before is unknown or did not change", () => {
   assert.equal(undoState(undefined, "closed"), null);
   assert.equal(undoState("open", "open"), null);
+});
+
+// SDK payloads nest JSON as text, and the text is whatever the sender wrote. An event with "user":"null" parsed
+// to null, the rail read null.id, and with no error boundary the whole app went blank on that issue's page
+// (security review of PROD-10519). A parse result is only usable if it has the shape the caller reads, so
+// anything else is the caller's fallback, by identity.
+test("JSON text or a value that is not the object shape the caller reads gives the fallback", () => {
+  const fallback = {};
+  for (const input of ["null", "[]", "1", '"text"', "true", "not json", null, undefined, 5, [null], []]) {
+    assert.equal(parseMaybeJson<Record<string, unknown>>(input, fallback), fallback, String(input));
+  }
+  assert.deepEqual(parseMaybeJson('{"id":7}', {}), { id: 7 });
+  assert.deepEqual(parseMaybeJson({ id: 7 }, {}), { id: 7 });
+});
+
+test("a caller that expects an array gets arrays, and never an object", () => {
+  const fallback: unknown[] = [];
+  assert.deepEqual(parseMaybeJson("[1,2]", fallback), [1, 2]);
+  assert.equal(parseMaybeJson('{"a":1}', fallback), fallback);
+  assert.equal(parseMaybeJson("null", fallback), fallback);
+});
+
+test("a stack of null, scalar or array frames shows only the real frames, and never throws", () => {
+  const frames = '{"frames":[null,1,"x",[],{"function":"outer"},{"function":"crash"}]}';
+  assert.deepEqual(framesCrashFirst(frames, null), [{ function: "crash" }, { function: "outer" }]);
+  assert.deepEqual(framesCrashFirst("null", "null"), []);
+  assert.deepEqual(framesCrashFirst(null, { values: [null] }), []);
+  assert.deepEqual(framesCrashFirst(null, { values: [{ stacktrace: { frames: [null, { function: "f" }] } }] }), [{ function: "f" }]);
+});
+
+test("an exception or level that is JSON null reads as the defaults, never throws", () => {
+  assert.deepEqual(exceptionParts("null"), { type: "Error", value: "No exception message", mechanism: null });
+  assert.deepEqual(exceptionParts('{"values":[null]}'), { type: "Error", value: "No exception message", mechanism: null });
+  assert.equal(eventLevel("null"), "error");
+  assert.equal(eventLevel("[]"), "error");
 });
