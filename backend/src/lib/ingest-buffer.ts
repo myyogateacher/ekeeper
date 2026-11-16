@@ -122,6 +122,12 @@ async function insertSkippingRefusedRows(
   }
 }
 
+// What an ingest log line records about a failure. The message of an error raised while processing a payload can quote
+// the payload (JSON.parse and ClickHouse both do), and payloads hold user emails, so only the class name is logged.
+function errorName(error: unknown): string {
+  return error instanceof Error ? error.name : "non-Error thrown";
+}
+
 async function insertEvents(projectId: string, payloads: Record<string, unknown>[]) {
   if (payloads.length === 0) {
     return;
@@ -130,7 +136,7 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
   // Normalised one payload at a time, and a payload that throws is dropped here instead of aborting the batch. This
   // used to be `payloads.map(normalizeEvent)`, so one bad event failed every good event of its project and then the
   // whole bucket (PROD-10530). Dropping is safe, unlike retrying: normalizeEvent is deterministic, so the same
-  // payload would fail on every flush until the bucket expires. Only the project id and the error are logged, never the
+  // payload would fail on every flush until the bucket expires. Only the project id and the error name are logged, never the
   // payload, which can hold user emails. The only JSON shape known to make normalizeEvent throw is a value nested past the
   // stack (about 40,000 levels on bun 1.4.2: JSON.stringify for rawPayload throws a RangeError), which the gate in
   // enqueueBufferedIngest refuses with a 400, so it never reaches Redis. So this is the backstop for a future normalizeEvent
@@ -144,7 +150,7 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
       rejectedCount += 1;
       console.error("[ingest-buffer] dropped a payload that failed normalisation", {
         projectId,
-        reason: String(error),
+        reason: errorName(error),
       });
     }
   }
@@ -354,7 +360,7 @@ function refusalReason(projectId: string, payload: Record<string, unknown>): str
     normalizeEvent(projectId, payload);
     return null;
   } catch (error) {
-    return String(error);
+    return errorName(error);
   }
 }
 
@@ -367,7 +373,8 @@ export async function enqueueBufferedIngest(projectId: string, payloads: Record<
   // normalizeEvent cannot process used to be accepted with a 200 and then stall its bucket at flush (PROD-10530). Refusing
   // it here with a 400 tells the sender its body was refused, instead of acknowledging an event that is dropped five
   // minutes later, and keeps it out of Redis. The cost is a second normalizeEvent per event on the request path. It is linear
-  // in the body size: the length caps in ingest.ts bound only the quadratic regex steps, and the app sets no body cap.
+  // in the body size: the length caps in ingest.ts bound only the quadratic regex steps, and the ingest router caps the body at
+  // INGEST_MAX_BODY_BYTES (PROD-10581), which bounds this loop to about 0.8 s for the largest accepted body of crafted text.
   // Measured on bun 1.4.2: about 200 ms for a 62 MB body of one million breadcrumbs, as much again as the 200 ms already
   // spent parsing that body and stringifying it for Redis. The buffer still holds raw payloads: buckets already in Redis at
   // deploy time do, and a new stored shape would need a reader for both. All payloads are checked before any is buffered, so
@@ -432,7 +439,7 @@ export async function flushBufferedIngest() {
       } catch (error) {
         console.error("[ingest-buffer] bucket flush failed", {
           redisKey: key,
-          error,
+          error: errorName(error),
         });
       }
     }
