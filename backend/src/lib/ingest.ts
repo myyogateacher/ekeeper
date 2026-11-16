@@ -233,14 +233,54 @@ function extractStacktrace(exceptionValue: Record<string, unknown>): Record<stri
   return (first.stacktrace as Record<string, unknown>) ?? null;
 }
 
+// An explicit fingerprint (`fingerprint: [...]` in the payload) names its own group, and anyone holding a public
+// DSN chooses it. The group id is the fingerprint, and it is then put into URLs (the frontend path, the link in a
+// GitHub issue body), a GitHub label, and a one-line marker in that body, so a fingerprint of "probe/../<real id>"
+// steered a request to a different real issue (PROD-10529, defect register 8). The id is kept verbatim only when
+// it cannot be structural in any of those places, and is otherwise a hash.
+//
+// The set is an allowlist, not a denylist of known bad characters, so a new place that puts the id somewhere
+// special does not have to be remembered here. It is as wide as it is because production already has explicit
+// groups with these characters, and the group id keys issue_workflows (status, assignee) and
+// error_group_github_issues in SQLite and the events table's sort key: changing one of those ids splits the
+// group from its whole history. 9 of production's 200 busiest groups over 30 days (24% of the events, read
+// from the ekeeper top_issues tool on 2026-11-13 for the PROD-10537 plan) use an explicit fingerprint, ids such as
+// `Zoom Meeting-Join Stalled:connecting` and `booking-failed:schedule_session_v1:400:TEACHER_PROFILE`, and every
+// one of them stays byte for byte (ingest.test.ts lists all 9). Narrowing this set changes ids that exist;
+// widening it changes none.
+//
+// Allowed: letters, digits, `_`, `-`, `:` (every multi-part fingerprint has one, from the join below), and an
+// inner space (4 of the 9 have one; a browser encodes it as %20). Refused, with the reason a URL parser gives:
+// leading or trailing space (trimmed, so `abc ` is the group `abc`), `/` and `\` (split the path), `.` (`..`
+// segments collapse, and encodeURIComponent("..") is still ".."; refusing every dot keeps the rule one class and no
+// production id has one), `?` and `#` (end the path), `%` (looks already encoded, and a double decode turns %2F
+// into `/`), control characters (a parser deletes tab and newline, and a newline also ends the marker line in the
+// issue body), the backtick (closes the code span around the marker) and the comma (splits GitHub's label filter),
+// anything non-ASCII, and anything over 200 characters (the id becomes a sort key prefix and two SQLite keys).
+const MAX_VERBATIM_GROUP_ID = 200;
+const VERBATIM_GROUP_ID_CHARS = /^[A-Za-z0-9 _:-]+$/;
+
+// The length is tested before the regex so a crafted fingerprint costs a bounded amount of work (defect register
+// 79). The hash keeps the shape of a computed group id (32 hex characters, below), which the fingerprint marker in
+// issue-sync.ts accepts, and the `explicit:` prefix keeps a fingerprint whose text equals some computed
+// "Type|value|frames" string out of that computed group. Not the same as hashString on the bare text for that reason.
+export function explicitGroupId(parts: string[]): string {
+  const joined = parts.join(":");
+  const verbatim =
+    joined.length <= MAX_VERBATIM_GROUP_ID && VERBATIM_GROUP_ID_CHARS.test(joined) && joined === joined.trim();
+  return verbatim ? joined : hashString(`explicit:${joined}`).slice(0, 32);
+}
+
 export function computeGroupFingerprint(payload: Record<string, unknown>): string {
   const explicitFingerprint = Array.isArray(payload.fingerprint)
     ? payload.fingerprint.filter((item): item is string => typeof item === "string")
     : [];
 
   if (explicitFingerprint.length > 0) {
-    // Stored as the group id and fingerprint columns, so it must be well-formed (see safeString).
-    return explicitFingerprint.join(":").toWellFormed();
+    // Stored as the group id and fingerprint columns, so it must be well-formed (see safeString). explicitGroupId
+    // returns the joined fingerprint only when it is plain ASCII from its allowlist, else a 32 hex hash, so a lone
+    // surrogate can never reach those columns from here.
+    return explicitGroupId(explicitFingerprint);
   }
 
   const exceptionValues = Array.isArray((payload.exception as Record<string, unknown> | undefined)?.values)

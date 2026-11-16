@@ -18,6 +18,6 @@
     "build": "node ./frontend/node_modules/typescript/bin/tsc --noEmit -p frontend/tsconfig.json && cd frontend && node ./node_modules/vite/bin/vite.js build && cd .. && bun run --cwd backend build",
     "typecheck": "node ./frontend/node_modules/typescript/bin/tsc --noEmit -p frontend/tsconfig.json && bun run --cwd backend typecheck",
     "migrate": "bun run --cwd backend migrate",
-    "test": "bun run --cwd backend test"
+    "test": "bun run --cwd backend test && bun run --cwd frontend test"
   }
 }

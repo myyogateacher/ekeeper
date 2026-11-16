@@ -77,7 +77,13 @@ const webException = (frames: unknown[]) => ({ values: [{ type: "ZoomMeetingJoin
 
 const releaseWithMap = `rel_map_${suffix}`;
 const releaseWithoutMap = `rel_nomap_${suffix}`;
-const ids = { homeA: `e_home_a_${suffix}`, zoomB: `e_zoom_b_${suffix}`, otherKeyC: `e_otherkey_c_${suffix}`, longerValueD: `e_longer_d_${suffix}`, dotKeyE: `e_dot_e_${suffix}`, otherProjectF: `e_other_f_${suffix}`, mapped: `e_mapped_${suffix}`, unmapped: `e_unmapped_${suffix}` };
+const releaseWithoutContent = `rel_nocontent_${suffix}`;
+const ids = { homeA: `e_home_a_${suffix}`, zoomB: `e_zoom_b_${suffix}`, otherKeyC: `e_otherkey_c_${suffix}`, longerValueD: `e_longer_d_${suffix}`, dotKeyE: `e_dot_e_${suffix}`, otherProjectF: `e_other_f_${suffix}`, mapped: `e_mapped_${suffix}`, unmapped: `e_unmapped_${suffix}`, noContent: `e_nocontent_${suffix}`, poison: `e_poison_${suffix}` };
+
+// What an SDK can leave on a frame that source mapping must not carry over: lines of the minified file.
+const minifiedLines = { pre_context: ["minified before"], context_line: "minified line", post_context: ["minified after"] };
+// The poison event (defect register 92): a frame, an exception value and a stacktrace that are not objects.
+const poisonFrames = [null, 5, "x", webFrames[0]];
 
 const rows = [
   eventRow(projectWeb, { event_id: ids.homeA, fingerprint: ["g1"], message: "boom home", tags: { app: "web_home" } }),
@@ -88,6 +94,8 @@ const rows = [
   eventRow(projectOther, { event_id: ids.otherProjectF, fingerprint: ["g1"], message: "boom home", tags: { app: "web_home" } }),
   eventRow(projectWeb, { event_id: ids.mapped, fingerprint: ["g3"], release: releaseWithMap, exception: webException(webFrames) }),
   eventRow(projectWeb, { event_id: ids.unmapped, fingerprint: ["g4"], release: releaseWithoutMap, exception: webException(webFrames) }),
+  eventRow(projectWeb, { event_id: ids.noContent, fingerprint: ["g5"], release: releaseWithoutContent, exception: webException([{ ...webFrames[0], ...minifiedLines }, ...webFrames.slice(1)]) }),
+  eventRow(projectWeb, { event_id: ids.poison, fingerprint: ["g6"], release: releaseWithMap, exception: { values: [null, { type: "Poison", value: "p", stacktrace: { frames: poisonFrames } }] } }),
 ];
 
 beforeAll(() => {
@@ -101,9 +109,16 @@ beforeAll(() => {
 // SQLite side of deobfuscateEvent: the project row and one uploaded source map for releaseWithMap.
 run(`INSERT INTO projects (id, name, slug, environment, active, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
   [projectWeb, `Web ${suffix}`, `web-${suffix}`, "production", 1, now, now]);
+const joinSource = Array.from({ length: 20 }, (_, index) => `// join.ts line ${index + 1}`);
+joinSource[11] = "    await joinMeeting(token);";
+const frameworkSource = "node_modules/@redux-saga/core/dist/redux-saga-core.esm.js";
 const generator = new SourceMapGenerator({ file: "index-DoLlnhss.js" });
 // colno 17780 is 1-based, deobfuscateEvent looks up column 17779.
 generator.addMapping({ generated: { line: 3, column: 17779 }, source: "src/zoom/join.ts", original: { line: 12, column: 4 }, name: "joinMeeting" });
+// The second entry-chunk frame (colno 17186) maps into a dependency: this is how a bundler lists one.
+generator.addMapping({ generated: { line: 3, column: 17185 }, source: `../../../${frameworkSource}`, original: { line: 5, column: 2 }, name: "put" });
+generator.setSourceContent("src/zoom/join.ts", joinSource.join("\n"));
+generator.setSourceContent(`../../../${frameworkSource}`, "l1\nl2\nl3\nl4\nl5\nl6");
 const artifact = saveMinimapArtifact({
   org: config.EKEEPER_ORG,
   projectId: projectWeb,
@@ -112,10 +127,23 @@ const artifact = saveMinimapArtifact({
   artifactName: "~/web-zoom/assets/index-DoLlnhss.js.map",
   buffer: Buffer.from(generator.toString()),
 });
+// The same mapping with no sourcesContent, which is what a build that strips it uploads.
+const bareGenerator = new SourceMapGenerator({ file: "index-DoLlnhss.js" });
+bareGenerator.addMapping({ generated: { line: 3, column: 17779 }, source: "src/zoom/join.ts", original: { line: 12, column: 4 }, name: "joinMeeting" });
+const bareArtifact = saveMinimapArtifact({
+  org: config.EKEEPER_ORG,
+  projectId: projectWeb,
+  project: `web-${suffix}`,
+  release: releaseWithoutContent,
+  artifactName: "~/web-zoom/assets/index-DoLlnhss.js.map",
+  buffer: Buffer.from(bareGenerator.toString()),
+});
 
 afterAll(() => {
   shadowTables = "";
-  if (existsSync(artifact.filePath)) rmSync(artifact.filePath, { force: true });
+  for (const stored of [artifact, bareArtifact]) {
+    if (existsSync(stored.filePath)) rmSync(stored.filePath, { force: true });
+  }
   run(`DELETE FROM minimap_artifacts WHERE project_id = ?`, [projectWeb]);
   run(`DELETE FROM projects WHERE id = ?`, [projectWeb]);
 });
@@ -226,6 +254,48 @@ describe("get_event stack frames", () => {
       expect(result[0]).toMatchObject({ filename: "src/zoom/join.ts", function: "joinMeeting", lineno: 12, colno: 5, deobfuscated: true, compiledFilename: webFrames[0]!.filename });
       expect(result[2]).toEqual(webFrames[2]!);
     }
+  });
+
+  test("a mapped frame carries the source lines around its original line, with the crash line as context_line", async () => {
+    const { stacktraceFrames, exceptionFrames } = await frames(ids.mapped);
+
+    for (const result of [stacktraceFrames, exceptionFrames]) {
+      expect(result[0]).toMatchObject({
+        context_line: "    await joinMeeting(token);",
+        pre_context: ["// join.ts line 9", "// join.ts line 10", "// join.ts line 11"],
+        post_context: ["// join.ts line 13", "// join.ts line 14", "// join.ts line 15"],
+      });
+    }
+  });
+
+  test("a frame mapped into node_modules is framework code with its package, and an app frame is not touched", async () => {
+    const { stacktraceFrames, exceptionFrames } = await frames(ids.mapped);
+
+    for (const result of [stacktraceFrames, exceptionFrames]) {
+      expect(result[1]).toMatchObject({ filename: `../../../${frameworkSource}`, in_app: false, package: "@redux-saga/core", deobfuscated: true });
+      expect(result[0]!.in_app).toBeUndefined();
+      expect(result[0]!.package).toBeUndefined();
+    }
+  });
+
+  test("a map without sourcesContent still maps the frame, with no source lines, and drops the SDK's minified ones", async () => {
+    const { stacktraceFrames, exceptionFrames } = await frames(ids.noContent);
+
+    for (const result of [stacktraceFrames, exceptionFrames]) {
+      expect(result[0]).toMatchObject({ filename: "src/zoom/join.ts", lineno: 12, deobfuscated: true });
+      expect(result[0]).not.toHaveProperty("context_line");
+      expect(result[0]).not.toHaveProperty("pre_context");
+      expect(result[0]).not.toHaveProperty("post_context");
+    }
+  });
+
+  test("a frame, an exception value and a stacktrace that are not objects pass through without a throw, next to a mapped frame", async () => {
+    const { event } = await callTool<{ event: { exception: { values: unknown[] } } }>("get_event", { event_id: ids.poison });
+
+    expect(event.exception.values[0]).toBeNull();
+    const frames = (event.exception.values[1] as { stacktrace: { frames: unknown[] } }).stacktrace.frames;
+    expect(frames.slice(0, 3)).toEqual([null, 5, "x"]);
+    expect(frames[3]).toMatchObject({ filename: "src/zoom/join.ts", deobfuscated: true, context_line: "    await joinMeeting(token);" });
   });
 
   test("returns the stored frames unchanged when no source map exists for the release", async () => {

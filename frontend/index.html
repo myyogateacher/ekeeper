@@ -1,11 +1,27 @@
 <!doctype html>
-<html lang="en">
+<html lang="en" data-theme="dark">
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>eKeeper</title>
+    <script>
+      // Runs before the stylesheet so the first paint is the right theme. A stored choice wins, otherwise
+      // the system preference. The key is also in src/lib/theme.ts; change both together.
+      (function () {
+        var theme = null;
+        try {
+          theme = localStorage.getItem("ekeeper:theme");
+        } catch (error) {
+          console.warn("Could not read the theme choice:", error);
+        }
+        if (theme !== "light" && theme !== "dark") {
+          theme = window.matchMedia && window.matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
+        }
+        document.documentElement.dataset.theme = theme;
+      })();
+    </script>
   </head>
-  <body class="bg-ink">
+  <body>
     <div id="root"></div>
     <script type="module" src="/src/main.tsx"></script>
   </body>

@@ -76,6 +76,8 @@ These routes cover:
 - user and project administration
 - dashboard summaries
 - issue listing and issue detail
+- `POST /api/errors/affected-users`: distinct users over up to 500 listed (project, group) pairs, for the issues list header total. A body over about 2.1 MB is a 413 before it is parsed (`bodyLimit`; the id caps count characters, and a control character is 6 bytes of JSON). Every project named must be readable by the caller, or the request is a 403 before any query. The pairs travel in the SQL text as base64 JSON, not as a URL query parameter, because ClickHouse refuses a parameter over 128 KiB (500 pairs of 200 character ids failed that way); a big set is split into several constants under 1 MiB each (`pair-chunks.ts`), which ClickHouse can fold, and ORed in one query
+- `GET /api/projects/:projectId/ingest-status`: the project's newest event time, the release of that newest event, and how many `.map` files are uploaded for exactly that release, for the Settings verify step. Same read access as the project itself
 - workflow updates
 - minimap management
 - server settings
@@ -91,7 +93,7 @@ The backend accepts:
 - envelope payloads
 
 Normalization converts incoming events into:
-- a stable group id
+- a stable group id: a hash of the exception type, normalized message and last frames, or, when the SDK sends an explicit `fingerprint`, that fingerprint joined with `:`. An explicit fingerprint is chosen by whoever holds the DSN and the group id is put into URLs, a GitHub label and an issue body, so it is kept verbatim only if it is at most 200 characters of letters, digits, space, `_`, `:` and `-` with no leading or trailing space; anything else becomes a 32 character hash (`explicitGroupId` in `ingest.ts`). Groups already in production use the safe shape and keep their ids. Narrowing the safe set would split groups from their status, assignee and GitHub link, which are keyed by group id
 - a normalized event title/message
 - tags, contexts, breadcrumbs, runtime metadata
 - raw payload preservation for drill-down views
@@ -119,11 +121,25 @@ When issue detail is requested:
 2. it reads the event release from the stored payload
 3. it finds uploaded source maps for the matching eKeeper project and release
 4. it rewrites stack frames to original source positions where mappings exist
-5. it returns the enriched event while preserving the raw payload
+5. it adds `pre_context`, `context_line` and `post_context` (3 lines each side, each cut at 300 characters) from the map's `sourcesContent`, to at most 50 frames per event in all: one budget shared by the top level `stacktrace` and every `exception.values[]` stack, spent on the top level stack first, then `values[0]`, `values[1]` and so on, each from its crash end (an event can hold any number of stacks, and each source is split into lines once per call); a map without it leaves the frame with no source lines, and any lines the SDK sent on a mapped frame are dropped because they describe the minified file
+6. it marks a frame whose filename, after mapping, has a `node_modules` path segment as `in_app: false` with the npm `package`; this runs for every event, including ones with no release or no maps. The browser SDK sets `in_app: true` on every frame, so the path is the only evidence
+7. it returns the enriched event while preserving the raw payload
 
 This keeps ingest fast and makes source map uploads retroactively useful for older events.
 
-The MCP `get_event` tool calls the same `deobfuscateEvent`, so it returns the same readable frames as the UI.
+The rules for steps 5 and 6 live in `backend/src/lib/stack-frames.ts` as pure helpers; the frontend reads `in_app` and `package` as given and does not re-derive them. Every frame is untrusted JSON from a public DSN, so a frame, an exception value or a stacktrace that is not an object passes through unchanged.
+
+The MCP `get_event` tool calls the same `deobfuscateEvent`, so it returns the same readable frames, source lines and `in_app` flags as the UI.
+
+## Issue Detail Response
+
+`GET /api/projects/:projectId/errors/:groupId[?eventId=]` answers `{ error, stats, navigation, duplicateGroups }`; the types are in `shared/src/contracts.ts`. It used to carry every occurrence of the group, with no limit, on each load and each switch between events. It no longer does:
+- `stats`: total, rolling 24 hour and 7 day counts, first and last seen, and `hourly24h`, 24 rolling hours oldest first (`hourly24h[i]` is `[now - (24 - i)h, now - (23 - i)h)`, the last open ended upward). All of it comes from one query, so one ClickHouse `now()`, and the chart sums to `events24h`. Hours are measured against `now('UTC')`, never the app clock or the server time zone
+- `navigation`: the shown event's neighbours, the group's newest and oldest event ids, and its position counted from the newest. Events order by `(timestamp, event_id)`, the table's sort key order, so two events in the same millisecond still have a defined neighbour. It is `null` exactly when `error` is `null`
+- `error.affectedUsers`: distinct non-empty `user_id` over the whole group, the same expression as the issues list (`AFFECTED_USERS_SQL` in `routes/api.ts`)
+- `error.closedAt`: when the issue was closed, from `issue_workflows.closed_at`; `null` unless closed. A new event reopens a closed issue and clears it (`ingest-buffer.ts`)
+
+Every read is a range over the sort key prefix `(project_id, group_id)`, so none scans another group's rows. Times added here are ISO 8601 UTC with `Z`; `error.timestamp` and the similar issues times keep ClickHouse's zoneless UTC digits.
 
 ## Migration Strategy
 

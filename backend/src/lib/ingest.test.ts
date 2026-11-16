@@ -2,6 +2,7 @@ import { describe, expect, test } from "bun:test";
 import type { NormalizedIngestEvent } from "@ekeeper/shared";
 import {
   computeGroupFingerprint,
+  explicitGroupId,
   normalizeEvent,
   normalizeExceptionValue,
   normalizeTimestamp,
@@ -492,13 +493,16 @@ describe("ingest helpers", () => {
   });
 
   // The fingerprint hash was already computed from UTF-8 bytes, which encode a lone surrogate as U+FFFD, so cleaning the
-  // text first changes no hash. An explicit fingerprint is stored as the group id itself, and an event carrying a lone
-  // surrogate there was refused by ClickHouse, so no stored group can split.
+  // text first changes no hash. An explicit fingerprint with a lone surrogate is outside the explicitGroupId allowlist
+  // (PROD-10529) and becomes a hash of the same UTF-8 bytes, so it and its U+FFFD form share one well-formed id; an
+  // event carrying a lone surrogate there was refused by ClickHouse before, so no stored group can split.
   test("the group fingerprint is the same for a lone surrogate and for the U+FFFD it is replaced with", () => {
     const fingerprintOf = (value: string) => computeGroupFingerprint(exceptionWith({ type: "Error", value }));
 
     expect(fingerprintOf(loneSurrogate)).toBe(fingerprintOf("a\ufffdb"));
-    expect(computeGroupFingerprint({ fingerprint: [loneSurrogate] })).toBe("a\ufffdb");
+    const explicitId = computeGroupFingerprint({ fingerprint: [loneSurrogate] });
+    expect(explicitId).toBe(computeGroupFingerprint({ fingerprint: ["a\ufffdb"] }));
+    expect(explicitId).toMatch(/^[0-9a-f]{32}$/);
   });
 
   test("parse envelope extracts event items", () => {
@@ -509,5 +513,116 @@ describe("ingest helpers", () => {
     ].join("\n");
 
     expect(parseEnvelope(raw)).toHaveLength(1);
+  });
+});
+
+// PROD-10529. An explicit fingerprint is the group id, chosen by whoever holds the DSN, and the id reaches URLs, a
+// GitHub label and a marker line. A group id that already exists must not change (it keys issue_workflows and
+// error_group_github_issues), so the first table is the real ids and the second the ones that must be hashed.
+describe("explicit fingerprints as group ids", () => {
+  // The 9 explicit group ids among production's 200 busiest over 30 days, read from the ekeeper top_issues tool on
+  // 2026-11-13 and listed in the PROD-10537 plan. Each is a fingerprint joined with ":".
+  const productionIds = [
+    "Zoom Meeting-Join Stalled:connecting",
+    "Zoom Meeting-Join Stalled:join",
+    "Zoom Meeting-Signature Error:signature",
+    "Zoom Meeting-Join Error:join",
+    "booking-failed:schedule_session_v1:400:DASHBOARD_RECOMMENDED_TEACHERS",
+    "booking-failed:schedule_session_v1:400:TEACHER_PROFILE",
+    "booking-failed:book_multiple_group_session_v2:400:none",
+    "workflow-failed:joining:join_state:401",
+    "workflow-failed:onboarding:otp_send:400",
+  ];
+  const groupIdOf = (fingerprint: unknown) => computeGroupFingerprint({ fingerprint, exception: { values: [{ type: "Error", value: "x" }] } });
+  const HASH = /^[0-9a-f]{32}$/;
+
+  test.each(productionIds)("the production group id %p is unchanged, byte for byte", (id) => {
+    expect(groupIdOf([id])).toBe(id);
+  });
+
+  test("a multi-part fingerprint is joined with a colon and kept, so the Zoom group keeps its id", () => {
+    expect(groupIdOf(["Zoom Meeting-Join Stalled", "connecting"])).toBe("Zoom Meeting-Join Stalled:connecting");
+    expect(groupIdOf(["booking-failed", "schedule_session_v1", "400", "TEACHER_PROFILE"])).toBe("booking-failed:schedule_session_v1:400:TEACHER_PROFILE");
+  });
+
+  // The ids frontend/src/lib/url.test.ts uses to prove a group id cannot change which resource a request names.
+  const hostile = ["probe/../2f244f2d0248a5d02f2200f0495880eb", "a?b=c", "a#b", "a%2Fb", "a\\b", "../../x", "x/"];
+  test.each(hostile)("the hostile id %p becomes a 32 character hash", (id) => {
+    expect(groupIdOf([id])).toMatch(HASH);
+  });
+
+  test('an inner space is kept by design: "a b" stays verbatim (four production ids have one)', () => {
+    expect(groupIdOf(["a b"])).toBe("a b");
+  });
+
+  const refused: Array<[string, string[]]> = [
+    ["a single dot", ["."]],
+    ["two dots", [".."]],
+    ["a dot inside a name", ["a.b"]],
+    ["the empty string", [""]],
+    ["a leading space", [" a"]],
+    ["a trailing space", ["a "]],
+    ["a trailing space on the last part", ["a", "b "]],
+    ["a tab", ["a\tb"]],
+    ["a newline", ["a\nb"]],
+    ["a carriage return", ["a\rb"]],
+    ["non-ASCII", ["caf\u00e9"]],
+    ["an emoji", ["boom \u{1F4A5}"]],
+    ["a comma", ["a,b"]],
+    ["a backtick", ["a`b"]],
+    ["a percent sign", ["100%"]],
+    ["a plus sign", ["a+b"]],
+    ["201 characters", ["a".repeat(201)]],
+    ["201 characters across parts", ["a".repeat(100), "b".repeat(100)]],
+    ["a fingerprint marker break: a newline then a fake marker", ["x\n**Fingerprint:** `abc`"]],
+  ];
+  test.each(refused)("%s becomes a hash", (_name, parts) => {
+    expect(explicitGroupId(parts)).toMatch(HASH);
+  });
+
+  test("200 characters is kept, 201 is hashed: the cap is on the joined id", () => {
+    expect(groupIdOf(["a".repeat(200)])).toBe("a".repeat(200));
+    expect(groupIdOf(["a".repeat(100), "b".repeat(99)])).toBe(`${"a".repeat(100)}:${"b".repeat(99)}`);
+    expect(groupIdOf(["a".repeat(201)])).toMatch(HASH);
+  });
+
+  test("the same fingerprint always gives the same id, different fingerprints give different ids", () => {
+    expect(groupIdOf(["a/b"])).toBe(groupIdOf(["a/b"]));
+    expect(groupIdOf(["a/b"])).not.toBe(groupIdOf(["a/c"]));
+    expect(groupIdOf(["a/b", "c"])).toBe(groupIdOf(["a/b:c"]));
+  });
+
+  test("a hashed id is not the id a computed fingerprint of the same text would get", () => {
+    const text = "Error|x|";
+    const computed = computeGroupFingerprint({ exception: { values: [{ type: "Error", value: "x" }] } });
+
+    expect(groupIdOf([text])).toMatch(HASH);
+    expect(groupIdOf([text])).not.toBe(computed);
+  });
+
+  test("normalizeEvent stores the same id as group_id and fingerprint, so every reader of either sees the safe one", () => {
+    const event = normalizeEvent("p", { fingerprint: ["probe/../x"], exception: { values: [{ type: "Error", value: "x" }] } });
+
+    expect(event.groupId).toMatch(HASH);
+    expect(event.fingerprint).toBe(event.groupId);
+  });
+
+  test("a fingerprint that is not an array of strings is ignored as before: the group comes from the exception", () => {
+    const computed = computeGroupFingerprint({ exception: { values: [{ type: "Error", value: "x" }] } });
+
+    expect(groupIdOf("not-an-array")).toBe(computed);
+    expect(groupIdOf([])).toBe(computed);
+    expect(groupIdOf([1, null, {}])).toBe(computed);
+    expect(groupIdOf(["ok", 1])).toBe("ok");
+  });
+
+  // Defect register 79: a regex over a field a DSN holder controls needs a bound before it runs. The length check
+  // comes first, so a 2 MB fingerprint never reaches the regex.
+  test("a 2 MB fingerprint costs a bounded amount of work", () => {
+    const startedAt = performance.now();
+    const id = groupIdOf(["a".repeat(2_000_000)]);
+
+    expect(id).toMatch(HASH);
+    expect(performance.now() - startedAt).toBeLessThan(100);
   });
 });

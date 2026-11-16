@@ -73,7 +73,10 @@ type StoredEventRow = Record<string, unknown> & { project_id: string; raw_payloa
 // Deobfuscation happens on read, never at ingest (docs/backend-architecture.md, "Error Detail Deobfuscation"),
 // so a stored row holds the frames exactly as the SDK sent them. This calls the same deobfuscateEvent the UI detail route
 // calls (routes/api.ts, GET /projects/:projectId/errors/:groupId), so a source map uploaded later also
-// symbolicates older events here. With no matching map it hands back the stored frames unchanged. Either way
+// symbolicates older events here. With no matching map it hands back the stored frames, except that a frame
+// under node_modules is marked `in_app: false` with its `package` (the SDK marks every browser frame in app), and
+// a source mapped frame near the crash also carries `pre_context`, `context_line` and `post_context`, so an
+// MCP client reading `get_event` sees the same fields the UI does. Either way
 // `stacktrace` and `exception` come back as parsed objects, as the UI returns them, not the JSON strings
 // `SELECT *` yields. Callers pass only rows already filtered to the caller's project ids.
 function symbolicateStoredEvent(row: StoredEventRow): Record<string, unknown> {

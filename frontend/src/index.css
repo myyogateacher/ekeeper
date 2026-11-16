@@ -1,26 +1,19 @@
+@import "./theme/tokens.css";
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
 
-:root {
-  color: #e5eefb;
-  background:
-    radial-gradient(circle at top left, rgba(77, 208, 225, 0.18), transparent 34%),
-    radial-gradient(circle at top right, rgba(125, 110, 255, 0.12), transparent 32%),
-    linear-gradient(180deg, #0b1220 0%, #101a2e 45%, #0a1220 100%);
-  font-family:
-    "Inter", "Segoe UI", sans-serif;
-}
-
-* {
-  box-sizing: border-box;
+html {
+  background: rgb(var(--bg));
+  color: rgb(var(--fg));
 }
 
 body {
   margin: 0;
   min-width: 320px;
   min-height: 100vh;
-  color: #e5eefb;
+  @apply bg-bg font-sans text-sm text-fg antialiased;
 }
 
 a {
@@ -35,24 +28,170 @@ textarea {
   font: inherit;
 }
 
+/*
+ * Collapsed issue row: the list is narrower than 640px (a phone, or a tablet with the sidebar open), so only
+ * the title, the 24h count and the owner remain, and the title wraps to two lines with its tags below it, as
+ * IssuesPhone.dc.html draws. --title-pad (set in the 720px media block below) is the title link's vertical
+ * padding that makes it a 44px target on a phone; the dot is pushed down by the same amount so it stays
+ * level with the first line of text.
+ */
+@container (max-width: 640px) {
+  .issue-grid {
+    grid-template-columns: minmax(0, 1fr) auto var(--owner-col);
+    column-gap: 12px;
+    padding: 0 12px;
+  }
+
+  .issue-grid .col-wide {
+    display: none;
+  }
+
+  .issue-grid .unit {
+    display: inline;
+  }
+
+  .issue-grid .issue-line {
+    flex-wrap: wrap;
+    align-items: flex-start;
+  }
+
+  .issue-grid .issue-dot {
+    margin-top: calc(6px + var(--title-pad));
+  }
+
+  .issue-grid .issue-title {
+    flex: 1 1 calc(100% - 16px);
+  }
+
+  .issue-grid .issue-title-text {
+    display: -webkit-box;
+    -webkit-line-clamp: 2;
+    -webkit-box-orient: vertical;
+    white-space: normal;
+  }
+
+  .issue-grid .issue-line .tag {
+    margin-left: 16px;
+  }
+
+  .issue-grid .issue-line .tag + .tag {
+    margin-left: 0;
+  }
+
+  /* Wrapped meta reads as spaced words, not as a sentence with dots stranded at the line ends. */
+  .issue-grid .issue-sep {
+    display: none;
+  }
+
+  .issue-grid .issue-meta {
+    column-gap: 10px;
+  }
+}
+
+:focus-visible {
+  outline: 2px solid rgb(var(--accent));
+  outline-offset: 2px;
+}
+
 @layer components {
-  .glass-panel {
-    @apply rounded-3xl border border-white/10 bg-white/10 shadow-glass backdrop-blur-xl;
+  /* A bordered panel. Used by role (a section the eye should treat as one object), not on every block. */
+  .card {
+    @apply rounded-lg border border-line bg-surface;
+  }
+
+  .card-head {
+    @apply flex flex-wrap items-center gap-x-3 gap-y-1 border-b border-line px-4 py-3;
+  }
+
+  /* 32px controls on desktop, 44px under 720px (plan D13) so they stay usable as touch targets. */
+  .btn {
+    @apply inline-flex h-8 shrink-0 items-center justify-center gap-1.5 whitespace-nowrap rounded-md border border-line bg-surface px-3 text-[13px] font-medium text-fg transition-colors hover:bg-raised disabled:cursor-not-allowed disabled:opacity-50 max-[720px]:h-11 max-[720px]:min-w-11;
+  }
+
+  .btn-primary {
+    @apply border-transparent bg-accent text-accent-ink hover:bg-accent hover:brightness-110;
+  }
+
+  .btn-ghost {
+    @apply border-transparent bg-transparent text-muted hover:bg-raised hover:text-fg;
+  }
+
+  .btn-sm {
+    @apply h-7 px-2 text-xs max-[720px]:h-11;
+  }
+
+  .btn-icon {
+    @apply w-8 px-0 max-[720px]:w-11;
   }
 
   .input {
-    @apply w-full rounded-2xl border border-white/10 bg-slate-950/30 px-4 py-3 text-sm text-slate-100 placeholder:text-slate-400 focus:border-cyan-300/50 focus:outline-none;
+    @apply h-8 w-full rounded-md border border-line bg-surface px-2.5 text-[13px] text-fg placeholder:text-muted focus:border-accent focus:outline-none max-[720px]:h-11;
   }
 
-  .button-primary {
-    @apply inline-flex items-center justify-center rounded-2xl border border-cyan-300/30 bg-cyan-300/20 px-4 py-3 text-sm font-semibold text-cyan-50 transition hover:border-cyan-200/50 hover:bg-cyan-300/30;
+  .label {
+    @apply mb-1 block text-xs font-medium text-muted;
   }
 
-  .button-secondary {
-    @apply inline-flex items-center justify-center rounded-2xl border border-white/10 bg-white/5 px-4 py-3 text-sm font-semibold text-slate-100 transition hover:bg-white/10;
+  .chip {
+    @apply inline-flex h-7 shrink-0 items-center gap-1.5 whitespace-nowrap rounded-md border border-line px-2.5 text-xs font-medium text-muted max-[720px]:h-11;
   }
 
-  .table-shell {
-    @apply overflow-hidden rounded-3xl border border-white/10 bg-slate-950/20;
+  .tag {
+    @apply inline-flex h-5 shrink-0 items-center rounded px-1.5 text-xs font-medium;
+  }
+
+  .kbd {
+    @apply rounded border border-line bg-raised px-1 font-mono text-[11px] leading-4 text-muted;
+  }
+
+  .mono {
+    @apply font-mono text-[12.5px];
+  }
+
+  .page-title {
+    @apply m-0 text-xl font-semibold leading-7;
+  }
+
+  .muted {
+    @apply text-muted;
+  }
+
+  /*
+   * Issue list rows. The full grid needs about 408px of fixed columns, so it collapses on the width of the
+   * list itself (a container query), not the viewport: at a 768px viewport with the 220px sidebar open, a
+   * viewport rule would leave the title about 60px. Under 640px of list width only the title, the 24h
+   * count and the owner remain.
+   */
+  .issue-table {
+    container-type: inline-size;
+  }
+
+  .issue-grid {
+    --title-pad: 0px;
+    --owner-col: 40px;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) 64px 64px 64px var(--owner-col) 84px;
+    align-items: center;
+    column-gap: 16px;
+    padding: 0 16px;
+  }
+
+  .issue-grid .issue-title {
+    padding-block: var(--title-pad);
+  }
+
+  @media (max-width: 720px) {
+    .issue-grid {
+      --title-pad: 12px;
+      --owner-col: 44px;
+    }
+  }
+
+  .issue-grid .unit {
+    display: none;
+  }
+
+  .warn-box {
+    @apply flex items-start gap-2.5 rounded-md border border-warn-line bg-warn-bg px-3 py-2.5 text-[13px] text-fg;
   }
 }

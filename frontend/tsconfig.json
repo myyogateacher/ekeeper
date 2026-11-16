@@ -3,6 +3,8 @@
   "compilerOptions": {
     "baseUrl": ".",
     "jsx": "react-jsx",
+    "noEmit": true,
+    "allowImportingTsExtensions": true,
     "types": [
       "vite/client",
       "node"

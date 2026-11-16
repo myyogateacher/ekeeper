@@ -679,7 +679,9 @@ describeLive("flushBufferedIngest against a real ClickHouse", () => {
       format: "JSONEachRow",
     })).json()) as Array<Record<string, string>>;
     expect(stored[0].user_id).toBe("a\ufffdb");
-    expect(stored[0].group_id).toBe("a\ufffdb");
+    // The explicit fingerprint holds a character outside the explicitGroupId allowlist (PROD-10529), so the group id
+    // is its 32 hex hash rather than the cleaned text.
+    expect(stored[0].group_id).toMatch(/^[0-9a-f]{32}$/);
     for (const column of ["tags", "contexts", "exception", "stacktrace", "raw_payload"]) {
       expect(stored[0][column]).toContain("\\ud800");
     }
