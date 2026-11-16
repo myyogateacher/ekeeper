@@ -1,8 +1,10 @@
 /**
  * One path segment from a value that came from data (a project id, an issue group id, a user id). Ids are not
- * trusted to be tidy: a group id is the event's explicit fingerprint verbatim (backend/src/lib/ingest.ts:158),
- * so it can hold "/", "..", "?" or "#". Interpolated raw, "probe/../<real id>" made a request for a different
- * issue than the row the user clicked. encodeURIComponent keeps every such character inside the segment.
+ * trusted to be tidy: a group id is the event's explicit fingerprint verbatim only inside the allowlist of
+ * explicitGroupId (backend/src/lib/ingest.ts: at most 200 of letters, digits, space, "_", ":" and "-"), and a
+ * 32 hex hash otherwise, but groups stored before that rule can still hold "/", "..", "?" or "#". Interpolated
+ * raw, "probe/../<real id>" made a request for a different issue than the row the user clicked.
+ * encodeURIComponent keeps every such character inside the segment.
  *
  * "." and ".." are the one thing it cannot protect: URL parsers collapse those segments, and their %2e
  * spellings, before sending, so the request would name the parent resource. They are refused instead.

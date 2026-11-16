@@ -5,9 +5,10 @@ import { idsFromIssuePath, isAddressable, issuePath, path } from "./url.ts";
 
 const BASE = "http://localhost";
 
-// A group id is the event's explicit fingerprint verbatim (backend/src/lib/ingest.ts:158), chosen by whoever
-// holds the project's DSN. Security review of PROD-10519 closed a different real issue by clicking Close on a
-// row whose id was "probe/../<real group>": the unencoded id turned the request path into
+// A group id is the event's explicit fingerprint, chosen by whoever holds the project's DSN: verbatim only inside
+// the allowlist of explicitGroupId in backend/src/lib/ingest.ts, a 32 hex hash otherwise, so only groups stored
+// before that rule can hold these characters. Security review of PROD-10519 closed a different real issue by
+// clicking Close on a row whose id was "probe/../<real group>": the unencoded id turned the request path into
 // .../errors/probe/../<real>/workflow, which the URL parser collapses to the real group's. Every id has to
 // stay one path segment whatever characters it holds.
 const HOSTILE_IDS = ["probe/../2f244f2d0248a5d02f2200f0495880eb", "a?b=c", "a#b", "a%2Fb", "a\\b", "a b", "../../x", "x/"];

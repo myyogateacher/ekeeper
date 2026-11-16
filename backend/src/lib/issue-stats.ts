@@ -5,8 +5,8 @@ import type { EventNavigation, IssueStats } from "@ekeeper/shared";
 // string and a time is whatever the SQL selected. This file turns those rows into the contract in
 // shared/src/contracts.ts and holds every branch worth a table test, so nothing here touches I/O.
 
-// The chart has 24 bars, as the canvas draws and as the old client side chart counted
-// (frontend/src/lib/issue-detail.ts occurrenceStats, `new Array(24)`).
+// The chart has 24 bars, as the canvas draws and as the client side chart this replaced counted: that chart was built
+// in the browser from the list of every occurrence the detail response used to carry, and also used 24 buckets.
 export const HOURLY_BUCKETS = 24;
 
 // The totals and the 24 hourly counts come back as ONE row from ONE query, because ClickHouse reads `now()` once
