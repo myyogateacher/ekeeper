@@ -1,7 +1,9 @@
 import { Hono } from "hono";
+import type { Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { one } from "../db/sqlite";
 import { HttpError } from "../lib/http";
-import { parseEnvelope } from "../lib/ingest";
+import { INGEST_MAX_BODY_BYTES, parseEnvelope, parseUntrustedJson } from "../lib/ingest";
 import { enqueueBufferedIngest } from "../lib/ingest-buffer";
 
 interface ProjectKeyRow {
@@ -28,6 +30,34 @@ function resolveProject(publicKey: string, sentryProjectId?: string): ProjectKey
 }
 
 export const ingestRouter = new Hono();
+
+// Same 413 JSON shape as bodyTooLarge in routes/api.ts (affected-users), the house pattern for bodyLimit. This router is
+// public, so the cap is the first thing every request meets, before the project lookup and before any parse.
+ingestRouter.use(
+  "*",
+  bodyLimit({
+    maxSize: INGEST_MAX_BODY_BYTES,
+    onError: (ctx) => ctx.json({ message: "Request body too large" }, 413),
+  }),
+);
+
+// A chunked body past the limit makes this read throw the error bodyLimit raised, which hono/body-limit does not export, so
+// it is matched by name as in api.ts. Turned into an HttpError here so app.onError answers it without console.error: a
+// public sender could otherwise write a stack trace to the server log per request.
+async function readText(ctx: Context): Promise<string> {
+  try {
+    return await ctx.req.text();
+  } catch (error) {
+    if (error instanceof Error && error.name === "BodyLimitError") {
+      throw new HttpError(413, "Request body too large");
+    }
+    throw error;
+  }
+}
+
+async function readStorePayload(ctx: Context) {
+  return parseUntrustedJson(await readText(ctx)) as Record<string, unknown>;
+}
 
 async function handleStoreRequest(projectKey: string, sentryProjectId: string | undefined, payload: Record<string, unknown>) {
   const project = resolveProject(projectKey, sentryProjectId);
@@ -59,48 +89,48 @@ async function handleEnvelopeRequest(projectKey: string, sentryProjectId: string
 }
 
 ingestRouter.post("/:projectKey/store", async (ctx) => {
-  const payload = (await ctx.req.json()) as Record<string, unknown>;
+  const payload = await readStorePayload(ctx);
   return ctx.json(await handleStoreRequest(ctx.req.param("projectKey"), undefined, payload));
 });
 
 ingestRouter.post("/:projectKey/envelope", async (ctx) => {
-  const raw = await ctx.req.text();
+  const raw = await readText(ctx);
   return ctx.json(await handleEnvelopeRequest(ctx.req.param("projectKey"), undefined, raw));
 });
 
 ingestRouter.post("/:projectKey/store/", async (ctx) => {
-  const payload = (await ctx.req.json()) as Record<string, unknown>;
+  const payload = await readStorePayload(ctx);
   return ctx.json(await handleStoreRequest(ctx.req.param("projectKey"), undefined, payload));
 });
 
 ingestRouter.post("/:projectKey/envelope/", async (ctx) => {
-  const raw = await ctx.req.text();
+  const raw = await readText(ctx);
   return ctx.json(await handleEnvelopeRequest(ctx.req.param("projectKey"), undefined, raw));
 });
 
 ingestRouter.post("/:projectKey/api/:sentryProjectId/store", async (ctx) => {
-  const payload = (await ctx.req.json()) as Record<string, unknown>;
+  const payload = await readStorePayload(ctx);
   return ctx.json(
     await handleStoreRequest(ctx.req.param("projectKey"), ctx.req.param("sentryProjectId"), payload),
   );
 });
 
 ingestRouter.post("/:projectKey/api/:sentryProjectId/envelope", async (ctx) => {
-  const raw = await ctx.req.text();
+  const raw = await readText(ctx);
   return ctx.json(
     await handleEnvelopeRequest(ctx.req.param("projectKey"), ctx.req.param("sentryProjectId"), raw),
   );
 });
 
 ingestRouter.post("/:projectKey/api/:sentryProjectId/store/", async (ctx) => {
-  const payload = (await ctx.req.json()) as Record<string, unknown>;
+  const payload = await readStorePayload(ctx);
   return ctx.json(
     await handleStoreRequest(ctx.req.param("projectKey"), ctx.req.param("sentryProjectId"), payload),
   );
 });
 
 ingestRouter.post("/:projectKey/api/:sentryProjectId/envelope/", async (ctx) => {
-  const raw = await ctx.req.text();
+  const raw = await readText(ctx);
   return ctx.json(
     await handleEnvelopeRequest(ctx.req.param("projectKey"), ctx.req.param("sentryProjectId"), raw),
   );

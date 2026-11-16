@@ -2,12 +2,17 @@ import { describe, expect, test } from "bun:test";
 import type { NormalizedIngestEvent } from "@ekeeper/shared";
 import {
   computeGroupFingerprint,
+  exceedsJsonDepth,
   explicitGroupId,
+  INGEST_MAX_ENVELOPE_ITEMS,
+  INGEST_MAX_JSON_DEPTH,
   normalizeEvent,
   normalizeExceptionValue,
   normalizeTimestamp,
   parseEnvelope,
+  parseUntrustedJson,
 } from "./ingest";
+import { HttpError } from "./http";
 
 describe("ingest helpers", () => {
   test("normalizeExceptionValue strips pointer addresses and sorts brace contents", () => {
@@ -624,5 +629,101 @@ describe("explicit fingerprints as group ids", () => {
 
     expect(id).toMatch(HASH);
     expect(performance.now() - startedAt).toBeLessThan(100);
+  });
+});
+
+// PROD-10581. The ingest routes are public (the DSN is in every frontend bundle), and a body nested 45,000 levels cost about
+// 440 ms of event loop per 90 KB request, which a byte cap cannot bound. The scan has to answer before JSON.parse runs.
+describe("untrusted ingest JSON", () => {
+  const nested = (depth: number) => "[".repeat(depth) + "]".repeat(depth);
+
+  test("nesting is refused past the limit and accepted at it", () => {
+    expect(exceedsJsonDepth(nested(INGEST_MAX_JSON_DEPTH))).toBe(false);
+    expect(exceedsJsonDepth(nested(INGEST_MAX_JSON_DEPTH + 1))).toBe(true);
+  });
+
+  test("objects and arrays count toward the same depth", () => {
+    const mixed = '{"a":['.repeat(INGEST_MAX_JSON_DEPTH / 2 + 1);
+    expect(exceedsJsonDepth(mixed)).toBe(true);
+  });
+
+  test("a body that never closes its brackets is refused before it is parsed", () => {
+    expect(exceedsJsonDepth("[".repeat(45_000))).toBe(true);
+  });
+
+  test("brackets inside a string are not nesting", () => {
+    const text = JSON.stringify({ message: "[".repeat(INGEST_MAX_JSON_DEPTH * 10) + "{".repeat(100) });
+    expect(exceedsJsonDepth(text)).toBe(false);
+  });
+
+  // An escaped quote does not end the string, so the brackets after it are still text; an escaped backslash does not
+  // escape the quote that follows it, so the brackets after that are real nesting.
+  test("an escaped quote keeps the string open and an escaped backslash does not", () => {
+    const brackets = "[".repeat(INGEST_MAX_JSON_DEPTH + 1);
+    expect(exceedsJsonDepth(`{"a":"x\\"${brackets}"}`)).toBe(false);
+    expect(exceedsJsonDepth(`{"a":"x\\\\","b":${brackets}}`)).toBe(true);
+  });
+
+  test("a typical SDK event is far under the limit", () => {
+    const event = {
+      event_id: "e",
+      exception: { values: [{ type: "Error", stacktrace: { frames: [{ filename: "a.js", vars: { a: { b: { c: 1 } } } }] } }] },
+      breadcrumbs: { values: [{ category: "ui.click", data: { target: ["div", "span"] } }] },
+      contexts: { browser: { name: "Chrome" } },
+    };
+    expect(exceedsJsonDepth(JSON.stringify(event))).toBe(false);
+  });
+
+  test("parseUntrustedJson answers a 400 HttpError for deep nesting and for malformed JSON, and parses the rest", () => {
+    for (const bad of [nested(INGEST_MAX_JSON_DEPTH + 1), "{not json"]) {
+      let thrown: unknown;
+      try {
+        parseUntrustedJson(bad);
+      } catch (error) {
+        thrown = error;
+      }
+      expect(thrown).toBeInstanceOf(HttpError);
+      expect((thrown as HttpError).status).toBe(400);
+    }
+    expect(parseUntrustedJson('{"a":[1]}')).toEqual({ a: [1] });
+  });
+
+  const envelopeWithItems = (count: number) =>
+    [JSON.stringify({ event_id: "env_1" })]
+      .concat(Array.from({ length: count }, (_, i) => [JSON.stringify({ type: "event" }), JSON.stringify({ event_id: `e${i}` }), ""].join("\n")))
+      .join("\n");
+
+  test("an envelope with more items than the cap is refused with a 400 before its items are parsed", () => {
+    expect(parseEnvelope(envelopeWithItems(INGEST_MAX_ENVELOPE_ITEMS))).toHaveLength(INGEST_MAX_ENVELOPE_ITEMS);
+    expect(() => parseEnvelope(envelopeWithItems(INGEST_MAX_ENVELOPE_ITEMS + 1))).toThrow(HttpError);
+  });
+
+  test("an envelope item header nested past the limit is refused", () => {
+    const raw = [JSON.stringify({ event_id: "e" }), nested(INGEST_MAX_JSON_DEPTH + 1), "{}"].join("\n");
+    expect(() => parseEnvelope(raw)).toThrow(HttpError);
+  });
+
+  // One item of many short lines with a huge `length` passes the item, depth and body caps; re-joining the body
+  // after every line made it O(N^2) (80,000 lines took about 1.6 s, 1 MiB of them would take minutes).
+  test("an item of many short lines is read in linear time", () => {
+    const raw = "{}\n" + JSON.stringify({ type: "attachment", length: 999999999 }) + "\n" + "a\n".repeat(80_000);
+    const started = performance.now();
+    expect(parseEnvelope(raw)).toHaveLength(0);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  // The `length` header counts UTF-8 bytes. Counting UTF-16 units read past the end of an item with non-ASCII text,
+  // so the next item's header was joined into its body and the envelope was refused.
+  test("an item length in bytes ends a non-ASCII event exactly, so the next item still parses", () => {
+    const first = JSON.stringify({ event_id: "e1", message: "café ünïcode" });
+    const second = JSON.stringify({ event_id: "e2" });
+    const raw = [
+      "{}",
+      JSON.stringify({ type: "event", length: Buffer.byteLength(first) }),
+      first,
+      JSON.stringify({ type: "event", length: Buffer.byteLength(second) }),
+      second,
+    ].join("\n");
+    expect(parseEnvelope(raw).map((p) => p.event_id)).toEqual(["e1", "e2"]);
   });
 });

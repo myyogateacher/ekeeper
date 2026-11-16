@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { Breadcrumb, NormalizedIngestEvent } from "@ekeeper/shared";
+import { HttpError } from "./http";
 import { parseUserAgent, userAgentOf } from "./user-agent";
 
 function hashString(value: string): string {
@@ -368,10 +369,71 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
   };
 }
 
+// Largest request body an ingest route reads: 1 MiB, Sentry Relay's `max_event_size` default. Nothing sends more here:
+// no MYT app uses replayIntegration or addAttachment, and a browser SDK event with 100 breadcrumbs is tens of KB.
+// Without a cap Bun's 128 MB default applied, and normalizeEvent costs about 757 ms per MB of crafted text on the
+// request path (measured: 1,000 events, 11.0 MB, 7,964 ms of event loop before the 400). Enforced by the bodyLimit
+// middleware in routes/ingest.ts, from Content-Length or by counting a chunked body as it is read.
+export const INGEST_MAX_BODY_BYTES = 1024 * 1024;
+
+// Item lines an envelope may carry. A Sentry SDK sends one event per envelope plus at most a session or a client
+// report, so 10 leaves room for an SDK that adds items and is far below what one 1 MiB body could hold (about 30,000
+// empty items). Counts every item header, not only the event ones parseEnvelope keeps, since each costs a JSON.parse.
+export const INGEST_MAX_ENVELOPE_ITEMS = 10;
+
+// Deepest `{`/`[` nesting accepted in ingest JSON. Sentry SDKs cut their payloads at normalizeDepth 3 (default), so a
+// real event is under 10 even with its envelope headers. The cost it bounds is not size: a 90 KB body nested 45,000
+// levels took about 440 ms of event loop in JSON.parse and normalizeEvent, which the body cap cannot prevent.
+export const INGEST_MAX_JSON_DEPTH = 64;
+
+// Linear scan that answers whether `text` nests objects or arrays deeper than `maxDepth`, without parsing it: the
+// check has to run before JSON.parse, because the parse is the cost. Brackets inside a string are not nesting, and a
+// backslash escapes the next character in a string, so `"\\"` ends the string and `"\""` does not. Malformed
+// JSON is not judged here (JSON.parse rejects it); an unbalanced close bracket just lowers the depth counter.
+export function exceedsJsonDepth(text: string, maxDepth: number = INGEST_MAX_JSON_DEPTH): boolean {
+  let depth = 0;
+  let inString = false;
+  for (let i = 0; i < text.length; i += 1) {
+    const code = text.charCodeAt(i);
+    if (inString) {
+      if (code === 0x5c) {
+        i += 1;
+      } else if (code === 0x22) {
+        inString = false;
+      }
+    } else if (code === 0x22) {
+      inString = true;
+    } else if (code === 0x7b || code === 0x5b) {
+      depth += 1;
+      if (depth > maxDepth) {
+        return true;
+      }
+    } else if (code === 0x7d || code === 0x5d) {
+      depth -= 1;
+    }
+  }
+  return false;
+}
+
+// The one way ingest code parses a client-supplied JSON text. A SyntaxError would reach app.onError as a 500 whose logged
+// message quotes the payload, and the sender's malformed body is not a server fault, so both failures are a 400 with a
+// constant message.
+export function parseUntrustedJson(text: string): unknown {
+  if (exceedsJsonDepth(text)) {
+    throw new HttpError(400, "JSON is nested too deeply");
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new HttpError(400, "Request body must be JSON");
+  }
+}
+
 export function parseEnvelope(raw: string): Record<string, unknown>[] {
   const lines = raw.split("\n");
   const payloads: Record<string, unknown>[] = [];
   let index = 0;
+  let itemCount = 0;
 
   if (lines.length === 0) {
     return payloads;
@@ -386,13 +448,25 @@ export function parseEnvelope(raw: string): Record<string, unknown>[] {
       continue;
     }
 
-    const itemHeader = JSON.parse(itemHeaderLine) as { type?: string; length?: number };
+    itemCount += 1;
+    if (itemCount > INGEST_MAX_ENVELOPE_ITEMS) {
+      throw new HttpError(400, "Envelope has too many items");
+    }
+
+    const itemHeader = parseUntrustedJson(itemHeaderLine) as { type?: string; length?: number };
     const bodyLines: string[] = [];
+    // Running byte count of bodyLines.join("\n"). Re-joining the array after every line made one item of N short
+    // lines cost O(N^2): a 160 KB attachment item of "a" lines held the event loop 6.7 s, and 1 MiB would hold it
+    // for minutes, under every other cap. It counts UTF-8 bytes because the envelope `length` header is in bytes;
+    // the old UTF-16 string length read past the end of an item with non-ASCII text and swallowed the next header.
+    let bodyBytes = -1;
 
     while (index < lines.length && lines[index]?.trim() !== "") {
-      bodyLines.push(lines[index] ?? "");
+      const line = lines[index] ?? "";
+      bodyLines.push(line);
+      bodyBytes += Buffer.byteLength(line) + 1;
       index += 1;
-      if (itemHeader.length && bodyLines.join("\n").length >= itemHeader.length) {
+      if (itemHeader.length && bodyBytes >= itemHeader.length) {
         break;
       }
     }
@@ -404,7 +478,7 @@ export function parseEnvelope(raw: string): Record<string, unknown>[] {
     if (itemHeader.type === "event" || itemHeader.type === "transaction" || itemHeader.type === "default") {
       const body = bodyLines.join("\n").trim();
       if (body) {
-        payloads.push(JSON.parse(body) as Record<string, unknown>);
+        payloads.push(parseUntrustedJson(body) as Record<string, unknown>);
       }
     }
   }

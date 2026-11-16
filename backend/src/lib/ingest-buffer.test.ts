@@ -199,8 +199,9 @@ describe("flushBufferedIngest", () => {
     expect(buckets.has(BUCKET)).toBe(false);
   });
 
-  // The payload can hold user emails, so the drop is logged with the project id and the error and nothing else.
-  test("the log line for a dropped payload names the project and the error, never the payload", async () => {
+  // The payload can hold user emails, so the drop is logged with the project id and the error name and nothing else:
+  // the message of an error raised while processing a payload can quote it (JSON.parse and ClickHouse both do) (PROD-10581).
+  test("the log line for a dropped payload names the project and the error name, never the payload or the message", async () => {
     const errorLog = spyOn(console, "error").mockImplementation(() => {});
     buckets.set(BUCKET, [entry("project_m", { ...poisonEvent, user: { email: "private@example.com" } })]);
 
@@ -208,7 +209,8 @@ describe("flushBufferedIngest", () => {
 
     const logged = JSON.stringify(errorLog.mock.calls);
     expect(logged).toContain("project_m");
-    expect(logged).toContain("normalizeEvent failed");
+    expect(errorLog.mock.calls[0][1]).toEqual({ projectId: "project_m", reason: "Error" });
+    expect(logged).not.toContain("normalizeEvent failed");
     expect(logged).not.toContain("private@example.com");
   });
 
@@ -532,6 +534,86 @@ describe("ingest routes", () => {
 
     expect((await post("/key_a/envelope", envelopeOf(JSON.stringify({ event_id: "evt_1" })))).status).toBe(200);
     expect(acceptedLines()).toBe(1);
+  });
+
+  // PROD-10581. 1,000 crafted events (11.0 MB) cost 7,964 ms of event loop before the 400, because the gate ran
+  // normalizeEvent on all of them. The cap must answer before any of that, so the bound asserted is a tenth of the
+  // time the unfixed route spent, not a tight benchmark.
+  const timed = async <T,>(work: () => Promise<T>) => {
+    const start = performance.now();
+    const result = await work();
+    return { result, elapsedMs: performance.now() - start };
+  };
+  const crafted = () =>
+    [JSON.stringify({ event_id: "env_big" })]
+      .concat(
+        Array.from({ length: 1000 }, (_, i) =>
+          [JSON.stringify({ type: "event" }), JSON.stringify({ event_id: `e${i}`, message: "x".repeat(11_000) }), ""].join("\n"),
+        ),
+      )
+      .join("\n");
+
+  test("an 11 MB envelope of 1,000 events is refused with a 413 in under a second and nothing is buffered", async () => {
+    const body = crafted();
+    expect(body.length).toBeGreaterThan(10_000_000);
+
+    const { result, elapsedMs } = await timed(async () =>
+      app.request("/key_a/envelope", { method: "POST", body, headers: { "content-length": String(body.length) } }),
+    );
+
+    expect(result.status).toBe(413);
+    expect(elapsedMs).toBeLessThan(800);
+    expect(bufferedCount()).toBe(0);
+  });
+
+  test("a chunked body with no Content-Length is refused with a 413 once it passes the limit", async () => {
+    const chunk = new TextEncoder().encode("x".repeat(64 * 1024));
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        for (let sent = 0; sent < 20 * 1024 * 1024; sent += chunk.length) {
+          controller.enqueue(chunk);
+        }
+        controller.close();
+      },
+    });
+    const error = spyOn(console, "error").mockImplementation(() => {});
+
+    const { result, elapsedMs } = await timed(async () =>
+      app.request("/key_a/store", { method: "POST", body: stream, duplex: "half" } as RequestInit),
+    );
+
+    expect(result.status).toBe(413);
+    expect(elapsedMs).toBeLessThan(800);
+    expect(bufferedCount()).toBe(0);
+    expect(error).not.toHaveBeenCalled();
+  });
+
+  // Before the fix a 400 for the 45,000 level body still came from the enqueue gate, after JSON.parse and a normalizeEvent that
+  // threw a RangeError, and an 18,000 level one (about 90 KB) passed the gate as a 200. So the status alone proves nothing:
+  // the refusal must come before the gate, which is what the missing "[ingest-buffer] refused a payload" warning shows.
+  test.each([
+    ["45,000 nested arrays", `{"a":${"[".repeat(45_000)}${"]".repeat(45_000)}}`],
+    ["18,000 nested objects (90 KB)", `${'{"a":'.repeat(18_000)}1${"}".repeat(18_000)}`],
+  ])("a body of %s is refused with a 400 before it is parsed or normalised", async (_label, body) => {
+    const warn = spyOn(console, "warn").mockImplementation(() => {});
+    for (const path of ["/key_a/store", "/key_a/envelope"]) {
+      const response = await post(path, path.endsWith("store") ? body : envelopeOf(body));
+      expect(response.status).toBe(400);
+    }
+    expect(warn).not.toHaveBeenCalled();
+    expect(bufferedCount()).toBe(0);
+  });
+
+  test("an envelope with more items than the cap is refused with a 400", async () => {
+    const items = Array.from({ length: 11 }, (_, i) => `${JSON.stringify({ type: "event" })}\n${JSON.stringify({ event_id: `e${i}` })}\n`);
+    const response = await post("/key_a/envelope", [JSON.stringify({ event_id: "env" }), ...items].join("\n"));
+
+    expect(response.status).toBe(400);
+    expect(bufferedCount()).toBe(0);
+  });
+
+  test("a store body that is not JSON is refused with a 400, not a 500", async () => {
+    expect((await post("/key_a/store", "{not json")).status).toBe(400);
   });
 
   test("an event with an unusable user.id is accepted, since normalizeEvent now stores it", async () => {
