@@ -1,8 +1,10 @@
 import { describe, expect, test } from "bun:test";
+import type { NormalizedIngestEvent } from "@ekeeper/shared";
 import {
   computeGroupFingerprint,
   normalizeEvent,
   normalizeExceptionValue,
+  normalizeTimestamp,
   parseEnvelope,
 } from "./ingest";
 
@@ -284,6 +286,219 @@ describe("ingest helpers", () => {
     const event = normalizeEvent("project_web", withoutRequest);
 
     expect([event.browser, event.os, event.device]).toEqual([null, null, null]);
+  });
+
+  // Every field of an event is attacker-controlled JSON, because ingest is public to anyone holding a DSN. normalizeEvent
+  // used to throw on the shapes below, and a throw inside the buffer flush aborted the whole project batch and then the
+  // whole bucket (PROD-10530), so each case is a value JSON.parse produces that once crashed it. The assertion is only
+  // "does not throw": what the field becomes is pinned by the existing grouping tests, which must stay unchanged.
+  // {"toString":1} parses fine and then makes String() fail with "No default value".
+  const noToString = { toString: 1 };
+  // Nested 10000 deep, JSON.parse and JSON.stringify both accept it, so it passes enqueue, but String() on it overflows
+  // the stack (2000 levels pass, 5000 throw), which is how it reaches the flush.
+  const nested = JSON.parse(`${"[".repeat(10_000)}1${"]".repeat(10_000)}`);
+  const exceptionWith = (exception: Record<string, unknown>) => ({ exception: { values: [exception] } });
+  const framesOf = (frames: unknown) => exceptionWith({ type: "Error", value: "v", stacktrace: { frames } });
+  const hostileEvents: Array<[string, Record<string, unknown>]> = [
+    ["a null stack frame with no explicit fingerprint", framesOf([null])],
+    ["stacktrace.frames that is a string", framesOf("abc")],
+    ["stacktrace.frames that is an object", framesOf({})],
+    ["stacktrace.frames that is a number", framesOf(5)],
+    ["a frame filename that is an object", framesOf([{ filename: noToString, function: "f" }])],
+    ["a frame function that is an object", framesOf([{ filename: "a.js", function: noToString }])],
+    ["an exception type that is an object", exceptionWith({ type: noToString, value: "v" })],
+    ["an exception value that is an object", exceptionWith({ type: "Error", value: noToString })],
+    ["a message that is an object when there is no exception", { message: noToString }],
+    ["user.id that is an object", { user: { id: noToString } }],
+    ["user.email that is an object", { user: { email: noToString } }],
+    ["user.username that is an object", { user: { username: noToString } }],
+    ["event_id that is an object", { event_id: noToString }],
+    ["level that is an object", { level: noToString }],
+    ["timestamp that is an object", { timestamp: noToString }],
+    ["release that is an object", { release: noToString }],
+    ["environment that is an object", { environment: noToString }],
+    ["a tag value that is an object", { tags: { a: noToString } }],
+    ["a breadcrumb category that is an object", { breadcrumbs: [{ category: noToString }] }],
+    ["a breadcrumb timestamp that is an object", { breadcrumbs: [{ timestamp: noToString }] }],
+    ["contexts.browser.name that is an object", { contexts: { browser: { name: noToString } } }],
+    ["contexts.device.model that is an object", { contexts: { device: { model: noToString } } }],
+    ["contexts.device.family that is an object", { contexts: { device: { family: noToString } } }],
+    ["contexts.os.name that is an object", { contexts: { os: { name: noToString } } }],
+    ["contexts.runtime.name that is an object", { contexts: { runtime: { name: noToString } } }],
+    ["user.id nested deep enough to overflow String()", { user: { id: nested } }],
+    ["an exception value nested deep enough to overflow String()", exceptionWith({ type: "Error", value: nested })],
+  ];
+
+  test.each(hostileEvents)("normalizeEvent does not throw on %s", (_label, payload) => {
+    expect(normalizeEvent("project_1", payload).projectId).toBe("project_1");
+  });
+
+  // One unusable field costs only that field: the rest of the event is still stored and still groups.
+  test("a user.id that cannot be read as text does not discard the rest of the event", () => {
+    const event = normalizeEvent("project_1", {
+      user: { id: noToString, email: "a@example.com" },
+      exception: { values: [{ type: "TypeError", value: "boom" }] },
+    });
+
+    expect(event.userId).toBeNull();
+    expect(event.userEmail).toBe("a@example.com");
+    expect(event.title).toBe("TypeError: boom");
+  });
+
+  test("a null frame groups like an empty frame, so it neither throws nor splits the group", () => {
+    const withFrames = (frames: unknown[]) => computeGroupFingerprint(framesOf(frames));
+
+    expect(withFrames([{ filename: "a.js", function: "f" }, null])).toBe(
+      withFrames([{ filename: "a.js", function: "f" }, {}]),
+    );
+  });
+
+  // ClickHouse refuses a whole INSERT when one row's timestamp does not parse into events.timestamp DateTime64(3, 'UTC'), so
+  // one event with timestamp "garbage" kept its bucket from ever being deleted (PROD-10530). The table below is what
+  // ClickHouse 24.8 did with each shape in a JSONEachRow insert, measured on a real server through the app's own insert and
+  // toClickHouseDateTime (T to a space, Z dropped); the live block at the end of ingest-buffer.test.ts re-checks the shapes
+  // that matter, and mutations of them, against an engine. "kept" returns the input unchanged because ClickHouse already stores the right instant; "reread" is
+  // the one shape ClickHouse rejects that is still a real instant (an ISO offset); "now" is a fallback to the time normalizeEvent runs.
+  const NOW = "2026-11-13T12:00:00.000Z";
+  test.each<[string, unknown, string]>([
+    // kept: ISO-8601 as Sentry SDKs send it, with and without milliseconds, microseconds or a zone
+    ["ISO with Z and milliseconds", "2026-11-13T10:00:00.123Z", "2026-11-13T10:00:00.123Z"],
+    ["ISO with Z and no fraction", "2026-11-13T10:00:00Z", "2026-11-13T10:00:00Z"],
+    ["ISO with Z and microseconds", "2026-11-13T10:00:00.123456Z", "2026-11-13T10:00:00.123456Z"],
+    ["ISO with no zone", "2026-11-13T10:00:00.123", "2026-11-13T10:00:00.123"],
+    ["a date with no time", "2026-11-13", "2026-11-13"],
+    ["a space instead of the T", "2026-11-13 10:00:00.123", "2026-11-13 10:00:00.123"],
+    // kept: Unix seconds, which the Sentry JS and mobile SDKs send as a float. The instant must not move.
+    ["float seconds as a number", 1731400000.123, "1731400000.123"],
+    ["float seconds as a string", "1731400000.123", "1731400000.123"],
+    ["float seconds with six decimals", "1731400000.123456", "1731400000.123456"],
+    ["integer seconds as a number", 1731400000, "1731400000"],
+    ["integer seconds as a string", "1731400000", "1731400000"],
+    ["milliseconds as a number", 1731400000123, "1731400000123"],
+    ["milliseconds as a string", "1731400000123", "1731400000123"],
+    // kept although meaningless: ClickHouse accepts these and clamps or wraps them, and an accepted shape must keep the
+    // instant it has today, so they are not rewritten
+    ["a year past 2299", "9999-12-31T23:59:59.999Z", "9999-12-31T23:59:59.999Z"],
+    ["a year before 1900", "1800-01-01T00:00:00.000Z", "1800-01-01T00:00:00.000Z"],
+    ["year 0000", "0000-01-01T00:00:00.000Z", "0000-01-01T00:00:00.000Z"],
+    ["month 13", "2026-13-45T10:00:00.000Z", "2026-13-45T10:00:00.000Z"],
+    // reread: ClickHouse rejects an offset, JavaScript reads it exactly
+    ["ISO with a positive offset", "2026-11-13T15:30:00.123+05:30", "2026-11-13T10:00:00.123Z"],
+    ["ISO with a zero offset", "2026-11-13T10:00:00.123+00:00", "2026-11-13T10:00:00.123Z"],
+    ["ISO with a negative offset and no fraction", "2026-11-13T05:00:00-05:00", "2026-11-13T10:00:00.000Z"],
+    ["a space and an offset", "2026-11-13 15:30:00.123+05:30", "2026-11-13T10:00:00.123Z"],
+    // now: ClickHouse rejects all of these
+    ["an empty string", "", NOW],
+    ["garbage", "garbage", NOW],
+    ["the word null", "null", NOW],
+    ["NaN", "NaN", NOW],
+    ["zero", 0, NOW],
+    ["an object", {}, NOW],
+    ["an object with a non-callable toString", { toString: 1 }, NOW],
+    ["an array", [1, 2], NOW],
+    ["true", true, NOW],
+    ["a number that prints with an exponent", 1e21, NOW],
+    ["a lowercase z", "2026-11-13t10:00:00z", NOW],
+    ["an offset without a colon", "2026-11-13T10:00:00.123+0530", NOW],
+    ["a time with no seconds", "2026-11-13 10:00", NOW],
+    ["a trailing space", "2026-11-13 10:00:00 ", NOW],
+    ["a leading space on seconds", " 1731400000", NOW],
+    ["a text date", "Fri Nov 13 2026 10:00:00 GMT+0000", NOW],
+    ["an offset that is not a date", "2026-13-45T10:00:00+05:30", NOW],
+    ["an offset that carries the year past 9999", "9999-12-31T23:00:00-05:00", NOW],
+    // now although ClickHouse accepts them: each is stored there as a wrong date (year 2299, 1900, 1969 or 1970), so the
+    // current time is closer to the truth, and no SDK sends them
+    ["microseconds as a number", 1731400000123456, NOW],
+    ["a negative number", -1, NOW],
+    ["a compact date as digits", "20261113", NOW],
+    ["a date with slashes", "2026/11/13 10:00:00", NOW],
+    ["milliseconds with a fraction", "1731400000123.5", NOW],
+    // absent
+    ["undefined", undefined, NOW],
+    ["null", null, NOW],
+  ])("normalizeTimestamp turns %s into a value ClickHouse stores correctly", (_label, raw, expected) => {
+    expect(normalizeTimestamp(raw, NOW)).toBe(expected);
+  });
+
+  test("an event and its breadcrumbs with unparseable timestamps are stamped with the time normalizeEvent ran", () => {
+    const before = Date.now();
+    const event = normalizeEvent("project_1", {
+      timestamp: "garbage",
+      breadcrumbs: [{ message: "a", timestamp: "garbage" }, { message: "b", timestamp: 1731400000.5 }, { message: "c" }],
+    });
+
+    for (const stamp of [event.timestamp, event.breadcrumbs[0].timestamp, event.breadcrumbs[2].timestamp]) {
+      expect(Date.parse(stamp)).toBeGreaterThanOrEqual(before);
+      expect(Date.parse(stamp)).toBeLessThan(before + 60_000);
+    }
+    expect(event.breadcrumbs[1].timestamp).toBe("1731400000.5");
+  });
+
+  // ClickHouse refuses the whole INSERT when a String column holds a lone high surrogate (measured on 24.8: "Cannot parse
+  // escape sequence: missing second part of surrogate pair"), the same stall as an unparseable timestamp. JSON.parse
+  // produces one from "\ud800", and the length caps can make one out of valid text by cutting an emoji in half. Columns
+  // written as JSON.stringify output are not affected, because JSON.stringify escapes a lone surrogate; the live block in
+  // ingest-buffer.test.ts checks that on the engine. So the invariant is on the String columns insertEvents writes directly.
+  const loneSurrogate = "a\ud800b";
+  const stringColumns = (event: NormalizedIngestEvent) =>
+    [
+      event.eventId, event.groupId, event.fingerprint, event.title, event.message, event.severity, event.timestamp,
+      event.release, event.environment, event.userId, event.userEmail, event.userUsername, event.browser, event.device,
+      event.os, event.runtime,
+      ...event.breadcrumbs.flatMap((crumb) => [crumb.timestamp, crumb.category, crumb.level, crumb.message, crumb.type]),
+    ].filter((column): column is string => typeof column === "string");
+  // 2047 characters, then an emoji (two UTF-16 units) that MAX_NORMALIZED_TEXT_LENGTH cuts between its halves.
+  const emojiAtTheCap = `${"x".repeat(2047)}\u{1F600}yy`;
+  // The User-Agent is cut at 512 characters, and "Android 13; " plus 499 characters puts the emoji across that cut.
+  const emojiAtTheUserAgentCap = `Android 13; ${"m".repeat(499)}\u{1F600}yy`;
+  test.each<[string, Record<string, unknown>]>([
+    ["event_id", { event_id: loneSurrogate }],
+    ["level", { level: loneSurrogate }],
+    ["release", { release: loneSurrogate }],
+    ["environment", { environment: loneSurrogate }],
+    ["user.id", { user: { id: loneSurrogate } }],
+    ["user.email", { user: { email: loneSurrogate } }],
+    ["user.username", { user: { username: loneSurrogate } }],
+    ["the exception type", exceptionWith({ type: loneSurrogate, value: "v" })],
+    ["the exception value", exceptionWith({ type: "Error", value: loneSurrogate })],
+    ["a message with no exception", { message: loneSurrogate }],
+    ["an explicit fingerprint", { fingerprint: [loneSurrogate] }],
+    ["contexts.browser.name", { contexts: { browser: { name: loneSurrogate } } }],
+    ["contexts.device.model", { contexts: { device: { model: loneSurrogate } } }],
+    ["contexts.device.family", { contexts: { device: { family: loneSurrogate } } }],
+    ["contexts.os.name", { contexts: { os: { name: loneSurrogate } } }],
+    ["contexts.runtime.name", { contexts: { runtime: { name: loneSurrogate } } }],
+    ["a breadcrumb category", { breadcrumbs: [{ category: loneSurrogate }] }],
+    ["a breadcrumb level", { breadcrumbs: [{ level: loneSurrogate }] }],
+    ["a breadcrumb message", { breadcrumbs: [{ message: loneSurrogate }] }],
+    ["a breadcrumb type", { breadcrumbs: [{ type: loneSurrogate }] }],
+    ["a device model in the User-Agent", { request: { headers: { "User-Agent": `Mozilla/5.0 (Linux; Android 13; SM-${loneSurrogate} Build/TP1A; wv)` } } }],
+    ["an emoji the User-Agent cap cuts in half", { request: { headers: { "User-Agent": emojiAtTheUserAgentCap } } }],
+    ["an exception value with an emoji the length cap cuts in half", exceptionWith({ type: "Error", value: emojiAtTheCap })],
+    ["a message with an emoji the length cap cuts in half", { message: emojiAtTheCap }],
+  ])("a lone surrogate from %s is not written to a String column", (_label, payload) => {
+    const event = normalizeEvent("project_1", payload);
+
+    expect(stringColumns(event).filter((column) => !column.isWellFormed())).toEqual([]);
+  });
+
+  test("a lone surrogate is replaced with U+FFFD and a valid string comes back byte-identical", () => {
+    const event = normalizeEvent("project_1", {
+      user: { id: loneSurrogate, email: "caf\u00e9 \u{1F600}@example.com" },
+    });
+
+    expect(event.userId).toBe("a\ufffdb");
+    expect(event.userEmail).toBe("caf\u00e9 \u{1F600}@example.com");
+  });
+
+  // The fingerprint hash was already computed from UTF-8 bytes, which encode a lone surrogate as U+FFFD, so cleaning the
+  // text first changes no hash. An explicit fingerprint is stored as the group id itself, and an event carrying a lone
+  // surrogate there was refused by ClickHouse, so no stored group can split.
+  test("the group fingerprint is the same for a lone surrogate and for the U+FFFD it is replaced with", () => {
+    const fingerprintOf = (value: string) => computeGroupFingerprint(exceptionWith({ type: "Error", value }));
+
+    expect(fingerprintOf(loneSurrogate)).toBe(fingerprintOf("a\ufffdb"));
+    expect(computeGroupFingerprint({ fingerprint: [loneSurrogate] })).toBe("a\ufffdb");
   });
 
   test("parse envelope extracts event items", () => {

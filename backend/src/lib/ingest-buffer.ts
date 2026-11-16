@@ -1,7 +1,9 @@
+import { ClickHouseError, type ClickHouseClient } from "@clickhouse/client";
 import { getClickHouseClient } from "../db/clickhouse";
 import { all, one, run } from "../db/sqlite";
+import { HttpError } from "./http";
 import { ensureGithubIssueForGroup, getGithubIntegration } from "./issue-sync";
-import { normalizeEvent } from "./ingest";
+import { normalizeEvent, toClickHouseDateTime } from "./ingest";
 import { connectRedis } from "./redis";
 
 interface BufferedIngestEntry {
@@ -21,10 +23,6 @@ function logIngestBuffer(message: string, details?: Record<string, unknown>) {
   }
 
   console.log(`[ingest-buffer] ${message}`);
-}
-
-function toClickHouseDateTime(value: string): string {
-  return value.replace("T", " ").replace("Z", "");
 }
 
 function extractExceptionType(exception: Record<string, unknown> | null | undefined): string | null {
@@ -64,48 +62,135 @@ function groupByProject(entries: BufferedIngestEntry[]) {
   return grouped;
 }
 
+// The ClickHouse errors that mean "the server read this INSERT and refused the data in it". Every one measured so far is a
+// parse error: a timestamp that does not parse (CANNOT_PARSE_DATETIME), a shape the DateTime64 reader rejects
+// (CANNOT_PARSE_INPUT_ASSERTION_FAILED) and a lone surrogate (CANNOT_PARSE_ESCAPE_SEQUENCE). A ClickHouseError is not
+// enough to decide, because the client throws one for any answer from the server: a missing table, a missing database and a
+// wrong password (UNKNOWN_TABLE, UNKNOWN_DATABASE, AUTHENTICATION_FAILED, all measured) are ClickHouseErrors too, and there
+// every row is refused, so dropping them would lose the whole bucket where today it is kept until the server is fixed. A
+// connection error is not a ClickHouseError at all. A type is added here only after an engine probe shows it for bad data;
+// an unlisted type keeps the bucket, which is the behaviour from before this check existed.
+function isRejectedData(error: unknown): error is ClickHouseError {
+  return error instanceof ClickHouseError && /^CANNOT_PARSE_/.test(error.type ?? "");
+}
+
+// INSERTs `rows`; if the server refuses them as bad data, halves them and retries each half, so that only the rows the server
+// still refuses on their own are dropped, and returns their positions in `rows`. A parse error names a row in its message,
+// but the message quotes the input, so it is not used. Any other failure is thrown: the caller keeps the bucket.
+//
+// Cost, only on the failure path: about two INSERTs per level of halving per refused row (13 for one bad row in 64, 29 in
+// 10000) instead of one per row, because every INSERT is a MergeTree part and ClickHouse throws TOO_MANY_PARTS past a few
+// thousand. The remaining duplicate risk: if an outage starts mid-retry, the halves already inserted are inserted again by
+// the next flush, which is the same exposure as an outage between two projects in flushBucket, and events has no key that
+// dedupes.
+//
+// Known limit: a refused INSERT stored nothing only while it stays inside one block. ClickHouse closes a block at
+// min_insert_block_size_rows (1048449) or min_insert_block_size_bytes (268402944, 256 MiB), and commits the blocks written
+// before the row it then refuses. Measured on 24.8 in the review of this change: a 572 MiB INSERT of 2000 rows, refused at its
+// last row, had already stored 910, and halving it inserts those rows again. It needs one project's batch over 256 MiB in one
+// five minute bucket together with a refused row.
+async function insertSkippingRefusedRows(
+  client: ClickHouseClient,
+  projectId: string,
+  table: "events" | "breadcrumbs",
+  rows: Array<Record<string, unknown> & { event_id: string }>,
+  firstIndex = 0,
+): Promise<number[]> {
+  try {
+    await client.insert({ table, values: rows, format: "JSONEachRow" });
+    return [];
+  } catch (error) {
+    if (!isRejectedData(error)) {
+      throw error;
+    }
+    if (rows.length === 1) {
+      // Only ids and the error's code and type: its message quotes the refused input, which can hold user emails.
+      console.error("[ingest-buffer] dropped a row ClickHouse refused", {
+        projectId,
+        table,
+        eventId: rows[0].event_id,
+        code: error.code,
+        type: error.type,
+      });
+      return [firstIndex];
+    }
+    const middle = Math.ceil(rows.length / 2);
+    return [
+      ...(await insertSkippingRefusedRows(client, projectId, table, rows.slice(0, middle), firstIndex)),
+      ...(await insertSkippingRefusedRows(client, projectId, table, rows.slice(middle), firstIndex + middle)),
+    ];
+  }
+}
+
 async function insertEvents(projectId: string, payloads: Record<string, unknown>[]) {
   if (payloads.length === 0) {
     return;
   }
 
+  // Normalised one payload at a time, and a payload that throws is dropped here instead of aborting the batch. This
+  // used to be `payloads.map(normalizeEvent)`, so one bad event failed every good event of its project and then the
+  // whole bucket (PROD-10530). Dropping is safe, unlike retrying: normalizeEvent is deterministic, so the same
+  // payload would fail on every flush until the bucket expires. Only the project id and the error are logged, never the
+  // payload, which can hold user emails. The only JSON shape known to make normalizeEvent throw is a value nested past the
+  // stack (about 40,000 levels on bun 1.4.2: JSON.stringify for rawPayload throws a RangeError), which the gate in
+  // enqueueBufferedIngest refuses with a 400, so it never reaches Redis. So this is the backstop for a future normalizeEvent
+  // bug: the gate would refuse such a payload, but one buffered by an older build never passed the current gate.
+  const events: ReturnType<typeof normalizeEvent>[] = [];
+  let rejectedCount = 0;
+  for (const payload of payloads) {
+    try {
+      events.push(normalizeEvent(projectId, payload));
+    } catch (error) {
+      rejectedCount += 1;
+      console.error("[ingest-buffer] dropped a payload that failed normalisation", {
+        projectId,
+        reason: String(error),
+      });
+    }
+  }
+  if (events.length === 0) {
+    return;
+  }
+
   logIngestBuffer("writing project batch to ClickHouse", {
     projectId,
-    eventCount: payloads.length,
+    eventCount: events.length,
+    rejectedCount,
   });
 
   const client = getClickHouseClient();
-  const events = payloads.map((payload) => normalizeEvent(projectId, payload));
-  await client.insert({
-    table: "events",
-    values: events.map((event) => ({
-      event_id: event.eventId,
-      project_id: event.projectId,
-      group_id: event.groupId,
-      fingerprint: event.fingerprint,
-      title: event.title,
-      message: event.message,
-      severity: event.severity,
-      timestamp: toClickHouseDateTime(event.timestamp),
-      release: event.release ?? "",
-      environment: event.environment ?? "",
-      user_id: event.userId ?? "",
-      user_email: event.userEmail ?? "",
-      user_username: event.userUsername ?? "",
-      browser: event.browser ?? "",
-      device: event.device ?? "",
-      os: event.os ?? "",
-      runtime: event.runtime ?? "",
-      tags: JSON.stringify(event.tags),
-      contexts: JSON.stringify(event.contexts),
-      exception: JSON.stringify(event.exception),
-      stacktrace: JSON.stringify(event.stacktrace ?? {}),
-      raw_payload: event.rawPayload,
-    })),
-    format: "JSONEachRow",
-  });
+  const eventRows = events.map((event) => ({
+    event_id: event.eventId,
+    project_id: event.projectId,
+    group_id: event.groupId,
+    fingerprint: event.fingerprint,
+    title: event.title,
+    message: event.message,
+    severity: event.severity,
+    timestamp: toClickHouseDateTime(event.timestamp),
+    release: event.release ?? "",
+    environment: event.environment ?? "",
+    user_id: event.userId ?? "",
+    user_email: event.userEmail ?? "",
+    user_username: event.userUsername ?? "",
+    browser: event.browser ?? "",
+    device: event.device ?? "",
+    os: event.os ?? "",
+    runtime: event.runtime ?? "",
+    tags: JSON.stringify(event.tags),
+    contexts: JSON.stringify(event.contexts),
+    exception: JSON.stringify(event.exception),
+    stacktrace: JSON.stringify(event.stacktrace ?? {}),
+    raw_payload: event.rawPayload,
+  }));
+  // Everything after this works on `stored`: a refused event gets no breadcrumbs, group reopening or GitHub issue.
+  const refusedEventRows = new Set(await insertSkippingRefusedRows(client, projectId, "events", eventRows));
+  const stored = events.filter((_, index) => !refusedEventRows.has(index));
+  if (stored.length === 0) {
+    return;
+  }
 
-  const breadcrumbs = events.flatMap((event) =>
+  const breadcrumbs = stored.flatMap((event) =>
     event.breadcrumbs.map((breadcrumb) => ({
       event_id: event.eventId,
       project_id: event.projectId,
@@ -124,14 +209,10 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
       projectId,
       breadcrumbCount: breadcrumbs.length,
     });
-    await client.insert({
-      table: "breadcrumbs",
-      values: breadcrumbs,
-      format: "JSONEachRow",
-    });
+    await insertSkippingRefusedRows(client, projectId, "breadcrumbs", breadcrumbs);
   }
 
-  const affectedGroupIds = [...new Set(events.map((event) => event.groupId))];
+  const affectedGroupIds = [...new Set(stored.map((event) => event.groupId))];
   const reopenedAt = new Date().toISOString();
   for (const groupId of affectedGroupIds) {
     run(
@@ -142,11 +223,11 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
     );
   }
 
-  await maybeCreateGithubIssues({ projectId, events, affectedGroupIds });
+  await maybeCreateGithubIssues({ projectId, events: stored, affectedGroupIds });
 
   logIngestBuffer("finished ClickHouse batch", {
     projectId,
-    eventCount: events.length,
+    eventCount: stored.length,
     breadcrumbCount: breadcrumbs.length,
     reopenedGroupCount: affectedGroupIds.length,
   });
@@ -248,6 +329,12 @@ async function flushBucket(redisKey: string) {
     await insertEvents(projectId, payloads);
   }
 
+  // Deleted only after every project's insert has returned. An insert that throws leaves the bucket for the next flush, so
+  // an outage does not lose events: ClickHouse unreachable, or a server error that is not about the data (the list is
+  // isRejectedData). Its TTL is set at enqueue (INGEST_BUFFER_RETENTION_SECONDS), so a bucket that keeps failing is lost
+  // whole when it expires. The cost of the retry is that projects inserted earlier in the loop are inserted again, because
+  // events is a plain MergeTree and nothing dedupes on event_id. Neither a payload that cannot be normalised nor a row the
+  // server refuses as bad data causes that retry any more: insertEvents drops them.
   await redis.del(redisKey);
   logIngestBuffer("completed bucket flush", {
     redisKey,
@@ -256,9 +343,41 @@ async function flushBucket(redisKey: string) {
   });
 }
 
+// Why a payload may not enter the buffer, or null when it may. The routes cast the request body to a Record without
+// checking it, so a body of `null`, a number or an array reaches here typed as an object; the flush would drop a falsy
+// one silently and store a truthy one as an empty event.
+function refusalReason(projectId: string, payload: Record<string, unknown>): string | null {
+  if (typeof payload !== "object" || payload === null || Array.isArray(payload)) {
+    return "payload is not a JSON object";
+  }
+  try {
+    normalizeEvent(projectId, payload);
+    return null;
+  } catch (error) {
+    return String(error);
+  }
+}
+
 export async function enqueueBufferedIngest(projectId: string, payloads: Record<string, unknown>[]) {
   if (payloads.length === 0) {
     return;
+  }
+
+  // Every public ingest route funnels through here, so this is the one gate in front of Redis. A payload that
+  // normalizeEvent cannot process used to be accepted with a 200 and then stall its bucket at flush (PROD-10530). Refusing
+  // it here with a 400 tells the sender its body was refused, instead of acknowledging an event that is dropped five
+  // minutes later, and keeps it out of Redis. The cost is a second normalizeEvent per event on the request path. It is linear
+  // in the body size: the length caps in ingest.ts bound only the quadratic regex steps, and the app sets no body cap.
+  // Measured on bun 1.4.2: about 200 ms for a 62 MB body of one million breadcrumbs, as much again as the 200 ms already
+  // spent parsing that body and stringifying it for Redis. The buffer still holds raw payloads: buckets already in Redis at
+  // deploy time do, and a new stored shape would need a reader for both. All payloads are checked before any is buffered, so
+  // an envelope is accepted or refused whole and a 200 never covers an event that was then dropped.
+  for (const payload of payloads) {
+    const reason = refusalReason(projectId, payload);
+    if (reason) {
+      console.warn("[ingest-buffer] refused a payload", { projectId, reason });
+      throw new HttpError(400, "Event payload could not be processed");
+    }
   }
 
   const redis = await connectRedis();

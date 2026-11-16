@@ -31,26 +31,30 @@ export const ingestRouter = new Hono();
 
 async function handleStoreRequest(projectKey: string, sentryProjectId: string | undefined, payload: Record<string, unknown>) {
   const project = resolveProject(projectKey, sentryProjectId);
+  // Enqueued before the "accepted" log and the event_id reads: enqueueBufferedIngest refuses a body that is not a JSON
+  // object, and `null` has no event_id to read, so reading it first answered a null body with a 500 instead of a 400.
+  await enqueueBufferedIngest(project.projectId, [payload]);
   console.log("[ingest] accepted store payload", {
     projectId: project.projectId,
     publicKey: project.publicKey,
     sentryProjectId: project.sentryProjectId,
     eventId: payload.event_id ?? null,
   });
-  await enqueueBufferedIngest(project.projectId, [payload]);
   return { id: payload.event_id ?? crypto.randomUUID(), status: "success" };
 }
 
 async function handleEnvelopeRequest(projectKey: string, sentryProjectId: string | undefined, raw: string) {
   const project = resolveProject(projectKey, sentryProjectId);
   const payloads = parseEnvelope(raw);
+  // Logged after the gate, as in the store route: enqueueBufferedIngest refuses an envelope whole, and a refused envelope
+  // must not show up as accepted in the log.
+  await enqueueBufferedIngest(project.projectId, payloads);
   console.log("[ingest] accepted envelope payload", {
     projectId: project.projectId,
     publicKey: project.publicKey,
     sentryProjectId: project.sentryProjectId,
     acceptedCount: payloads.length,
   });
-  await enqueueBufferedIngest(project.projectId, payloads);
   return { status: "success", accepted: payloads.length };
 }
 
