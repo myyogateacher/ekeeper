@@ -455,11 +455,18 @@ export function parseEnvelope(raw: string): Record<string, unknown>[] {
 
     const itemHeader = parseUntrustedJson(itemHeaderLine) as { type?: string; length?: number };
     const bodyLines: string[] = [];
+    // Running byte count of bodyLines.join("\n"). Re-joining the array after every line made one item of N short
+    // lines cost O(N^2): a 160 KB attachment item of "a" lines held the event loop 6.7 s, and 1 MiB would hold it
+    // for minutes, under every other cap. It counts UTF-8 bytes because the envelope `length` header is in bytes;
+    // the old UTF-16 string length read past the end of an item with non-ASCII text and swallowed the next header.
+    let bodyBytes = -1;
 
     while (index < lines.length && lines[index]?.trim() !== "") {
-      bodyLines.push(lines[index] ?? "");
+      const line = lines[index] ?? "";
+      bodyLines.push(line);
+      bodyBytes += Buffer.byteLength(line) + 1;
       index += 1;
-      if (itemHeader.length && bodyLines.join("\n").length >= itemHeader.length) {
+      if (itemHeader.length && bodyBytes >= itemHeader.length) {
         break;
       }
     }

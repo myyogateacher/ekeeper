@@ -702,4 +702,28 @@ describe("untrusted ingest JSON", () => {
     const raw = [JSON.stringify({ event_id: "e" }), nested(INGEST_MAX_JSON_DEPTH + 1), "{}"].join("\n");
     expect(() => parseEnvelope(raw)).toThrow(HttpError);
   });
+
+  // One item of many short lines with a huge `length` passes the item, depth and body caps; re-joining the body
+  // after every line made it O(N^2) (80,000 lines took about 1.6 s, 1 MiB of them would take minutes).
+  test("an item of many short lines is read in linear time", () => {
+    const raw = "{}\n" + JSON.stringify({ type: "attachment", length: 999999999 }) + "\n" + "a\n".repeat(80_000);
+    const started = performance.now();
+    expect(parseEnvelope(raw)).toHaveLength(0);
+    expect(performance.now() - started).toBeLessThan(100);
+  });
+
+  // The `length` header counts UTF-8 bytes. Counting UTF-16 units read past the end of an item with non-ASCII text,
+  // so the next item's header was joined into its body and the envelope was refused.
+  test("an item length in bytes ends a non-ASCII event exactly, so the next item still parses", () => {
+    const first = JSON.stringify({ event_id: "e1", message: "café ünïcode" });
+    const second = JSON.stringify({ event_id: "e2" });
+    const raw = [
+      "{}",
+      JSON.stringify({ type: "event", length: Buffer.byteLength(first) }),
+      first,
+      JSON.stringify({ type: "event", length: Buffer.byteLength(second) }),
+      second,
+    ].join("\n");
+    expect(parseEnvelope(raw).map((p) => p.event_id)).toEqual(["e1", "e2"]);
+  });
 });
