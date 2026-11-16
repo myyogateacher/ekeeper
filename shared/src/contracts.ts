@@ -194,7 +194,8 @@ export interface ErrorDetailResponse {
 
 // POST /api/errors/affected-users: distinct users over the union of the listed groups, so the issues list
 // header can show "N users affected" for the visible rows. Per-group counts cannot be summed (one user can
-// hit several groups). At most 500 groups, each id at most 4096 characters; anything else is a 400.
+// hit several groups). At most 500 groups, each id at most 4096 characters; anything else is a 400. A body over
+// about 2.1 MB (the largest plain ASCII list of that size) is a 413, answered before it is parsed.
 export interface AffectedUsersRequest {
   groups: Array<{ projectId: string; groupId: string }>;
 }

@@ -76,7 +76,7 @@ These routes cover:
 - user and project administration
 - dashboard summaries
 - issue listing and issue detail
-- `POST /api/errors/affected-users`: distinct users over up to 500 listed (project, group) pairs, for the issues list header total. Every project named must be readable by the caller, or the request is a 403 before any query. The pairs travel in the SQL text as base64 JSON, not as a URL query parameter, because ClickHouse refuses a parameter over 128 KiB (500 pairs of 200 character ids failed that way); a big set is split into several constants under 1 MiB each (`pair-chunks.ts`), which ClickHouse can fold, and ORed in one query
+- `POST /api/errors/affected-users`: distinct users over up to 500 listed (project, group) pairs, for the issues list header total. A body over about 2.1 MB is a 413 before it is parsed (`bodyLimit`; the id caps count characters, and a control character is 6 bytes of JSON). Every project named must be readable by the caller, or the request is a 403 before any query. The pairs travel in the SQL text as base64 JSON, not as a URL query parameter, because ClickHouse refuses a parameter over 128 KiB (500 pairs of 200 character ids failed that way); a big set is split into several constants under 1 MiB each (`pair-chunks.ts`), which ClickHouse can fold, and ORed in one query
 - `GET /api/projects/:projectId/ingest-status`: the project's newest event time, the release of that newest event, and how many `.map` files are uploaded for exactly that release, for the Settings verify step. Same read access as the project itself
 - workflow updates
 - minimap management

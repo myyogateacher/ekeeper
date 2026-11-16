@@ -37,7 +37,7 @@ mock.module("../db/clickhouse", () => ({
       ),
   }),
 }));
-const { apiRouter, queryAffectedUsers, queryDuplicateIssueGroups, queryEventNavigation, queryGroupStats } = await import("./api");
+const { AFFECTED_USERS_MAX_BODY_BYTES, apiRouter, queryAffectedUsers, queryDuplicateIssueGroups, queryEventNavigation, queryGroupStats } = await import("./api");
 
 afterAll(() => {
   shadowTables = "";
@@ -669,6 +669,114 @@ describe("POST /api/errors/affected-users", () => {
     const response = await post({ groups });
 
     expect([response.status, await response.json()]).toEqual([200, { affectedUsers: 9 }]);
+  });
+
+  // PROD-10537 security review H1: the schema counts characters, a control character is 6 bytes of JSON, and 500
+  // pairs at the schema maximum were a 12.3 MB body that cost ClickHouse 322 MiB. The limit is on bytes and
+  // answers before the body is parsed.
+  const bytesOf = (value: string) => Buffer.byteLength(value);
+  const maximalAscii = JSON.stringify({
+    groups: Array.from({ length: 500 }, (_, index) => ({ projectId: `project_${index}`.padEnd(128, "p"), groupId: `g${index}`.padEnd(4096, "g") })),
+  });
+  const seedFirstNine = () => {
+    const first = (JSON.parse(maximalAscii) as { groups: Array<{ projectId: string; groupId: string }> }).groups.slice(0, 9);
+    shadow(first.map((entry, index) => ({ project: entry.projectId, group: entry.groupId, user: `u${index}` })));
+  };
+
+  test("the largest valid body, 500 pairs of 128 and 4096 plain ASCII characters, is served, and the limit is 16 KiB above it", async () => {
+    seedFirstNine();
+
+    const response = await post(maximalAscii);
+
+    expect(bytesOf(maximalAscii)).toBe(12 + 500 * (30 + 128 + 4096));
+    expect(AFFECTED_USERS_MAX_BODY_BYTES - bytesOf(maximalAscii)).toBe(16 * 1024);
+    expect([response.status, await response.json()]).toEqual([200, { affectedUsers: 9 }]);
+  });
+
+  test("a body exactly at the limit is served and one byte more is a 413", async () => {
+    seedFirstNine();
+    const padded = (extra: number) => maximalAscii + " ".repeat(AFFECTED_USERS_MAX_BODY_BYTES - bytesOf(maximalAscii) + extra);
+
+    const atLimit = await post(padded(0));
+    noQueryMayRun();
+    const over = await post(padded(1));
+
+    expect(atLimit.status).toBe(200);
+    expect(over.status).toBe(413);
+    expect(await over.json()).toEqual({ message: "Request body too large" });
+  });
+
+  test("a body over the limit is a 413 before it is parsed: a text that is not even JSON is not read as one", async () => {
+    noQueryMayRun();
+
+    const response = await post("x".repeat(AFFECTED_USERS_MAX_BODY_BYTES + 1));
+
+    expect(response.status).toBe(413);
+  });
+
+  test("the 12.3 MB body of 500 pairs of 4096 control characters, which the character caps allowed, is a 413 and no query runs", async () => {
+    noQueryMayRun();
+    const hostile = JSON.stringify({ groups: Array.from({ length: 500 }, (_, index) => ({ projectId: `p${index}`, groupId: "\u0001".repeat(4096) })) });
+
+    const response = await post(hostile);
+
+    expect(bytesOf(hostile)).toBeGreaterThan(12_000_000);
+    expect(response.status).toBe(413);
+  });
+
+  // A chunked body has no Content-Length, so bodyLimit counts the bytes as they are read.
+  const streamed = (chunks: number, chunk: string) =>
+    new ReadableStream<Uint8Array>({
+      start(controller) {
+        const bytes = new TextEncoder().encode(chunk);
+        for (let index = 0; index < chunks; index += 1) controller.enqueue(bytes);
+        controller.close();
+      },
+    });
+  const postStream = (body: ReadableStream<Uint8Array>) =>
+    appAs("admin").request("/api/errors/affected-users", { method: "POST", headers: { "content-type": "application/json" }, body, duplex: "half" } as RequestInit);
+
+  test("a chunked body past the limit is a 413, not the 400 of a body that is not JSON", async () => {
+    noQueryMayRun();
+
+    const response = await postStream(streamed(Math.ceil(AFFECTED_USERS_MAX_BODY_BYTES / 65_536) + 2, "x".repeat(65_536)));
+
+    expect(response.status).toBe(413);
+  });
+
+  test("a Content-Length over the limit is a 413 from the header alone: the body is never read", async () => {
+    noQueryMayRun();
+    let reads = 0;
+    // highWaterMark 0: a stream otherwise calls pull once on construction to fill its queue, which is not a read.
+    const body = new ReadableStream<Uint8Array>(
+      {
+        pull(controller) {
+          reads += 1;
+          controller.enqueue(new TextEncoder().encode("x"));
+        },
+      },
+      { highWaterMark: 0 },
+    );
+
+    const response = await appAs("admin").request("/api/errors/affected-users", {
+      method: "POST",
+      headers: { "content-type": "application/json", "content-length": String(AFFECTED_USERS_MAX_BODY_BYTES + 1) },
+      body,
+      duplex: "half",
+    } as RequestInit);
+
+    expect(response.status).toBe(413);
+    expect(reads).toBe(0);
+  });
+
+  test("a chunked body within the limit is read: valid JSON is served, invalid JSON is a 400", async () => {
+    shadow([{ project: "pA", group: "g1", user: "u1" }]);
+
+    const ok = await postStream(streamed(1, JSON.stringify({ groups: [group("pA", "g1")] })));
+    const notJson = await postStream(streamed(2, "{not json"));
+
+    expect([ok.status, await ok.json()]).toEqual([200, { affectedUsers: 1 }]);
+    expect(notJson.status).toBe(400);
   });
 
   test("a body that is not the schema is a 400 before any query: not JSON, no groups, wrong types, empty ids", async () => {

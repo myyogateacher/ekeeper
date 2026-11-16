@@ -1,4 +1,5 @@
 import { Hono } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { config } from "../config";
 import { getClickHouseClient } from "../db/clickhouse";
@@ -92,13 +93,25 @@ const minimapUploadSchema = z.object({
 // The issues list shows at most this many rows (ISSUE_LIST_MAX_ROWS in frontend/src/lib/issue-list.ts), and the
 // header total covers the rows on screen, so a request never needs more. The id caps are generous on purpose:
 // events.group_id is unbounded for an explicit fingerprint stored before PROD-10529, and a cap that rejected a
-// real group would fail the whole header, but a bounded body keeps one request from carrying much more than 2 MB.
+// real group would fail the whole header.
 const AFFECTED_USERS_MAX_GROUPS = 500;
+const AFFECTED_USERS_MAX_PROJECT_ID = 128;
+const AFFECTED_USERS_MAX_GROUP_ID = 4096;
 const affectedUsersSchema = z.object({
   groups: z
-    .array(z.object({ projectId: z.string().min(1).max(128), groupId: z.string().min(1).max(4096) }))
+    .array(z.object({ projectId: z.string().min(1).max(AFFECTED_USERS_MAX_PROJECT_ID), groupId: z.string().min(1).max(AFFECTED_USERS_MAX_GROUP_ID) }))
     .max(AFFECTED_USERS_MAX_GROUPS),
 });
+
+// The schema above counts characters, not bytes, so it does not bound the body: a control character is 6 bytes in
+// JSON (\u0001), so 500 pairs at the schema maximum were 12.3 MB, which cost ClickHouse 322 MiB of memory for one
+// request from any signed-in user (PROD-10537 security review H1). This limit is on bytes, checked before the body
+// is read: the largest body of 500 pairs at the schema maximum in plain ASCII, `{"groups":[{"projectId":"..",
+// "groupId":".."},...]}` written compactly, which is 12 + 500 * (30 + 128 + 4096) = 2,127,012 bytes, plus 16 KiB
+// for the whitespace a client may put between tokens. Ids the app sends are ASCII (the frontend sends group ids
+// the S4 allowlist keeps, hashes, or legacy ones), so a body past this is not a list the app builds.
+export const AFFECTED_USERS_MAX_BODY_BYTES =
+  12 + AFFECTED_USERS_MAX_GROUPS * (30 + AFFECTED_USERS_MAX_PROJECT_ID + AFFECTED_USERS_MAX_GROUP_ID) + 16 * 1024;
 
 // One definition of "users affected" for every screen that shows it: the issues list, its header total, the
 // issue page and the similar issues rows must agree for the same group, and a user who sent no id (user_id is
@@ -941,26 +954,37 @@ apiRouter.post("/minimaps/cleanup-old", (ctx) => {
 // (project, group) pairs, too much for a query string. Every project named must pass the same read check the
 // detail route applies, and the check runs before any query, so a project the caller cannot read is never counted
 // and the answer cannot reveal how many users it has.
-apiRouter.post("/errors/affected-users", async (ctx) => {
-  requireAuth(ctx);
-  let body: unknown;
-  try {
-    body = await ctx.req.json();
-  } catch {
-    throw new HttpError(400, "Request body must be JSON");
-  }
-  const parsed = affectedUsersSchema.safeParse(body);
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0];
-    throw new HttpError(400, `Invalid request: ${issue?.path.join(".") || "body"}: ${issue?.message}`);
-  }
+apiRouter.post(
+  "/errors/affected-users",
+  // 413 as JSON like the app's other errors; bodyLimit answers from the Content-Length header, or counts the
+  // bytes of a chunked body as they are read, so the body is never parsed past the limit.
+  bodyLimit({ maxSize: AFFECTED_USERS_MAX_BODY_BYTES, onError: (ctx) => ctx.json({ message: "Request body too large" }, 413) }),
+  async (ctx) => {
+    requireAuth(ctx);
+    let body: unknown;
+    try {
+      body = await ctx.req.json();
+    } catch (error) {
+      // Only a body that is not JSON is the caller's mistake. The error a chunked body past the limit raises must
+      // reach bodyLimit, which turns it into the 413 above; a 400 here would hide it.
+      if (error instanceof SyntaxError) {
+        throw new HttpError(400, "Request body must be JSON");
+      }
+      throw error;
+    }
+    const parsed = affectedUsersSchema.safeParse(body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new HttpError(400, `Invalid request: ${issue?.path.join(".") || "body"}: ${issue?.message}`);
+    }
 
-  const { groups } = parsed.data;
-  for (const projectId of new Set(groups.map((group) => group.projectId))) {
-    requireProjectAccess(ctx, projectId, false);
-  }
-  return ctx.json({ affectedUsers: await queryAffectedUsers(groups) } satisfies AffectedUsersResponse);
-});
+    const { groups } = parsed.data;
+    for (const projectId of new Set(groups.map((group) => group.projectId))) {
+      requireProjectAccess(ctx, projectId, false);
+    }
+    return ctx.json({ affectedUsers: await queryAffectedUsers(groups) } satisfies AffectedUsersResponse);
+  },
+);
 
 // The Settings "Connect an app" verify line. Same access as the Projects section, which lists the projects
 // GET /projects returns: admin and workspace viewer read any project, a manager only their memberships.
