@@ -87,7 +87,9 @@ function deviceFrom(userAgent: string): string | null {
 const MAX_USER_AGENT_LENGTH = 512;
 
 export function parseUserAgent(userAgent: string): ParsedUserAgent {
-  const bounded = userAgent.slice(0, MAX_USER_AGENT_LENGTH);
+  // Well-formed after the cut, not before: the cut can leave half an emoji, and the device model is a substring of this
+  // text that is written to a String column, which ClickHouse refuses (the whole INSERT) when it holds a lone surrogate.
+  const bounded = userAgent.slice(0, MAX_USER_AGENT_LENGTH).toWellFormed();
   return {
     browser: firstMatch(BROWSER_PATTERNS, bounded),
     os: firstMatch(OS_PATTERNS, bounded),

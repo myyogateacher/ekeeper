@@ -112,7 +112,90 @@ export function normalizeExceptionValue(raw: string): string {
     });
   }
 
-  return s.replaceAll(BRACE_OPEN_PLACEHOLDER, "{").replaceAll(BRACE_CLOSE_PLACEHOLDER, "}");
+  // The cap in normalizeVolatileText can cut an emoji in half, and this text becomes the message and title columns.
+  return s.replaceAll(BRACE_OPEN_PLACEHOLDER, "{").replaceAll(BRACE_CLOSE_PLACEHOLDER, "}").toWellFormed();
+}
+
+// String(value) that cannot throw. Every field of an event is attacker-controlled JSON (ingest is public to anyone
+// holding a DSN), and String() throws on two shapes that JSON.parse produces: an object whose own "toString" is not a
+// function (`{"toString":1}`, "No default value"), and an array nested deep enough to overflow the stack in
+// Array#toString (measured on bun 1.4.2: 2000 levels pass, 5000 throw). JSON.parse and JSON.stringify both still
+// succeed at 20000 levels, so such a value gets past enqueue. A throw in normalizeEvent aborts the whole project batch
+// in the buffer flush (PROD-10530), so one unusable field must cost only that field. The result for every value that
+// did not throw is String(value) with any lone surrogate replaced by U+FFFD (see below), so for well-formed text it is
+// exactly String(value): this must not change any stored title or group, so no existing group splits.
+//
+// toWellFormed(): ClickHouse refuses a whole INSERT when a String column holds a lone high surrogate ("missing second
+// part of surrogate pair", measured on 24.8), which stalls the bucket the same way an unparseable timestamp does.
+// JSON.parse produces one from "\ud800", and so do the length caps (MAX_NORMALIZED_TEXT_LENGTH, MAX_USER_AGENT_LENGTH)
+// when they cut valid text between the two halves of an emoji. Every direct String column comes through here, through
+// normalizeExceptionValue or through the fingerprint join below. A hash was already computed from UTF-8 bytes, which
+// encode a lone surrogate as U+FFFD, so cleaning the text first changes no fingerprint; an explicit fingerprint is stored
+// as the group id itself, and an event carrying a lone surrogate there was refused by ClickHouse and never stored, so no
+// stored group can split either. Columns written as JSON.stringify output need nothing: it escapes a lone surrogate.
+function safeString<F extends string | null>(value: unknown, fallback: F): string | F {
+  try {
+    return String(value).toWellFormed();
+  } catch {
+    return fallback;
+  }
+}
+
+// How a timestamp string is written into ClickHouse: the T of an ISO-8601 string becomes a space and the Z is dropped.
+// Shared here, not kept in ingest-buffer.ts, because normalizeTimestamp has to judge the text that will actually be sent.
+export function toClickHouseDateTime(value: string): string {
+  return value.replace("T", " ").replace("Z", "");
+}
+
+// The shapes of toClickHouseDateTime output that ClickHouse 24.8 reads into events.timestamp and breadcrumbs.timestamp
+// (DateTime64(3, 'UTC')) from a JSONEachRow insert, each measured on a real server. Anything else makes ClickHouse refuse
+// the whole INSERT, so one event with a timestamp of "garbage" kept its bucket from ever being deleted (PROD-10530).
+// ClickHouse also accepts some irregular shapes, such as a negative number, 14 or more digits (stored as year 2299) or
+// 2026/11/13, and they are left out on purpose: they only ever produce a wrong date, and the pattern list is the one place
+// that has to be exact, because a pattern that is too wide lets a rejected string through.
+const CLICKHOUSE_ACCEPTED_TIMESTAMPS: readonly RegExp[] = [
+  // A date, or a date and time with up to 9 fraction digits (ClickHouse keeps the first 3). The digits are not range
+  // checked, and ClickHouse accepts "2026-13-45 10:00:00" too, so a nonsense date that parses today still parses.
+  /^\d{4}-\d{2}-\d{2}( \d{2}:\d{2}:\d{2}(\.\d{1,9})?)?$/,
+  // Unix seconds with an optional fraction, which is what the Sentry JS and mobile SDKs send: 1731400000.123.
+  /^\d{9,10}(\.\d{1,9})?$/,
+  // Unix milliseconds. ClickHouse reads 11 to 13 digits as milliseconds, but only 13 are a date this century.
+  /^\d{13}$/,
+];
+
+// ISO-8601 with a numeric offset. ClickHouse refuses it, but JavaScript reads it exactly, so it is rewritten to UTC
+// instead of being replaced by `now`.
+const ISO_WITH_OFFSET = /^(\d{4}-\d{2}-\d{2})[T ](\d{2}:\d{2}:\d{2}(?:\.\d{1,9})?)([+-]\d{2}:\d{2})$/;
+
+// A timestamp text that ClickHouse stores correctly. A shape ClickHouse already reads keeps the instant it has today, so
+// the input is returned unchanged and ClickHouse's own reading stays in charge: it truncates a fraction to milliseconds
+// (measured: 1731400000.9999 is stored as .999), which re-deriving the Sentry float seconds through a JavaScript Date
+// would have to reproduce exactly. A text with an offset is converted to UTC. Everything else, including an object, an
+// empty string and anything that is not a date, becomes `now`. normalizeEvent runs again when the buffer is flushed and the
+// result of the check at ingest is discarded, so `now` is the time of the flush that stores the event: up to about 10
+// minutes after receipt (a 5 minute bucket window plus a 5 minute flush interval), longer if the bucket is retried. Losing
+// the event's own time is the cost, and it is far smaller than a rejected INSERT, which stalls the whole bucket and loses it
+// after 48 hours.
+export function normalizeTimestamp(raw: unknown, now: string): string {
+  const text = typeof raw === "string" || typeof raw === "number" ? String(raw) : "";
+  const accepted = (candidate: string) =>
+    CLICKHOUSE_ACCEPTED_TIMESTAMPS.some((pattern) => pattern.test(toClickHouseDateTime(candidate)));
+  if (accepted(text)) {
+    return text;
+  }
+  const offset = ISO_WITH_OFFSET.exec(text);
+  if (offset) {
+    const instant = Date.parse(`${offset[1]}T${offset[2]}${offset[3]}`);
+    // Date.parse is NaN for a date that does not exist (month 13), and an offset can push 9999-12-31 into year 10000,
+    // which toISOString prints with a sign and six digits that ClickHouse refuses, so the result is checked again.
+    if (Number.isFinite(instant)) {
+      const iso = new Date(instant).toISOString();
+      if (accepted(iso)) {
+        return iso;
+      }
+    }
+  }
+  return now;
 }
 
 function normalizeBreadcrumbs(value: unknown): Breadcrumb[] {
@@ -124,12 +207,13 @@ function normalizeBreadcrumbs(value: unknown): Breadcrumb[] {
 
   return source.map((item) => {
     const entry = (item ?? {}) as Record<string, unknown>;
+    const now = new Date().toISOString();
     return {
-      timestamp: String(entry.timestamp ?? new Date().toISOString()),
-      category: String(entry.category ?? "default"),
-      level: String(entry.level ?? "info"),
-      message: String(entry.message ?? ""),
-      type: String(entry.type ?? "default"),
+      timestamp: normalizeTimestamp(entry.timestamp, now),
+      category: safeString(entry.category ?? "default", "default"),
+      level: safeString(entry.level ?? "info", "info"),
+      message: safeString(entry.message ?? "", ""),
+      type: safeString(entry.type ?? "default", "default"),
       data: (entry.data as Record<string, unknown>) ?? {},
     };
   });
@@ -193,6 +277,9 @@ export function computeGroupFingerprint(payload: Record<string, unknown>): strin
     : [];
 
   if (explicitFingerprint.length > 0) {
+    // Stored as the group id and fingerprint columns, so it must be well-formed (see safeString). explicitGroupId
+    // returns the joined fingerprint only when it is plain ASCII from its allowlist, else a 32 hex hash, so a lone
+    // surrogate can never reach those columns from here.
     return explicitGroupId(explicitFingerprint);
   }
 
@@ -200,18 +287,24 @@ export function computeGroupFingerprint(payload: Record<string, unknown>): strin
     ? (((payload.exception as Record<string, unknown>).values as unknown[]) as Array<Record<string, unknown>>)
     : [];
   const exception = exceptionValues[0] ?? {};
-  const type = String(exception.type ?? "Error");
-  const value = normalizeExceptionValue(String(exception.value ?? payload.message ?? "Unknown error"));
-  const frames = (((exception.stacktrace as Record<string, unknown> | undefined)?.frames ?? []) as Array<
-    Record<string, unknown>
-  >)
+  const type = safeString(exception.type ?? "Error", "Error");
+  const value = normalizeExceptionValue(
+    safeString(exception.value ?? payload.message ?? "Unknown error", "Unknown error"),
+  );
+  // `frames` is client data: a string, object or number has no .map, and a null element has no .filename, so each of
+  // those threw here and stalled the flush. A null frame reads as an empty one, which contributes "" to its slot in the
+  // join exactly as a frame with neither filename nor function always did.
+  const rawFrames = (exception.stacktrace as Record<string, unknown> | undefined)?.frames;
+  const frames = (Array.isArray(rawFrames) ? rawFrames : [])
     .slice(-4)
-    .map((frame) =>
-      [
-        typeof frame.filename === "string" ? normalizeVolatileText(frame.filename) : frame.filename,
-        frame.function,
-      ].filter(Boolean).join(":"),
-    )
+    .map((frame: Record<string, unknown> | null) => {
+      const { filename, function: functionName } = frame ?? {};
+      // join() would call String() on each part and throw on the shapes safeString documents, so convert here.
+      return [typeof filename === "string" ? normalizeVolatileText(filename) : filename, functionName]
+        .filter(Boolean)
+        .map((part) => safeString(part, ""))
+        .join(":");
+    })
     .join("|");
 
   return hashString(`${type}|${value}|${frames}`).slice(0, 32);
@@ -223,9 +316,9 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
     : [];
   const primaryException = exceptionValues[0] ?? {};
   const message = normalizeExceptionValue(
-    String(primaryException.value ?? payload.message ?? "Unknown error"),
+    safeString(primaryException.value ?? payload.message ?? "Unknown error", "Unknown error"),
   );
-  const exceptionType = String(primaryException.type ?? "Error");
+  const exceptionType = safeString(primaryException.type ?? "Error", "Error");
   const title = `${exceptionType}: ${message}`;
   const fingerprint = computeGroupFingerprint(payload);
   const contexts = (payload.contexts as Record<string, unknown>) ?? {};
@@ -237,27 +330,35 @@ export function normalizeEvent(projectId: string, payload: Record<string, unknow
   const breadcrumbs = normalizeBreadcrumbs(payload.breadcrumbs);
   // Per field, not all or nothing: an event that sends only `contexts.os` still gets its browser from the UA.
   const fromUserAgent = parseUserAgent(userAgentOf(payload.request));
+  const now = new Date().toISOString();
+  const generatedEventId = crypto.randomUUID().replace(/-/g, "");
+  const eventId = safeString(payload.event_id ?? generatedEventId, generatedEventId);
 
   return {
-    eventId: String(payload.event_id ?? crypto.randomUUID().replace(/-/g, "")),
+    eventId,
     projectId,
     groupId: fingerprint,
     fingerprint,
     title,
     message,
-    severity: String(payload.level ?? "error"),
-    timestamp: String(payload.timestamp ?? new Date().toISOString()),
-    release: payload.release ? String(payload.release) : null,
-    environment: payload.environment ? String(payload.environment) : null,
-    userId: user.id ? String(user.id) : null,
-    userEmail: user.email ? String(user.email) : null,
-    userUsername: user.username ? String(user.username) : null,
-    browser: browserContext.name ? String(browserContext.name) : fromUserAgent.browser,
-    device: deviceContext.model ? String(deviceContext.model) : deviceContext.family ? String(deviceContext.family) : fromUserAgent.device,
-    os: osContext.name ? String(osContext.name) : fromUserAgent.os,
-    runtime: runtimeContext.name ? String(runtimeContext.name) : null,
+    severity: safeString(payload.level ?? "error", "error"),
+    timestamp: normalizeTimestamp(payload.timestamp, now),
+    release: payload.release ? safeString(payload.release, null) : null,
+    environment: payload.environment ? safeString(payload.environment, null) : null,
+    userId: user.id ? safeString(user.id, null) : null,
+    userEmail: user.email ? safeString(user.email, null) : null,
+    userUsername: user.username ? safeString(user.username, null) : null,
+    // A name that cannot be read as text falls back to the User-Agent, the same as an absent one.
+    browser: browserContext.name ? safeString(browserContext.name, fromUserAgent.browser) : fromUserAgent.browser,
+    device: deviceContext.model
+      ? safeString(deviceContext.model, fromUserAgent.device)
+      : deviceContext.family
+        ? safeString(deviceContext.family, fromUserAgent.device)
+        : fromUserAgent.device,
+    os: osContext.name ? safeString(osContext.name, fromUserAgent.os) : fromUserAgent.os,
+    runtime: runtimeContext.name ? safeString(runtimeContext.name, null) : null,
     tags: Object.fromEntries(
-      Object.entries((payload.tags as Record<string, unknown>) ?? {}).map(([key, value]) => [key, String(value)]),
+      Object.entries((payload.tags as Record<string, unknown>) ?? {}).map(([key, value]) => [key, safeString(value, "")]),
     ),
     contexts,
     exception: (payload.exception as Record<string, unknown>) ?? {},

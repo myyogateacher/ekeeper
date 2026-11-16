@@ -176,6 +176,27 @@ describe("top_issues", () => {
   });
 });
 
+describe("error_trend group_by", () => {
+  // group_by picks a column from a fixed map. A name the map does not hold is ignored (no grouping), but a name
+  // every object inherits (constructor, toString, __proto__) was found by the lookup, and its text, a function's
+  // source, was written into the SQL: a syntax error from the engine instead of an ignored name. It is not an
+  // injection (the text is fixed), but it is a request value deciding what lands in the SQL text (PROD-10582).
+  const trend = (groupBy: string) => callTool<Array<Record<string, unknown>>>("error_trend", { group_by: groupBy });
+
+  test.each(["constructor", "toString", "__proto__", "hasOwnProperty", "valueOf"])("an inherited property name %p is ignored like any unknown name", async (name) => {
+    const ignored = await trend("no_such_column");
+
+    expect(await trend(name)).toEqual(ignored);
+    expect(ignored.length).toBeGreaterThan(0);
+  });
+
+  test("a name the map holds still groups", async () => {
+    const rows = await trend("project");
+
+    expect(rows.every((row) => row.dimension === projectWeb)).toBe(true);
+  });
+});
+
 describe("top_issues across projects", () => {
   test("a group_id shared by two projects is one row per project, each with its own count and project_id", async () => {
     const result = await callTool<Array<Record<string, unknown>>>("top_issues", { message_contains: "boom home" }, [projectWeb, projectOther]);

@@ -4,6 +4,9 @@
     "baseUrl": ".",
     "types": [
       "bun-types"
+    ],
+    "lib": [
+      "ES2024"
     ]
   },
   "include": [
