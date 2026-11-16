@@ -69,13 +69,16 @@ export function LandingPage({ onLogin }: LandingPageProps) {
   return (
     <div className="text-[15px] leading-6">
       <header className="border-b border-line bg-surface">
-        <div className={`${wrap} flex min-h-16 flex-wrap items-center gap-6`}>
+        {/* The nav hides at 960px, not the mockup's 720px: brand, nav and button need about 841px, so between 721 and
+            840 (iPad portrait) the button wrapped to a second row under the nav (QA). The tagline hides at 440px so
+            brand and button stay on one row on a phone; py-3 keeps any wrapped row off the header's edges. */}
+        <div className={`${wrap} flex min-h-16 flex-wrap items-center gap-6 py-3`}>
           <Link to="/" className="flex items-center gap-2.5">
             <img src={mytMark} alt="MyYogaTeacher" className="h-7 w-7 object-contain" />
             <b className="text-base font-semibold">eKeeper</b>
-            <span className="text-xs text-muted">by MyYogaTeacher</span>
+            <span className="text-xs text-muted max-[440px]:hidden">by MyYogaTeacher</span>
           </Link>
-          <nav aria-label="Sections" className="ml-auto flex gap-5 max-[720px]:hidden">
+          <nav aria-label="Sections" className="ml-auto flex gap-5 max-[960px]:hidden">
             <a href="#how" className="text-sm font-medium text-muted hover:text-fg">
               How it works
             </a>
@@ -86,7 +89,7 @@ export function LandingPage({ onLogin }: LandingPageProps) {
               Claude and MCP
             </a>
           </nav>
-          <button type="button" className={`${btn} btn-primary max-[720px]:ml-auto`} disabled={starting !== null} onClick={() => signIn("header")}>
+          <button type="button" className={`${btn} btn-primary max-[960px]:ml-auto`} disabled={starting !== null} onClick={() => signIn("header")}>
             {label("header", "Sign in with Google")}
           </button>
         </div>
