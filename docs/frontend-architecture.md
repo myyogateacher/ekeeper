@@ -68,8 +68,28 @@ Entry points: `frontend/src/main.tsx` (query client, toasts), `frontend/src/App.
   "new in 24h" and sort run in the browser on those rows. Above 500 the page says so. The set counts as
   complete only when every page reports the same total; otherwise it refetches once and then shows a
   "list changed while loading" notice.
+- **Issue page** (`GET /api/projects/:projectId/errors/:groupId`): besides the shown event, the response carries
+  `stats` (events in 24h and 7d, first and last seen, 24 hourly counts that sum to the 24h figure) and `navigation`
+  (the Latest, Newer, Older and Oldest event ids and "Event N of M"). The page reads them and never counts or
+  buckets events itself (`hourlyChart`, `eventNav` in `lib/issue-detail.ts`). Users affected is `error.affectedUsers`
+  and `closedAt` feeds "Closed 2h ago".
+- **Stack trace** (`components/StackTrace.tsx`, rules in `lib/stack-trace.ts`): the backend marks framework code with
+  `in_app: false` and adds `pre_context`, `context_line` and `post_context` to source mapped frames. The frontend
+  reads the flag and never re-derives it from a path. Frame fields are untyped on the wire (a public DSN sends any
+  JSON), so every one is type checked in `lib/stack-trace.ts` before it renders. The In app / All frames choice is
+  local state, not the URL.
+- **Issue N of M**: each list row's link carries the list's query string in router state (`listOriginState`).
+  The issue page reads that list's rows back from the query cache with `issueSetKey`, in the list's own order and
+  filters, and never fetches. A deep link or a reload has no state or no cache, so no stepper.
+- **Users affected in the list header** is `POST /api/errors/affected-users` over the rows on screen
+  (`affectedUsersScope`). Distinct users cannot be summed across issues, so every header figure is hidden while the
+  list is loading or shows the previous project's or filter's rows as placeholder data (`showListFigures`), and the
+  users figure also while the list is capped at 500 or inconsistent, or the request itself is loading or failed.
+- **Settings, Connect an app**: the Verify step reads `GET /api/projects/:projectId/ingest-status` and says when
+  the last event arrived and how many source map files exist for that event's release (`lib/ingest-status.ts`).
 - **Times**: ClickHouse sends UTC without a zone. Always go through `lib/time.ts` (`parseServerTime`,
-  `formatRelative`, `formatAbsolute`); never `new Date(serverValue)`. Absolute times print their zone.
+  `formatRelative`, `formatAbsolute`); never `new Date(serverValue)`. Absolute times print their zone. The newer fields
+  (`closedAt`, `stats.firstSeen`, `stats.lastSeen`, `lastEventAt`) are ISO with a Z; `parseServerTime` reads both shapes.
 - **Status and owner changes** go through `components/workflow.tsx`. No optimistic update: the toast
   follows the server's answer. A failed change is treated as unknown (the backend writes before its last
   step can fail), so both list and detail refetch.

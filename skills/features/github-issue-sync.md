@@ -115,8 +115,13 @@ at apiCall (src/features/session/services/api.ts:142:18)
 ...
 ```
 
-View in eKeeper: https://glitch.azure-services.../errors/<projectId>/<groupId>
+View in eKeeper: https://glitch.azure-services.../errors/<projectId>/<groupId, URL encoded>
 ```
+
+The group id in the link is encoded with `encodeURIComponent`, because an
+explicit fingerprint can hold a space or `:` (`Zoom%20Meeting-Join%20Stalled%3Aconnecting`) and the
+frontend decodes each path segment once. Since PROD-10529 new explicit fingerprints with any other
+character become a 32 character hash, so only groups created before it can still need more than that.
 
 Source-mapped frames come from `deobfuscateEvent` in `minimaps.ts`. If
 the project has matching source maps uploaded for that release, frames

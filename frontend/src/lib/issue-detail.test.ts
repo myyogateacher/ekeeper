@@ -3,13 +3,15 @@ import assert from "node:assert/strict";
 import {
   breadcrumbOffset,
   breadcrumbPreview,
+  closedNote,
   displayText,
   eventLevel,
   eventNav,
   exceptionParts,
   framesCrashFirst,
-  occurrenceStats,
+  hourlyChart,
   parseMaybeJson,
+  similarSummary,
   splitTitle,
   statusActions,
   undoState,
@@ -20,35 +22,59 @@ const HOUR = 3_600_000;
 // ClickHouse shape: UTC digits, no zone.
 const at = (msAgo: number) => new Date(NOW - msAgo).toISOString().replace("T", " ").replace("Z", "");
 
-// The chart and the 24h stat sit side by side; if they disagree the page contradicts itself.
-test("hourly buckets cover the last 24 hours and sum to the 24h count, and an occurrence exactly 24h old is outside", () => {
-  const occurrences = [0, 30 * 60_000, 5 * HOUR, 23 * HOUR + 59 * 60_000, 24 * HOUR, 3 * 24 * HOUR, 8 * 24 * HOUR].map(
-    (ago, index) => ({ eventId: `e${index}`, timestamp: at(ago) }),
-  );
-  const stats = occurrenceStats(occurrences, NOW);
-  assert.equal(stats.hourly.length, 24);
-  assert.equal(stats.count24h, 4);
-  assert.equal(stats.hourly.reduce((a, b) => a + b, 0), stats.count24h);
-  assert.equal(stats.hourly[23], 2);
-  assert.equal(stats.hourly[18], 1);
-  assert.equal(stats.hourly[0], 1);
-  assert.equal(stats.count7d, 6);
-  assert.equal(stats.lastSeen, occurrences[0].timestamp);
-  assert.equal(stats.firstSeen, occurrences[6].timestamp);
+// The bars come from the server's `stats.hourly24h`, which the contract says sums to `events24h`, so the page
+// never re-buckets event times. A shifted array would label every bar with the wrong "Nh ago".
+test("the hourly chart draws exactly 24 server counts and reports the peak, and refuses any other array", () => {
+  const counts = Array.from({ length: 24 }, (_, index) => (index === 20 ? 9 : index % 3));
+  assert.deepEqual(hourlyChart(counts), { bars: counts, peak: 9 });
+  assert.deepEqual(hourlyChart(new Array(24).fill(0)), { bars: new Array(24).fill(0), peak: 0 });
+  for (const bad of [[], [1, 2, 3], new Array(23).fill(1), new Array(25).fill(1), [...new Array(23).fill(1), -1], [...new Array(23).fill(1), NaN], [...new Array(23).fill(1), Infinity]]) {
+    assert.equal(hourlyChart(bad), null, JSON.stringify(bad));
+  }
+  assert.equal(hourlyChart(undefined as unknown as number[]), null);
+  assert.equal(hourlyChart("x".repeat(24) as unknown as number[]), null);
 });
 
-test("an event stamped ahead of the viewer's clock lands in the latest hour, not off the chart", () => {
-  const stats = occurrenceStats([{ eventId: "f", timestamp: at(-5 * 60_000) }], NOW);
-  assert.equal(stats.hourly[23], 1);
-});
-
+// EventNavigation (shared/src/contracts.ts): latest and oldest are always set and equal the shown event at the
+// edges; newer and older are null at the edge.
 test("Newer and Latest are absent on the latest event, Older and Oldest on the oldest", () => {
-  const occurrences = ["a", "b", "c"].map((eventId) => ({ eventId, timestamp: at(0) }));
-  assert.deepEqual(eventNav(occurrences, "a"), { index: 0, total: 3, latest: null, newer: null, older: "b", oldest: "c" });
-  assert.deepEqual(eventNav(occurrences, "b"), { index: 1, total: 3, latest: "a", newer: "a", older: "c", oldest: "c" });
-  assert.deepEqual(eventNav(occurrences, "c"), { index: 2, total: 3, latest: "a", newer: "b", older: null, oldest: null });
-  assert.deepEqual(eventNav(occurrences.slice(0, 1), "a"), { index: 0, total: 1, latest: null, newer: null, older: null, oldest: null });
-  assert.equal(eventNav(occurrences, "gone").older, null);
+  const nav = (overrides: object) => ({ latestEventId: "a", oldestEventId: "c", newerEventId: null, olderEventId: "b", position: 1, total: 3, ...overrides });
+  assert.deepEqual(eventNav(nav({}), "a"), { position: 1, total: 3, latest: null, newer: null, older: "b", oldest: "c" });
+  assert.deepEqual(eventNav(nav({ newerEventId: "a", olderEventId: "c", position: 2 }), "b"), { position: 2, total: 3, latest: "a", newer: "a", older: "c", oldest: "c" });
+  assert.deepEqual(eventNav(nav({ newerEventId: "b", olderEventId: null, position: 3 }), "c"), { position: 3, total: 3, latest: "a", newer: "b", older: null, oldest: null });
+  assert.deepEqual(eventNav(nav({ oldestEventId: "a", olderEventId: null, total: 1 }), "a"), { position: 1, total: 1, latest: null, newer: null, older: null, oldest: null });
+});
+
+test("a missing navigation disables every event button, and an out of range position reads as unknown", () => {
+  const none = { position: null, total: null, latest: null, newer: null, older: null, oldest: null };
+  assert.deepEqual(eventNav(null, "a"), none);
+  assert.deepEqual(eventNav(undefined, "a"), none);
+  const base = { latestEventId: "a", oldestEventId: "c", newerEventId: null, olderEventId: "b", total: 3 };
+  for (const position of [0, 4, 1.5, NaN, -1]) {
+    assert.equal(eventNav({ ...base, position }, "a").position, null, String(position));
+  }
+  assert.equal(eventNav({ ...base, position: 3 }, "a").position, 3);
+});
+
+// Closed issues say when and that a new event reopens them. closedAt is ISO with a Z, unlike the zone-less
+// ClickHouse times around it; both parse, and 2h ago must not shift by the viewer's zone.
+test("a closed issue reads 'Closed <age>. Reopens on its own...', and only a closed one does", () => {
+  const reopens = "Reopens on its own if a new event arrives.";
+  assert.equal(closedNote("closed", new Date(NOW - 2 * HOUR).toISOString(), NOW), `Closed 2h ago. ${reopens}`);
+  assert.equal(closedNote("closed", new Date(NOW - 30_000).toISOString(), NOW), `Closed just now. ${reopens}`);
+  assert.equal(closedNote("closed", new Date(NOW - 3 * 24 * HOUR).toISOString(), NOW), `Closed 3d ago. ${reopens}`);
+  assert.equal(closedNote("closed", at(2 * HOUR), NOW), `Closed 2h ago. ${reopens}`, "zone-less digits are UTC too");
+  for (const unreadable of [null, "", "not a date"]) {
+    assert.equal(closedNote("closed", unreadable, NOW), `Closed. ${reopens}`, String(unreadable));
+  }
+  assert.equal(closedNote("open", new Date(NOW).toISOString(), NOW), null);
+  assert.equal(closedNote("reopened", null, NOW), null);
+});
+
+test("a similar issue reads 'N events · N users · release X', with the release left out when there is none", () => {
+  assert.equal(similarSummary({ events: 612, affectedUsers: 201, latestRelease: "2026.11.12-1" }), "612 events · 201 users · release 2026.11.12-1");
+  assert.equal(similarSummary({ events: 1, affectedUsers: 1, latestRelease: null }), "1 event · 1 user");
+  assert.equal(similarSummary({ events: 0, affectedUsers: 0, latestRelease: "" }), "0 events · 0 users");
 });
 
 // Undo re-sends the state held before, so each primary must be the inverse of a reachable state.

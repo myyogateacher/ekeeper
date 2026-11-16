@@ -1,11 +1,12 @@
 import type {
-  DuplicateIssueGroup,
-  ErrorEventDetail,
+  AffectedUsersRequest,
+  AffectedUsersResponse,
+  ErrorDetailResponse,
   ErrorGroupSummary,
+  IngestStatus,
   IssueState,
   MeResponse,
   MinimapArtifact,
-  OccurrenceSummary,
   Project,
   ProjectGithubIntegration,
   ProjectMembership,
@@ -174,9 +175,16 @@ export const api = {
       labelsAdded: number;
     }>(path`/api/projects/${projectId}/github-integration/cleanup-duplicates`, { method: "POST" }),
   errorDetail: (projectId: string, groupId: string, eventId?: string) =>
-    request<{ error: ErrorEventDetail | null; occurrences: OccurrenceSummary[]; duplicateGroups: DuplicateIssueGroup[] }>(
+    request<ErrorDetailResponse>(
       path`/api/projects/${projectId}/errors/${groupId}` + (eventId ? `?${new URLSearchParams({ eventId })}` : ""),
     ),
+  // The ids travel in the body, so no id is ever a path segment here (lib/url.ts).
+  affectedUsers: (groups: AffectedUsersRequest["groups"]) =>
+    request<AffectedUsersResponse>("/api/errors/affected-users", {
+      method: "POST",
+      body: JSON.stringify({ groups } satisfies AffectedUsersRequest),
+    }),
+  ingestStatus: (projectId: string) => request<IngestStatus>(path`/api/projects/${projectId}/ingest-status`),
   updateIssueWorkflow: (projectId: string, groupId: string, payload: { state?: IssueState; assignedUserId?: string | null }) =>
     request<{ issue: ErrorGroupSummary | undefined }>(path`/api/projects/${projectId}/errors/${groupId}/workflow`, {
       method: "PATCH",

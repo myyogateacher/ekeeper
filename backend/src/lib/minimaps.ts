@@ -8,6 +8,7 @@ import { config } from "../config";
 import { all, one, run } from "../db/sqlite";
 import { HttpError } from "./http";
 import { createId } from "./ids";
+import { classifyExceptionFrames, classifyStacktraceFrames, newSourceLineState, replaceSourceContext, type SourceLineState } from "./stack-frames";
 import type { MinimapArtifact } from "@ekeeper/shared";
 
 type UnknownRecord = Record<string, unknown>;
@@ -172,7 +173,14 @@ function mapFrame(
   debugMetaByCodeFile: Map<string, string>,
   cache: Map<string, SourceMapConsumer>,
   sourceMapCache: Map<string, ParsedSourceMapArtifact>,
+  source: SourceLineState,
 ): UnknownRecord {
+  // `frames` is whatever the SDK sent (a public DSN can store `[null]`), so a non-object frame is passed
+  // through. Without this guard the read of `frame.filename` below throws, the detail route answers 500,
+  // and issue-sync's call in the ingest flush throws before the bucket is acknowledged (defect register 92).
+  if (typeof frame !== "object" || frame === null) {
+    return frame;
+  }
   const filename = typeof frame.filename === "string" ? frame.filename : "";
   const line = typeof frame.lineno === "number" ? frame.lineno : Number(frame.lineno);
   const column = typeof frame.colno === "number" ? frame.colno : Number(frame.colno);
@@ -218,7 +226,7 @@ function mapFrame(
     return frame;
   }
 
-  return {
+  const mapped = {
     ...frame,
     filename: original.source,
     function: original.name ?? frame.function,
@@ -228,8 +236,21 @@ function mapFrame(
     compiledFilename: filename,
     sourceMapArtifact: artifact.artifactName,
   };
+  // A mapped frame never keeps the SDK's own source lines (they describe the minified file), so they are
+  // replaced even when the event's budget is spent. The source text is a lookup into the map already held in
+  // memory, null when the map has no sourcesContent, and is split into lines once per call (stack-frames.ts).
+  return replaceSourceContext(
+    mapped,
+    source,
+    `${artifact.id}\u0000${original.source}`,
+    () => consumer.sourceContentFor(original.source, true),
+    mapped.lineno,
+  );
 }
 
+// Walks the frames from the last one, the crash site, to the first, because the event's source line budget is
+// spent in the order frames are mapped and the frames nearest the crash are the ones worth lines. The result keeps
+// the original order.
 function mapFrames(
   frames: UnknownRecord[],
   artifactMap: Map<string, SourceMapLookupArtifact>,
@@ -237,15 +258,18 @@ function mapFrames(
   debugMetaByCodeFile: Map<string, string>,
   cache: Map<string, SourceMapConsumer>,
   sourceMapCache: Map<string, ParsedSourceMapArtifact>,
+  source: SourceLineState,
 ) {
   let applied = false;
-  const mapped = frames.map((frame) => {
-    const nextFrame = mapFrame(frame, artifactMap, debugIdArtifactMap, debugMetaByCodeFile, cache, sourceMapCache);
+  const mapped = new Array<UnknownRecord>(frames.length);
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const frame = frames[index]!;
+    const nextFrame = mapFrame(frame, artifactMap, debugIdArtifactMap, debugMetaByCodeFile, cache, sourceMapCache, source);
     if (nextFrame !== frame) {
       applied = true;
     }
-    return nextFrame;
-  });
+    mapped[index] = nextFrame;
+  }
 
   return { frames: mapped, applied };
 }
@@ -348,6 +372,24 @@ function getReleaseArtifacts(projectId: string, release: string) {
     `,
     [config.EKEEPER_ORG, projectId, normalizeRelease(release)],
   );
+}
+
+/**
+ * How many source map files are uploaded for exactly this release, for the Settings "verify" line. A file counts
+ * when parseSourceMapArtifact would read it as a map (name or path ends in .map), because that is what
+ * deobfuscateEvent can use; a release holding only bundles has 0. Scoped to EKEEPER_ORG and project_id, and the
+ * release is trimmed, exactly as getReleaseArtifacts looks a release up, so it counts the files a lookup finds.
+ * The release comes from the project's newest event, not from the newest upload: a build can upload its maps
+ * before it has sent an event, and the question the screen answers is whether the running app's release has maps.
+ */
+export function countReleaseMapFiles(projectId: string, release: string): number {
+  const counted = one<{ mapFiles: number }>(
+    `SELECT COUNT(*) AS mapFiles FROM minimap_artifacts
+     WHERE org = ? AND project_id = ? AND release = ?
+       AND (substr(artifact_name, -4) = '.map' OR substr(file_path, -4) = '.map')`,
+    [config.EKEEPER_ORG, projectId, normalizeRelease(release)],
+  );
+  return counted?.mapFiles ?? 0;
 }
 
 export function listMinimapArtifacts(
@@ -671,7 +713,25 @@ export function startMinimapRetentionScheduler() {
   return setInterval(runScheduledCleanup, SCHEDULED_CLEANUP_INTERVAL_MS);
 }
 
+// Two jobs on read, kept apart because only the first one says "a source map applied": mapEventFrames rewrites
+// frames through uploaded source maps, then the node_modules rule marks framework frames on every path out of
+// it, including the early returns for an event with no release, no project or no maps. A frame demoted by the
+// rule is a new object, so doing it inside mapFrame would make `applied` true for an event no map touched.
 export function deobfuscateEvent(input: {
+  projectId: string;
+  rawPayload: string;
+  stacktrace: string | UnknownRecord | null;
+  exception: string | UnknownRecord;
+}): DeobfuscationResult {
+  const result = mapEventFrames(input);
+  return {
+    ...result,
+    stacktrace: classifyStacktraceFrames(result.stacktrace),
+    exception: classifyExceptionFrames(result.exception),
+  };
+}
+
+function mapEventFrames(input: {
   projectId: string;
   rawPayload: string;
   stacktrace: string | UnknownRecord | null;
@@ -706,6 +766,9 @@ export function deobfuscateEvent(input: {
   const sourceMapCache = new Map(parsedArtifacts.map((artifact) => [artifact.artifact.id, artifact]));
   const debugMetaByCodeFile = buildDebugMetaLookup(rawPayload);
   const cache = new Map<string, SourceMapConsumer>();
+  // One source line budget for the whole event: the top level stacktrace is mapped first, then each
+  // exception.values entry in order, so the stack the page shows gets its lines before any other.
+  const source = newSourceLineState();
   let applied = false;
 
   const nextStacktrace =
@@ -718,6 +781,7 @@ export function deobfuscateEvent(input: {
             debugMetaByCodeFile,
             cache,
             sourceMapCache,
+            source,
           );
           applied = applied || result.applied;
           return { ...stacktrace, frames: result.frames };
@@ -727,7 +791,7 @@ export function deobfuscateEvent(input: {
   const nextException = { ...exception };
   if (Array.isArray(nextException.values)) {
     nextException.values = (nextException.values as UnknownRecord[]).map((value) => {
-      if (!value.stacktrace || typeof value.stacktrace !== "object" || !Array.isArray((value.stacktrace as UnknownRecord).frames)) {
+      if (typeof value !== "object" || value === null || !value.stacktrace || typeof value.stacktrace !== "object" || !Array.isArray((value.stacktrace as UnknownRecord).frames)) {
         return value;
       }
 
@@ -738,6 +802,7 @@ export function deobfuscateEvent(input: {
         debugMetaByCodeFile,
         cache,
         sourceMapCache,
+        source,
       );
       applied = applied || result.applied;
       return {

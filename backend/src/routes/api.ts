@@ -1,4 +1,5 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
+import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { config } from "../config";
 import { getClickHouseClient } from "../db/clickhouse";
@@ -11,6 +12,7 @@ import {
   cleanupExpiredMinimapsAsync,
   countExpiredMinimaps,
   deobfuscateEvent,
+  countReleaseMapFiles,
   isMinimapCleanupRunning,
   listMinimapArtifacts,
   saveMinimapArtifact,
@@ -25,13 +27,20 @@ import {
   parseLabels,
   syncGithubIssueState,
 } from "../lib/issue-sync";
+import { chunkPairs } from "../lib/pair-chunks";
+import { EVENTS_24H_SQL, EVENTS_7D_SQL, buildEventNavigation, buildIssueStats, hourlyColumnsSql, isoFromEpochMs, type NavigationRow, type StatsRow } from "../lib/issue-stats";
 import { upsertIssueWorkflow } from "../lib/issue-workflow";
 import type {
+  AffectedUsersResponse,
   DashboardProjectCard,
   DuplicateIssueGroup,
+  ErrorDetailResponse,
   ErrorEventDetail,
   ErrorGroupSummary,
+  EventNavigation,
+  IngestStatus,
   IssueState,
+  IssueStats,
   MinimapArtifact,
   Project,
   ProjectGithubIntegration,
@@ -81,6 +90,172 @@ const minimapUploadSchema = z.object({
   artifactName: z.string().min(1),
 });
 
+// The issues list shows at most this many rows (ISSUE_LIST_MAX_ROWS in frontend/src/lib/issue-list.ts), and the
+// header total covers the rows on screen, so a request never needs more. The id caps are generous on purpose:
+// events.group_id is unbounded for an explicit fingerprint stored before PROD-10529, and a cap that rejected a
+// real group would fail the whole header.
+const AFFECTED_USERS_MAX_GROUPS = 500;
+const AFFECTED_USERS_MAX_PROJECT_ID = 128;
+const AFFECTED_USERS_MAX_GROUP_ID = 4096;
+const affectedUsersSchema = z.object({
+  groups: z
+    .array(z.object({ projectId: z.string().min(1).max(AFFECTED_USERS_MAX_PROJECT_ID), groupId: z.string().min(1).max(AFFECTED_USERS_MAX_GROUP_ID) }))
+    .max(AFFECTED_USERS_MAX_GROUPS),
+});
+
+// The schema above counts characters, not bytes, so it does not bound the body: a control character is 6 bytes in
+// JSON (\u0001), so 500 pairs at the schema maximum were 12.3 MB, which cost ClickHouse 322 MiB of memory for one
+// request from any signed-in user (PROD-10537 security review H1). This limit is on bytes, checked before the body
+// is read: the largest body of 500 pairs at the schema maximum in plain ASCII, `{"groups":[{"projectId":"..",
+// "groupId":".."},...]}` written compactly, which is 12 + 500 * (30 + 128 + 4096) = 2,127,012 bytes, plus 16 KiB
+// for the whitespace a client may put between tokens. Ids the app sends are ASCII (the frontend sends group ids
+// the S4 allowlist keeps, hashes, or legacy ones), so a body past this is not a list the app builds.
+export const AFFECTED_USERS_MAX_BODY_BYTES =
+  12 + AFFECTED_USERS_MAX_GROUPS * (30 + AFFECTED_USERS_MAX_PROJECT_ID + AFFECTED_USERS_MAX_GROUP_ID) + 16 * 1024;
+
+// One definition of "users affected" for every screen that shows it: the issues list, its header total, the
+// issue page and the similar issues rows must agree for the same group, and a user who sent no id (user_id is
+// '' in events) is not a user. Interpolated into SQL as a constant, never built from input.
+const AFFECTED_USERS_SQL = "uniqIf(user_id, user_id != '')";
+
+// ClickHouse's default max_query_size, 256 KiB: a longer query text is "Max query size exceeded".
+const DEFAULT_MAX_QUERY_SIZE = 262_144;
+
+// Base64 of a JSON array of [project_id, group_id] pairs. Base64's alphabet (A-Z a-z 0-9 + / =) cannot contain a
+// quote, a backslash or a newline, so the value cannot end the SQL string literal it is put in and nothing is
+// escaped by hand; the engine decodes it as data. Built only from Buffer.toString("base64"), never from input.
+const pairsConstant = (pairs: ReadonlyArray<readonly [string, string]>) =>
+  `JSONExtract(base64Decode('${Buffer.from(JSON.stringify(pairs)).toString("base64")}'), 'Array(Tuple(String, String))')`;
+
+/**
+ * Distinct users over the union of the given groups, all time. One user hitting two groups counts once, so this
+ * is the only correct way to total several groups (summing per group counts overcounts). The issue page passes
+ * one group, the list header up to 500.
+ *
+ * The pairs travel in the request BODY, inside the SQL text, not as a query parameter. @clickhouse/client sends
+ * parameters in the URL and ClickHouse refuses a parameter over http_max_field_value_size (131072 URL encoded
+ * bytes), so 500 pairs of 40 and 200 character ids were a 500 (measured on 24.8.14.39, PROD-10537), and an
+ * explicit fingerprint stored before PROD-10529 can be any length. See pairsConstant for how they are carried.
+ *
+ * `(project_id, group_id) IN <constant array>` is a constant set, so ClickHouse prunes by the sort key and reads
+ * only these groups' rows and only user_id (EXPLAIN indexes = 1: Granules 1/5 on a harness table); a set built by
+ * a subquery over arrayZip was measured to skip that pruning and read every granule. ClickHouse stops folding the
+ * JSON into a constant near 1 MiB, so a big set is several constants ORed (pair-chunks.ts), still one query and one
+ * exact union. A big text needs a higher max_query_size, set only for those requests so the common ones do not
+ * depend on the profile letting a query change it (readonly = 1 refuses it); half of the default is the line where
+ * a request starts setting it.
+ */
+export async function queryAffectedUsers(groups: Array<{ projectId: string; groupId: string }>): Promise<number> {
+  if (groups.length === 0) {
+    return 0;
+  }
+
+  const sets = chunkPairs(groups.map(({ projectId, groupId }) => [projectId, groupId] as const));
+  const query = `
+      SELECT ${AFFECTED_USERS_SQL} AS affectedUsers
+      FROM events
+      WHERE ${sets.map((pairs) => `(project_id, group_id) IN ${pairsConstant(pairs)}`).join(" OR ")}
+    `;
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query,
+    // Twice the text leaves room for whatever a caller puts in front of it (the engine tests prefix shadow tables).
+    clickhouse_settings: query.length > DEFAULT_MAX_QUERY_SIZE / 2 ? { max_query_size: String(query.length * 2) } : undefined,
+    format: "JSONEachRow",
+  });
+  const [row] = (await result.json()) as Array<{ affectedUsers: string | number }>;
+  return Number(row?.affectedUsers ?? 0);
+}
+
+/**
+ * Whole-group figures for the issue page in one read of the group's rows (the sort key prefix project_id,
+ * group_id). Nothing here returns a row per event, which the detail endpoint used to do for every occurrence of
+ * the group on every load and every switch between events. One query, so one `now()` for the 24h and 7d counts and
+ * for all 24 hourly buckets (see issue-stats.ts for why that makes the chart sum to events24h). The aliases are
+ * not column names (defect register 20).
+ */
+export async function queryGroupStats(projectId: string, groupId: string): Promise<IssueStats> {
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query: `
+      SELECT
+        count() AS totalEvents,
+        ${EVENTS_24H_SQL} AS events24h,
+        ${EVENTS_7D_SQL} AS events7d,
+        toUnixTimestamp64Milli(min(timestamp)) AS firstSeenMs,
+        toUnixTimestamp64Milli(max(timestamp)) AS lastSeenMs,
+        ${hourlyColumnsSql()}
+      FROM events
+      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+    `,
+    query_params: { projectId, groupId },
+    format: "JSONEachRow",
+  });
+  // An aggregate with no GROUP BY returns exactly one row, with zeros, for a group that has no events.
+  const [row] = (await result.json()) as StatsRow[];
+  return buildIssueStats(row!);
+}
+
+/**
+ * Where one event sits in its group, newest first, in one aggregate over the group's rows. Events order by
+ * (timestamp, event_id), the table's sort key order, so two events in the same millisecond still have a defined
+ * neighbour and position; the detail route's own "latest event" read uses the same order. Reads timestamp and
+ * event_id only. `current` is the shown event as read from this table, which is why it is always in the group.
+ */
+export async function queryEventNavigation(
+  projectId: string,
+  groupId: string,
+  current: { eventId: string; timestamp: string },
+): Promise<EventNavigation> {
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query: `
+      SELECT
+        count() AS totalEvents,
+        countIf((timestamp, event_id) > ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS newerCount,
+        countIf((timestamp, event_id) < ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS olderCount,
+        argMax(event_id, (timestamp, event_id)) AS latestEventId,
+        argMin(event_id, (timestamp, event_id)) AS oldestEventId,
+        argMinIf(event_id, (timestamp, event_id), (timestamp, event_id) > ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS newerEventId,
+        argMaxIf(event_id, (timestamp, event_id), (timestamp, event_id) < ({currentAt:DateTime64(3, 'UTC')}, {currentEventId:String})) AS olderEventId
+      FROM events
+      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+    `,
+    query_params: { projectId, groupId, currentAt: current.timestamp, currentEventId: current.eventId },
+    format: "JSONEachRow",
+  });
+  const [row] = (await result.json()) as NavigationRow[];
+  return buildEventNavigation(row!);
+}
+
+/**
+ * The project's newest event: its time as ISO 8601 UTC with Z, and its release (null when it has none). Both null
+ * when the project has no event. The sort key leads with project_id but timestamp is its third column, so this is
+ * not a read of one row: ClickHouse reads this project's timestamp and release columns and nothing else. That is
+ * two columns over one project, against 196,902 events across every project in 120 days, and the Settings screen
+ * asks when a person opens it, so it was not worth a second table; if a screen ever polls this, read
+ * project_daily_metrics for the day first.
+ */
+export async function queryLastEvent(projectId: string): Promise<{ lastEventAt: string | null; latestRelease: string | null }> {
+  const client = getClickHouseClient();
+  const result = await client.query({
+    query: `
+      SELECT count() AS eventCount, toUnixTimestamp64Milli(max(timestamp)) AS lastEventMs, argMax(release, timestamp) AS latestRelease
+      FROM events
+      WHERE project_id = {projectId:String}
+    `,
+    query_params: { projectId },
+    format: "JSONEachRow",
+  });
+  const [row] = (await result.json()) as Array<{ eventCount: string | number; lastEventMs: string | number; latestRelease: string }>;
+  // max over no rows is the type's default, 1970-01-01, so the count decides whether there is an event at all.
+  // events.release is '' for an event with no release, never NULL.
+  if (Number(row?.eventCount ?? 0) === 0) {
+    return { lastEventAt: null, latestRelease: null };
+  }
+  return { lastEventAt: isoFromEpochMs(row!.lastEventMs), latestRelease: row!.latestRelease || null };
+}
+
 const DUPLICATE_URL_PATTERN = /https?:\/\/[^\s"'<>\\)]+/;
 const DUPLICATE_UUID_PATTERN = /\b[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}\b/;
 
@@ -105,7 +280,9 @@ function duplicateMessageSearchPattern(message: string): string {
   return message;
 }
 
-async function queryDuplicateIssueGroups(
+// Exported for api-clickhouse.test.ts. The issue detail route reaches it through safeQueryDuplicateIssueGroups,
+// which turns a failed query into an empty list, so the test calls this one to see a failure.
+export async function queryDuplicateIssueGroups(
   projectId: string,
   groupId: string,
   message: string,
@@ -115,16 +292,21 @@ async function queryDuplicateIssueGroups(
     return [];
   }
 
+  // No alias below is also a column of `events`. ClickHouse resolves a name in WHERE to a SELECT alias before a
+  // column when prefer_column_name_to_alias is 0 (the 24.8 default), so the first version's
+  // `any(message) AS message` made `WHERE message = ...` read an aggregate and fail with ILLEGAL_AGGREGATION
+  // (PROD-10527, defect register 20). Which way that setting is set depends on the server profile and
+  // version, so the query must not depend on it; the sample* names are mapped back to the response keys below.
   const client = getClickHouseClient();
   const result = await client.query({
     query: `
       SELECT
         group_id AS groupId,
-        any(title) AS title,
-        any(message) AS message,
-        any(fingerprint) AS fingerprint,
-        count() AS events,
-        uniqIf(user_id, user_id != '') AS affectedUsers,
+        any(title) AS sampleTitle,
+        any(message) AS sampleMessage,
+        any(fingerprint) AS sampleFingerprint,
+        count() AS eventCount,
+        ${AFFECTED_USERS_SQL} AS affectedUsers,
         min(timestamp) AS firstSeen,
         max(timestamp) AS lastSeen,
         argMax(release, timestamp) AS latestRelease
@@ -134,7 +316,7 @@ async function queryDuplicateIssueGroups(
         AND timestamp >= now() - INTERVAL 90 DAY
         AND (message = {message:String} OR message LIKE {messagePattern:String})
       GROUP BY group_id
-      ORDER BY events DESC, lastSeen DESC
+      ORDER BY eventCount DESC, lastSeen DESC
       LIMIT 50
     `,
     query_params: {
@@ -145,16 +327,32 @@ async function queryDuplicateIssueGroups(
     },
     format: "JSONEachRow",
   });
-  const rows = (await result.json()) as DuplicateIssueGroup[];
+  const rows = (await result.json()) as Array<{
+    groupId: string;
+    sampleTitle: string;
+    sampleMessage: string;
+    sampleFingerprint: string;
+    eventCount: string | number;
+    affectedUsers: string | number;
+    firstSeen: string;
+    lastSeen: string;
+    latestRelease: string;
+  }>;
 
   return rows
-    .filter((row) => normalizeDuplicateMessageKey(row.message) === key)
+    .filter((row) => normalizeDuplicateMessageKey(row.sampleMessage) === key)
     .slice(0, 12)
     .map((row) => ({
-      ...row,
-      events: Number(row.events),
+      groupId: row.groupId,
+      title: row.sampleTitle,
+      message: row.sampleMessage,
+      fingerprint: row.sampleFingerprint,
+      events: Number(row.eventCount),
       affectedUsers: Number(row.affectedUsers),
-      latestRelease: row.latestRelease ?? null,
+      firstSeen: row.firstSeen,
+      lastSeen: row.lastSeen,
+      // events.release is '' for an event with no release, never NULL, so `?? null` left an empty string.
+      latestRelease: row.latestRelease || null,
     }));
 }
 
@@ -340,12 +538,12 @@ async function queryErrorGroups(
         project_id AS projectId,
         any(title) AS title,
         any(fingerprint) AS fingerprint,
-        countIf(timestamp >= now() - INTERVAL 7 DAY) AS count7d,
-        countIf(timestamp >= now() - INTERVAL 1 DAY) AS count24h,
+        ${EVENTS_7D_SQL} AS count7d,
+        ${EVENTS_24H_SQL} AS count24h,
         min(timestamp) AS firstSeen,
         max(timestamp) AS lastSeen,
         any(severity) AS severity,
-        uniqIf(user_id, user_id != '') AS affectedUsers
+        ${AFFECTED_USERS_SQL} AS affectedUsers
       FROM events
       WHERE project_id IN (${filter})
       GROUP BY project_id, group_id
@@ -752,6 +950,63 @@ apiRouter.post("/minimaps/cleanup-old", (ctx) => {
   return ctx.json({ started: true, eligible }, 202);
 });
 
+// Distinct users over the union of the given groups, for the issues list header. Not a GET: the set is up to 500
+// (project, group) pairs, too much for a query string. Every project named must pass the same read check the
+// detail route applies, and the check runs before any query, so a project the caller cannot read is never counted
+// and the answer cannot reveal how many users it has.
+const bodyTooLarge = (ctx: Context) => ctx.json({ message: "Request body too large" }, 413);
+
+apiRouter.post(
+  "/errors/affected-users",
+  // 413 as JSON like the app's other errors; bodyLimit answers from the Content-Length header, or counts the
+  // bytes of a chunked body as they are read, so the body is never parsed past the limit.
+  bodyLimit({ maxSize: AFFECTED_USERS_MAX_BODY_BYTES, onError: bodyTooLarge }),
+  async (ctx) => {
+    requireAuth(ctx);
+    let body: unknown;
+    try {
+      body = await ctx.req.json();
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        throw new HttpError(400, "Request body must be JSON");
+      }
+      // A chunked body past the limit makes this read fail with the error bodyLimit raised. Answering the 413
+      // here, not rethrowing for bodyLimit to convert afterwards, keeps it out of app.onError, which logs every
+      // error it sees: a signed-in user could otherwise write a stack trace to the server log per request. It is
+      // matched by name because hono/body-limit does not export its BodyLimitError class (the only export is
+      // bodyLimit; the class sets this.name = "BodyLimitError" in hono 4.12.9).
+      if (error instanceof Error && error.name === "BodyLimitError") {
+        return bodyTooLarge(ctx);
+      }
+      throw error;
+    }
+    const parsed = affectedUsersSchema.safeParse(body);
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0];
+      throw new HttpError(400, `Invalid request: ${issue?.path.join(".") || "body"}: ${issue?.message}`);
+    }
+
+    const { groups } = parsed.data;
+    for (const projectId of new Set(groups.map((group) => group.projectId))) {
+      requireProjectAccess(ctx, projectId, false);
+    }
+    return ctx.json({ affectedUsers: await queryAffectedUsers(groups) } satisfies AffectedUsersResponse);
+  },
+);
+
+// The Settings "Connect an app" verify line. Same access as the Projects section, which lists the projects
+// GET /projects returns: admin and workspace viewer read any project, a manager only their memberships.
+apiRouter.get("/projects/:projectId/ingest-status", async (ctx) => {
+  const projectId = ctx.req.param("projectId");
+  requireProjectAccess(ctx, projectId, false);
+  const { lastEventAt, latestRelease } = await queryLastEvent(projectId);
+  return ctx.json({
+    lastEventAt,
+    latestRelease,
+    sourceMapFiles: latestRelease ? countReleaseMapFiles(projectId, latestRelease) : 0,
+  } satisfies IngestStatus);
+});
+
 apiRouter.get("/projects/all/errors", async (ctx) => {
   const auth = requireAuth(ctx);
   const seeAllProjects = auth.user.role === "admin" || auth.user.role === "viewer";
@@ -825,6 +1080,13 @@ apiRouter.get("/error-assignees", (ctx) => {
   return ctx.json({ users });
 });
 
+// The columns the event read below selects, as ErrorEventDetail types them. Everything else on the response is
+// added in the handler, and `satisfies ErrorEventDetail` there fails to compile when a field is missing.
+type DetailEventRow = Pick<
+  ErrorEventDetail,
+  "eventId" | "groupId" | "message" | "exception" | "stacktrace" | "browser" | "device" | "os" | "runtime" | "tags" | "contexts" | "rawPayload" | "timestamp"
+>;
+
 apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
   const projectId = ctx.req.param("projectId");
   const groupId = ctx.req.param("groupId");
@@ -832,20 +1094,9 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
   const client = getClickHouseClient();
   const eventIdParam = ctx.req.query("eventId");
 
-  // Fetch all occurrence summaries (eventId + timestamp) for navigation
-  const occurrenceResult = await client.query({
-    query: `
-      SELECT event_id AS eventId, timestamp
-      FROM events
-      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
-      ORDER BY timestamp DESC
-    `,
-    query_params: { projectId, groupId },
-    format: "JSONEachRow",
-  });
-  const occurrences = (await occurrenceResult.json()) as Array<{ eventId: string; timestamp: string }>;
-
-  // Fetch the requested event (by eventId) or the latest one
+  // The requested event (by eventId) or the latest one. The latest is picked by (timestamp, event_id) descending,
+  // the same order queryEventNavigation numbers events in, so "latest" is never two different events when two
+  // share a millisecond.
   const eventQuery = eventIdParam
     ? `
       SELECT event_id AS eventId, group_id AS groupId, message, exception, stacktrace,
@@ -859,40 +1110,56 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         browser, device, os, runtime, tags, contexts, raw_payload AS rawPayload, timestamp
       FROM events
       WHERE project_id = {projectId:String} AND group_id = {groupId:String}
-      ORDER BY timestamp DESC
+      ORDER BY timestamp DESC, event_id DESC
       LIMIT 1
     `;
-  const eventResult = await client.query({
-    query: eventQuery,
-    query_params: { projectId, groupId, eventId: eventIdParam ?? "" },
-    format: "JSONEachRow",
-  });
-  const events = (await eventResult.json()) as Array<Omit<ErrorEventDetail, "breadcrumbs">>;
+  // The group's stats do not depend on which event is shown, so they run beside the event read.
+  const [eventResult, stats] = await Promise.all([
+    client.query({
+      query: eventQuery,
+      query_params: { projectId, groupId, eventId: eventIdParam ?? "" },
+      format: "JSONEachRow",
+    }),
+    queryGroupStats(projectId, groupId),
+  ]);
+  const events = (await eventResult.json()) as DetailEventRow[];
 
   const latestEvent = events[0];
 
-  // Fetch breadcrumbs scoped to the specific event
-  const breadcrumbResult = await client.query({
-    query: `
-      SELECT timestamp, category, level, message, type, data
-      FROM breadcrumbs
-      WHERE project_id = {projectId:String} AND group_id = {groupId:String}
-        AND event_id = {eventId:String}
-      ORDER BY timestamp DESC
-      LIMIT 100
-    `,
-    query_params: { projectId, groupId, eventId: latestEvent?.eventId ?? "" },
-    format: "JSONEachRow",
-  });
+  // Everything below needs the event: its breadcrumbs, its place in the group, the group's users, and the other
+  // groups with its message. They are independent reads, so they run together; a failure in any of the first three
+  // is a 500 like the event read, the similar issues read degrades to [] (safeQueryDuplicateIssueGroups).
+  const [breadcrumbs, navigation, affectedUsers, duplicateGroups] = latestEvent
+    ? await Promise.all([
+        client
+          .query({
+            query: `
+              SELECT timestamp, category, level, message, type, data
+              FROM breadcrumbs
+              WHERE project_id = {projectId:String} AND group_id = {groupId:String}
+                AND event_id = {eventId:String}
+              ORDER BY timestamp DESC
+              LIMIT 100
+            `,
+            query_params: { projectId, groupId, eventId: latestEvent.eventId },
+            format: "JSONEachRow",
+          })
+          .then((result) => result.json() as Promise<ErrorEventDetail["breadcrumbs"]>),
+        queryEventNavigation(projectId, groupId, latestEvent),
+        queryAffectedUsers([{ projectId, groupId }]),
+        safeQueryDuplicateIssueGroups(projectId, groupId, latestEvent.message),
+      ])
+    : [[], null, 0, []];
 
-  const breadcrumbs = (await breadcrumbResult.json()) as ErrorEventDetail["breadcrumbs"];
   const workflow = one<{
     state: IssueState;
     assignedUserId: string | null;
     assignedUserName: string | null;
+    closedAt: string | null;
   }>(
     `
-      SELECT iw.state as state, iw.assigned_user_id as assignedUserId, u.name as assignedUserName
+      SELECT iw.state as state, iw.assigned_user_id as assignedUserId, u.name as assignedUserName,
+        iw.closed_at as closedAt
       FROM issue_workflows iw
       LEFT JOIN users u ON u.id = iw.assigned_user_id
       WHERE iw.project_id = ? AND iw.group_id = ?
@@ -908,11 +1175,8 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
       })
     : null;
   const githubLink = getGithubLink(projectId, groupId);
-  const duplicateGroups = latestEvent
-    ? await safeQueryDuplicateIssueGroups(projectId, groupId, latestEvent.message)
-    : [];
   const error = latestEvent
-    ? {
+    ? ({
         ...latestEvent,
         projectId,
         breadcrumbs,
@@ -921,13 +1185,17 @@ apiRouter.get("/projects/:projectId/errors/:groupId", async (ctx) => {
         state: workflow?.state ?? "open",
         assignedUserId: workflow?.assignedUserId ?? null,
         assignedUserName: workflow?.assignedUserName ?? null,
+        // closed_at holds a value only while the state is closed: upsertIssueWorkflow writes null for any other
+        // state, and the reopen on a new event in ingest-buffer.ts clears it.
+        closedAt: workflow?.closedAt ?? null,
         sourceMapApplied: deobfuscated?.applied ?? false,
         sourceMapRelease: deobfuscated?.release ?? null,
         githubIssueNumber: githubLink?.githubIssueNumber ?? null,
         githubIssueUrl: githubLink?.githubIssueUrl ?? null,
-      }
+        affectedUsers,
+      } satisfies ErrorEventDetail)
     : null;
-  return ctx.json({ error, occurrences, duplicateGroups });
+  return ctx.json({ error, stats, navigation, duplicateGroups } satisfies ErrorDetailResponse);
 });
 
 apiRouter.patch("/projects/:projectId/errors/:groupId/workflow", async (ctx) => {

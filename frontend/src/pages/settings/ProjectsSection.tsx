@@ -3,6 +3,7 @@ import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { Link } from "react-router-dom";
 import { Copy } from "lucide-react";
 import { api } from "@/lib/api";
+import { verifyLine } from "@/lib/ingest-status";
 import { isAdmin } from "@/lib/permissions";
 import { useMe } from "@/components/session";
 import { copyText } from "@/components/clipboard";
@@ -173,8 +174,39 @@ function ConnectApp({ section, admin }: { section: ReturnType<typeof useSectionP
             {project.name} issues
           </Link>
           . Allow up to ten minutes: ingest writes events in five minute batches and skips the batch still filling.
+          <VerifyStatus projectId={project.id} />
         </li>
       </ol>
     </section>
+  );
+}
+
+/**
+ * "Last event received 2m ago · 14 source map files for release 2026.11.12-1" under the Verify step, from the
+ * project's own ingest status. One read per project, with a Check again button instead of polling: the step
+ * tells the user to trigger an error and wait up to ten minutes, so the answer changes on their schedule, and a
+ * timer would run for as long as the section stays open. Loading, failure and "no event yet" each have a line
+ * of their own, so an empty result never reads as a working setup.
+ */
+function VerifyStatus({ projectId }: { projectId: string }) {
+  const { data, dataUpdatedAt, isLoading, isError, isFetching, refetch } = useQuery({
+    queryKey: ["ingest-status", projectId],
+    queryFn: () => api.ingestStatus(projectId),
+  });
+  // The age is measured from when the status arrived, so the line does not tick on every render. dataUpdatedAt
+  // and not a memo on `data`: a Check again that returns the same status keeps the same `data` object (structural
+  // sharing), so a memo would keep the first answer's clock and print "2m ago" for an event now ten minutes old.
+  const line = isLoading ? "Checking for events" : isError ? "Couldn't check for events." : data ? verifyLine(data, dataUpdatedAt) : "";
+
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-x-3 gap-y-1 text-muted">
+      {/* The live region is the sentence only, so a screen reader hears the new result and not the button label changing. */}
+      <span role="status" aria-busy={isFetching}>{line}</span>
+      {!isLoading ? (
+        <button type="button" className="btn btn-sm" disabled={isFetching} onClick={() => void refetch()}>
+          {isFetching ? "Checking" : isError ? "Try again" : "Check again"}
+        </button>
+      ) : null}
+    </div>
   );
 }

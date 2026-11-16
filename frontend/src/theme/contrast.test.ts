@@ -43,6 +43,7 @@ const over = (top: Rgb, alpha: number, under: Rgb): Rgb =>
 const SURFACES = ["bg", "surface", "raised"] as const;
 // Tint strengths: the components ship /10 (bg-open/10); the canvas draws 12%. Both must pass.
 const TINTS = [0.1, 0.12];
+const CRASH_LINE_TINTS = [0.14, 0.15];
 
 function textFailures(theme: Theme, themeName: string): string[] {
   const failures: string[] = [];
@@ -63,6 +64,14 @@ function textFailures(theme: Theme, themeName: string): string[] {
   }
   check("fg on code", theme.fg, theme.code, 4.5);
   check("muted on code", theme.muted, theme.code, 4.5);
+  // The stack trace's crash line (components/StackTrace.tsx): the source text and the line number are fg, laid
+  // over the fatal tint, which is itself laid over the code surface, not over bg, surface or raised, so none of
+  // the SURFACES pairs above covers it. The component ships bg-fatal/15 and the canvas draws 14%. The 3px bar on
+  // its left is a non-text mark, so it needs 3:1 against the same surface.
+  for (const alpha of CRASH_LINE_TINTS) {
+    check(`fg on crash line fatal ${alpha * 100}% over code`, theme.fg, over(theme.fatal, alpha, theme.code), 4.5);
+  }
+  check("crash line bar fatal on code", theme.fatal, theme.code, 3);
   check("fg on warn-bg", theme.fg, theme["warn-bg"], 4.5);
   check("accent-ink on accent (primary button)", theme["accent-ink"], theme.accent, 4.5);
   check("bg on fg (toast)", theme.bg, theme.fg, 4.5);

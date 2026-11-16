@@ -15,16 +15,19 @@ import {
   RANGE_PRESETS,
   SAVED_VIEWS,
   SEVERITIES,
+  affectedUsersScope,
   applyBrowserFilters,
   applyListPatch,
   emptyListKind,
   isNewIssue,
+  listOriginState,
   listShortcut,
   listStats,
   matchSavedView,
   parseListQuery,
   serializeListQuery,
   showAllTimeHref,
+  showListFigures,
   stepRow,
   type ListQuery,
   type SortKey,
@@ -36,6 +39,7 @@ import { formatAbsolute, formatRelative } from "@/lib/time";
 import { pluralize } from "@/lib/plural";
 import { formatNumber } from "@/lib/utils";
 import { useMe } from "@/components/session";
+import { useAffectedUsers } from "@/components/useAffectedUsers";
 import { useIssueSet } from "@/components/useIssueSet";
 import { AssignMenu, initials } from "@/components/AssignMenu";
 import { useIssueWorkflow } from "@/components/workflow";
@@ -66,6 +70,16 @@ export function ErrorsPage() {
 
   const rows = useMemo(() => (set ? applyBrowserFilters(set.rows, query, now) : []), [set, query, now]);
   const stats = listStats(rows, now);
+  // The header figures are claims about the rows on screen. While the previous project's or filter's rows are
+  // still shown as placeholder data they would describe the wrong list, so none is printed (showListFigures).
+  const figures = showListFigures(set, isPlaceholderData);
+  // "N users affected" is the server's distinct count over the rows on screen, never a sum of the Users column
+  // (one user can hit several issues). No figure while the list is loading, showing placeholder rows or
+  // incomplete, or while the count itself is loading or failed: a missing figure is honest, a stale or partial
+  // one is not.
+  const affected = useAffectedUsers(useMemo(() => affectedUsersScope(set, rows, isPlaceholderData), [set, rows, isPlaceholderData]));
+  // Carried by every row link so the issue page can step to the previous and next issue of this list.
+  const listState = useMemo(() => listOriginState(query), [query]);
   const view = matchSavedView(query);
   const title = SAVED_VIEWS.find((entry) => entry.id === view)?.label ?? "Issues";
   const projectNames = useMemo(() => new Map((projects?.projects ?? []).map((project) => [project.id, project.name])), [projects]);
@@ -134,7 +148,7 @@ export function ErrorsPage() {
     <div className="flex flex-col gap-3.5">
       <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
         <h1 className="page-title">{title}</h1>
-        {set ? (
+        {figures ? (
           <div className="flex flex-wrap items-center gap-x-4 gap-y-0.5 text-[13px] text-muted">
             <span>
               <b className="font-medium text-fg">{formatNumber(stats.issues)}</b> {pluralize(stats.issues, "issue")}
@@ -150,6 +164,11 @@ export function ErrorsPage() {
             <span>
               <b className="font-medium text-fg">{formatNumber(stats.events7d)}</b> {pluralize(stats.events7d, "event")} in 7d
             </span>
+            {affected.data ? (
+              <span>
+                <b className="font-medium text-fg">{formatNumber(affected.data.affectedUsers)}</b> {pluralize(affected.data.affectedUsers, "user")} affected
+              </span>
+            ) : null}
           </div>
         ) : null}
         <label className="ml-auto flex h-8 max-w-[360px] flex-[1_1_240px] items-center gap-2 rounded-md border border-line bg-surface px-2.5 text-muted max-[720px]:ml-0 max-[720px]:h-11 max-[720px]:max-w-none max-[720px]:basis-full">
@@ -232,6 +251,7 @@ export function ErrorsPage() {
                 projectName={projectNames.get(row.projectId) ?? row.projectId}
                 canWrite={canWriteProject(me, row.projectId)}
                 meId={me.user.id}
+                listState={listState}
                 linkRef={(element) => {
                   rowLinks.current[index] = element;
                 }}
@@ -288,6 +308,7 @@ function IssueRow({
   projectName,
   canWrite,
   meId,
+  listState,
   linkRef,
 }: {
   row: ErrorGroupSummary;
@@ -295,6 +316,7 @@ function IssueRow({
   projectName: string;
   canWrite: boolean;
   meId: string;
+  listState: { list: string };
   linkRef: (element: HTMLAnchorElement | null) => void;
 }) {
   const workflow = useIssueWorkflow();
@@ -320,7 +342,7 @@ function IssueRow({
         <div className="issue-line flex min-w-0 items-center gap-2">
           <SeverityDot level={level} className="issue-dot" />
           {href ? (
-            <Link ref={linkRef} to={href} className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none">
+            <Link ref={linkRef} to={href} state={listState} className="issue-title block min-w-0 text-fg hover:text-accent focus-visible:outline-none">
               {title}
             </Link>
           ) : (
