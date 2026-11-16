@@ -15,9 +15,11 @@ export const HOURLY_BUCKETS = 24;
 // Bucket i holds [now - (24 - i)h, now - (23 - i)h), and the last has no upper bound, so an event stamped ahead of
 // the server clock is counted there, the way events24h counts it, instead of being in a window and no bar.
 //
-// `now('UTC')` and hour intervals, not `now() - INTERVAL 1 DAY` like the list's countIf: a day interval follows the
-// server time zone's calendar and is 23 or 25 hours across a daylight saving change, which would make the
-// window and the buckets disagree twice a year. UTC has no such day.
+// `now('UTC')` and hour intervals, not `now() - INTERVAL 1 DAY`: a day interval follows the server time zone's
+// calendar and is 23 or 25 hours across a daylight saving change, which would make the window and the buckets
+// disagree twice a year. UTC has no such day. These two constants are also what the issues list counts its
+// count24h and count7d with (queryErrorGroups), so the list and the issue page agree for the same group; they
+// were `now() - INTERVAL 1 DAY` and `7 DAY` there until PROD-10537, which is the same under a UTC server.
 export const EVENTS_24H_SQL = "countIf(timestamp >= now('UTC') - INTERVAL 24 HOUR)";
 export const EVENTS_7D_SQL = "countIf(timestamp >= now('UTC') - INTERVAL 168 HOUR)";
 

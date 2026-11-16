@@ -31,7 +31,8 @@ export const MAX_SOURCE_LINE_FRAMES_PER_EVENT = 50;
 const MAX_FILENAME_LENGTH = 2048;
 
 // Source text lines are cut so one minified vendor line in a map's sourcesContent cannot put hundreds of KB on
-// the wire: 3 + 1 + 3 lines per frame, 50 frames, and both copies of the stack are mapped.
+// the wire: at most 3 + 1 + 3 lines per frame of 300 characters, for at most MAX_SOURCE_LINE_FRAMES_PER_EVENT
+// frames in the whole event, about 105 KB.
 const MAX_CONTEXT_LINE_LENGTH = 300;
 const CONTEXT_LINES_EACH_SIDE = 3;
 

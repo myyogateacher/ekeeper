@@ -336,6 +336,42 @@ describe("queryGroupStats", () => {
   });
 });
 
+// ErrorGroupSummary.count24h and count7d (the issues list) and IssueStats.events24h and events7d (the issue page)
+// are one definition in the contract, so the same group on the same data must give the same figure on both,
+// including an event exactly on the edge of a window, where `>=` against a day interval in the server's time zone
+// and `>=` against hours in UTC could part.
+describe("the issues list and the issue page count 24h and 7d the same way", () => {
+  beforeEach(() => {
+    aliasSetting = 0;
+  });
+
+  const group = "g_parity";
+  const events: TestEvent[] = [
+    { project: routeProject, group, at: ago("0 SECOND") },
+    { project: routeProject, group, at: ago("24 HOUR") },
+    { project: routeProject, group, at: ago("86400001 MILLISECOND") },
+    { project: routeProject, group, at: ago("25 HOUR") },
+    { project: routeProject, group, at: ago("168 HOUR") },
+    { project: routeProject, group, at: ago("604800001 MILLISECOND") },
+    { project: routeProject, group, at: ago("8 DAY") },
+  ];
+
+  test("the same group gives the same count24h and events24h, count7d and events7d, with events exactly on both edges", async () => {
+    shadow(events);
+    const app = appAs("admin");
+
+    const list = (await (await app.request(`/api/projects/${routeProject}/errors?limit=100`)).json()) as { errors: Array<{ groupId: string; count24h: number; count7d: number }> };
+    const page = (await (await app.request(`/api/projects/${routeProject}/errors/${group}`)).json()) as ErrorDetailResponse;
+    const row = list.errors.find((entry) => entry.groupId === group)!;
+
+    // now and exactly 24 h old are in the day; the event 1 ms older is not. The same for 168 h.
+    expect([row.count24h, row.count7d]).toEqual([2, 5]);
+    expect([page.stats.events24h, page.stats.events7d]).toEqual([2, 5]);
+    expect([row.count24h, row.count7d]).toEqual([page.stats.events24h, page.stats.events7d]);
+    expect(page.stats.hourly24h.reduce((sum, count) => sum + count, 0)).toBe(row.count24h);
+  });
+});
+
 describe("queryEventNavigation", () => {
   beforeEach(() => {
     aliasSetting = 0;
