@@ -238,7 +238,9 @@ async function dashboardCards(projectIds: string[], projects: Project[]): Promis
   ).map((row) => row.key);
 
   const client = getClickHouseClient();
-  const filter = projectIds.map((id) => `'${id}'`).join(", ");
+  // Bound as a parameter, never pasted into the SQL text (PROD-10582). These ids come from SQLite, so none holds a
+  // quote today, but a project id that did would otherwise fail this query for every project, and the list query
+  // below takes its ids from the URL; both bind them the same way.
   const recurringGroups = closedGroupKeys.length
     ? "uniqIf(group_id, concat(project_id, ':', group_id) NOT IN {closedGroupKeys:Array(String)})"
     : "uniq(group_id)";
@@ -251,10 +253,10 @@ async function dashboardCards(projectIds: string[], projects: Project[]): Promis
         uniqIf(user_id, user_id != '') AS impactedUsers7d,
         any(title) AS topGroupTitle
       FROM events
-      WHERE project_id IN (${filter}) AND timestamp >= now() - INTERVAL 7 DAY
+      WHERE project_id IN {projectIds:Array(String)} AND timestamp >= now() - INTERVAL 7 DAY
       GROUP BY project_id
     `,
-    query_params: closedGroupKeys.length ? { closedGroupKeys } : undefined,
+    query_params: { projectIds, ...(closedGroupKeys.length ? { closedGroupKeys } : {}) },
     format: "JSONEachRow",
   });
   const rows = (await result.json()) as Array<
@@ -309,14 +311,19 @@ async function queryErrorGroups(
   }
 
   const client = getClickHouseClient();
-  const filter = projectIds.map((id) => `'${id}'`).join(", ");
   const userTerm = options.user?.trim();
   const fromTs = parseDateBoundary(options.from, "from");
   const toTs = parseDateBoundary(options.to, "to");
 
   // Range filters apply to the group's last-seen timestamp: "issues seen within this window".
   const havingConditions: string[] = [];
-  const queryParams: Record<string, string> = {};
+  // The project ids are bound as an Array(String) parameter and never pasted into the SQL text (PROD-10582). One
+  // caller, GET /projects/:projectId/errors, passes the :projectId of the URL, and requireProjectAccess does not
+  // vouch for it: an admin or a workspace viewer passes ANY string, existing project or not, because it only checks
+  // the role. Pasted between quotes, `pZ') OR ('1'='1` made a viewer, the read-only role, write the WHERE clause
+  // and read every project's groups, and an id with a single apostrophe was a 500. As a parameter the same string
+  // is just a project id that has no events.
+  const queryParams: Record<string, string | string[]> = { projectIds };
   if (userTerm) {
     havingConditions.push(
       "countIf(user_id = {userTerm:String} OR user_email = {userTerm:String} OR user_username = {userTerm:String}) > 0",
@@ -347,12 +354,12 @@ async function queryErrorGroups(
         any(severity) AS severity,
         uniqIf(user_id, user_id != '') AS affectedUsers
       FROM events
-      WHERE project_id IN (${filter})
+      WHERE project_id IN {projectIds:Array(String)}
       GROUP BY project_id, group_id
       ${userFilter}
       ORDER BY count7d DESC, lastSeen DESC
     `,
-    query_params: Object.keys(queryParams).length ? queryParams : undefined,
+    query_params: queryParams,
     format: "JSONEachRow",
   });
 
