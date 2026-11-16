@@ -65,7 +65,12 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
   const counts = baseSet ? viewCounts(baseSet, user.id, viewProject) : null;
 
   return (
-    <div className="flex min-h-screen flex-wrap items-stretch">
+    // Under 720px the sidebar becomes a full width top bar and wraps onto its own flex line above <main>. A wrapping
+    // flex container defaults to align-content: stretch, which hands the spare height of min-h-screen to its lines,
+    // so on a short page the top bar's line grew and the stretched sidebar showed an empty band under the bar (QA,
+    // a 2 row list at 390 wide: about 110px). content-start packs both lines at the top instead. Above 720px the
+    // sidebar and <main> share one line that must keep the full height, so the rule does not apply there.
+    <div className="flex min-h-screen flex-wrap items-stretch max-[720px]:content-start">
       <a
         href="#main"
         className="sr-only focus:not-sr-only focus:absolute focus:left-2 focus:top-2 focus:z-50 focus:rounded-md focus:bg-surface focus:px-3 focus:py-2"
