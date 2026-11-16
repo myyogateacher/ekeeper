@@ -1,5 +1,5 @@
 import type { ClickHouseSettings } from "@clickhouse/client";
-import { afterAll, beforeEach, describe, expect, mock, test } from "bun:test";
+import { afterAll, beforeEach, describe, expect, mock, spyOn, test } from "bun:test";
 import { Hono } from "hono";
 import type { ErrorDetailResponse } from "@ekeeper/shared";
 import { config } from "../config";
@@ -113,7 +113,14 @@ function appAs(role: Role, memberships: string[] = []) {
     });
     await next();
   });
-  app.onError((error, ctx) => (error instanceof HttpError ? ctx.json({ message: error.message }, error.status as 400 | 401 | 403 | 404) : ctx.json({ message: "Internal server error" }, 500)));
+  app.onError((error, ctx) => {
+    if (error instanceof HttpError) {
+      return ctx.json({ message: error.message }, error.status as 400 | 401 | 403 | 404);
+    }
+    // index.ts logs every error that is not an HttpError here, so a test can see what would reach the server log.
+    console.error(error);
+    return ctx.json({ message: "Internal server error" }, 500);
+  });
   app.route("/api", apiRouter);
   return app;
 }
@@ -772,12 +779,19 @@ describe("POST /api/errors/affected-users", () => {
   const postStream = (body: ReadableStream<Uint8Array>) =>
     appAs("admin").request("/api/errors/affected-users", { method: "POST", headers: { "content-type": "application/json" }, body, duplex: "half" } as RequestInit);
 
-  test("a chunked body past the limit is a 413, not the 400 of a body that is not JSON", async () => {
+  test("a chunked body past the limit is a 413, not the 400 of a body that is not JSON, and writes nothing to the error log", async () => {
     noQueryMayRun();
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
 
-    const response = await postStream(streamed(Math.ceil(AFFECTED_USERS_MAX_BODY_BYTES / 65_536) + 2, "x".repeat(65_536)));
+    try {
+      const response = await postStream(streamed(Math.ceil(AFFECTED_USERS_MAX_BODY_BYTES / 65_536) + 2, "x".repeat(65_536)));
 
-    expect(response.status).toBe(413);
+      expect(response.status).toBe(413);
+      expect(await response.json()).toEqual({ message: "Request body too large" });
+      expect(errorLog).not.toHaveBeenCalled();
+    } finally {
+      errorLog.mockRestore();
+    }
   });
 
   test("a Content-Length over the limit is a 413 from the header alone: the body is never read", async () => {

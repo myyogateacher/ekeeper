@@ -1,4 +1,4 @@
-import { Hono } from "hono";
+import { Hono, type Context } from "hono";
 import { bodyLimit } from "hono/body-limit";
 import { z } from "zod";
 import { config } from "../config";
@@ -954,21 +954,29 @@ apiRouter.post("/minimaps/cleanup-old", (ctx) => {
 // (project, group) pairs, too much for a query string. Every project named must pass the same read check the
 // detail route applies, and the check runs before any query, so a project the caller cannot read is never counted
 // and the answer cannot reveal how many users it has.
+const bodyTooLarge = (ctx: Context) => ctx.json({ message: "Request body too large" }, 413);
+
 apiRouter.post(
   "/errors/affected-users",
   // 413 as JSON like the app's other errors; bodyLimit answers from the Content-Length header, or counts the
   // bytes of a chunked body as they are read, so the body is never parsed past the limit.
-  bodyLimit({ maxSize: AFFECTED_USERS_MAX_BODY_BYTES, onError: (ctx) => ctx.json({ message: "Request body too large" }, 413) }),
+  bodyLimit({ maxSize: AFFECTED_USERS_MAX_BODY_BYTES, onError: bodyTooLarge }),
   async (ctx) => {
     requireAuth(ctx);
     let body: unknown;
     try {
       body = await ctx.req.json();
     } catch (error) {
-      // Only a body that is not JSON is the caller's mistake. The error a chunked body past the limit raises must
-      // reach bodyLimit, which turns it into the 413 above; a 400 here would hide it.
       if (error instanceof SyntaxError) {
         throw new HttpError(400, "Request body must be JSON");
+      }
+      // A chunked body past the limit makes this read fail with the error bodyLimit raised. Answering the 413
+      // here, not rethrowing for bodyLimit to convert afterwards, keeps it out of app.onError, which logs every
+      // error it sees: a signed-in user could otherwise write a stack trace to the server log per request. It is
+      // matched by name because hono/body-limit does not export its BodyLimitError class (the only export is
+      // bodyLimit; the class sets this.name = "BodyLimitError" in hono 4.12.9).
+      if (error instanceof Error && error.name === "BodyLimitError") {
+        return bodyTooLarge(ctx);
       }
       throw error;
     }
