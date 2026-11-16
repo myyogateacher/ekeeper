@@ -18,6 +18,19 @@ import { HttpError } from "../lib/http";
 // (0 resolves to the alias, which is what made `WHERE message = ...` read `any(message)`), a server profile can set
 // it either way, and a query that depends on it breaks when the profile changes.
 
+// On ClickHouse 24.8 each query block reads its own `now()`: the WITH subqueries that make up the shadow table and the
+// main SELECT are separate blocks, so a fixture row and a window edge in the query under test are two readings, a
+// few tens of microseconds apart. When a second boundary falls between them they differ by a second (measured with
+// queries sent in the last 6 ms before a boundary: 13 of 200 saw two values across a CTE and its outer query, and
+// 0 of 120 across 50 calls inside one SELECT list, which is why the production stats query, one SELECT, is not
+// affected). A test that puts an event exactly on a window edge then failed (a reviewer saw it once in about 70 runs;
+// 48 of 200 runs failed when every query was sent just before a boundary). So every `now()` and `now('UTC')` in the text a test
+// sends, fixtures and query under test alike, is replaced by `test_now`, one scalar defined at the top of the WITH
+// list from a parameter read once per query in the test process. Windows and fixtures then share one clock exactly,
+// and the SQL under test differs from production only in where that one value comes from. A name, not the
+// expression pasted at each call, keeps the text of a 500 row shadow under max_query_size.
+const NOW_CALL = /\bnow\(\s*(?:'UTC'\s*)?\)/g;
+
 const realClickHouse = await import("../db/clickhouse");
 const realClient = realClickHouse.getClickHouseClient();
 let shadowTables = "";
@@ -25,12 +38,13 @@ let aliasSetting: 0 | 1 = 0;
 mock.module("../db/clickhouse", () => ({
   ...realClickHouse,
   getClickHouseClient: () => ({
-    query: (options: { query: string; clickhouse_settings?: ClickHouseSettings }) =>
+    query: (options: { query: string; query_params?: Record<string, unknown>; clickhouse_settings?: ClickHouseSettings }) =>
       realClient.query(
         shadowTables
           ? {
               ...options,
-              query: `WITH ${shadowTables} ${options.query}`,
+              query: `WITH toDateTime({testNow:UInt32}, 'UTC') AS test_now, ${shadowTables} ${options.query}`.replace(NOW_CALL, "test_now"),
+              query_params: { ...options.query_params, testNow: Math.floor(Date.now() / 1000) },
               clickhouse_settings: { ...options.clickhouse_settings, prefer_column_name_to_alias: aliasSetting },
             }
           : options,
@@ -45,8 +59,9 @@ afterAll(() => {
 
 const literal = (value: string) => `'${value.replaceAll("\\", "\\\\").replaceAll("'", "\\'").replaceAll("\n", "\\n")}'`;
 
-// Event times are SQL, not JS: ClickHouse evaluates `now()` once per query, so the rows and the query's own
-// windows share one clock and a test cannot straddle a window edge because the two clocks disagree.
+// Event times are SQL, relative to `now()`, and the wrapper above replaces that `now()` and the query's own with one
+// bound value, so the rows and the query's windows share one clock exactly and an event can sit exactly on a window
+// edge without the test depending on which second it runs in.
 const ago = (interval: string) => `toDateTime64(now('UTC') - INTERVAL ${interval}, 3, 'UTC')`;
 const at = (utc: string) => `toDateTime64('${utc}', 3, 'UTC')`;
 
@@ -248,8 +263,8 @@ describe("queryGroupStats", () => {
   });
 
   // Rolling hours: hourly24h[i] is [now - (24 - i)h, now - (23 - i)h). Each lower edge is inclusive, so an event
-  // exactly 1 hour old is in the last bar and one exactly 24 hours old is in the first. `ago` is evaluated by the
-  // same query's now(), so the edge events sit exactly on the edges.
+  // exactly 1 hour old is in the last bar and one exactly 24 hours old is in the first. `ago` and the query read the
+  // one bound now (see the wrapper), so the edge events sit exactly on the edges.
   const group = "g1";
   const inWindow: TestEvent[] = [
     { project: "pA", group, at: ago("30 MINUTE") },
