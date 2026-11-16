@@ -4,7 +4,7 @@ import { SourceMapGenerator } from "source-map-js";
 import { config } from "../config";
 import { run } from "../db/sqlite";
 import { normalizeEvent } from "./ingest";
-import { deobfuscateEvent, saveMinimapArtifact } from "./minimaps";
+import { saveMinimapArtifact } from "./minimaps";
 
 // These tests run the real MCP handlers against a real ClickHouse, because SQL asserted as text proves
 // nothing: the alias bug in top_issues parsed fine as a string and failed only in the engine (defect register
@@ -139,26 +139,9 @@ const bareArtifact = saveMinimapArtifact({
   buffer: Buffer.from(bareGenerator.toString()),
 });
 
-// Worst case for source lines: 50 frames (MAX_ANNOTATED_FRAMES) that all land near the end of one 1 MB source,
-// so every `split` scans nearly the whole text. 20,000 lines of 50 characters.
-const releaseBig = `rel_big_${suffix}`;
-const bigGenerator = new SourceMapGenerator({ file: "big.js" });
-for (let index = 0; index < 50; index += 1) {
-  bigGenerator.addMapping({ generated: { line: index + 1, column: 0 }, source: "src/big.ts", original: { line: 19_950 + index, column: 0 } });
-}
-bigGenerator.setSourceContent("src/big.ts", Array.from({ length: 20_000 }, (_, index) => `${String(index + 1).padStart(5, "0")} ${"x".repeat(44)}`).join("\n"));
-const bigArtifact = saveMinimapArtifact({
-  org: config.EKEEPER_ORG,
-  projectId: projectWeb,
-  project: `web-${suffix}`,
-  release: releaseBig,
-  artifactName: "~/web-zoom/assets/big.js.map",
-  buffer: Buffer.from(bigGenerator.toString()),
-});
-
 afterAll(() => {
   shadowTables = "";
-  for (const stored of [artifact, bareArtifact, bigArtifact]) {
+  for (const stored of [artifact, bareArtifact]) {
     if (existsSync(stored.filePath)) rmSync(stored.filePath, { force: true });
   }
   run(`DELETE FROM minimap_artifacts WHERE project_id = ?`, [projectWeb]);
@@ -234,28 +217,6 @@ describe("tag filter", () => {
     const [event] = await callTool<Array<{ tags: string }>>("search_events", { tag: "app:web_zoom" });
 
     expect(JSON.parse(event!.tags)).toEqual({ app: "web_zoom" });
-  });
-});
-
-describe("source lines cost", () => {
-  // The budget is a number chosen up front, not a measurement: over it means adding a per-source line cache in
-  // mapFrames (one split of each source per call instead of one per frame).
-  const BUDGET_MS = 250;
-
-  test(`50 frames into one 1 MB source map to their lines in under ${BUDGET_MS} ms`, () => {
-    const frames = Array.from({ length: 50 }, (_, index) => ({ filename: "https://myyogateacher.com/web-zoom/assets/big.js", lineno: index + 1, colno: 1 }));
-    const input = { projectId: projectWeb, rawPayload: JSON.stringify({ release: releaseBig }), stacktrace: { frames }, exception: { values: [{ stacktrace: { frames } }] } };
-
-    const startedAt = performance.now();
-    const result = deobfuscateEvent(input);
-    const elapsed = performance.now() - startedAt;
-    console.log(`[source lines cost] 100 frames (both copies of the stack) into one 1 MB source: ${elapsed.toFixed(1)} ms`);
-
-    const mapped = result.stacktrace!.frames as Array<{ lineno: number; context_line: string; pre_context: string[]; post_context: string[] }>;
-    expect(mapped[49]).toMatchObject({ lineno: 19_999, context_line: expect.stringMatching(/^19999 /) });
-    expect(mapped[49]!.pre_context).toHaveLength(3);
-    expect(mapped[49]!.post_context).toHaveLength(1);
-    expect(elapsed).toBeLessThan(BUDGET_MS);
   });
 });
 

@@ -121,7 +121,7 @@ When issue detail is requested:
 2. it reads the event release from the stored payload
 3. it finds uploaded source maps for the matching eKeeper project and release
 4. it rewrites stack frames to original source positions where mappings exist
-5. for the 50 frames nearest the crash it adds `pre_context`, `context_line` and `post_context` (3 lines each side, each cut at 300 characters) from the map's `sourcesContent`; a map without it leaves the frame with no source lines, and any lines the SDK sent on a mapped frame are dropped because they describe the minified file
+5. it adds `pre_context`, `context_line` and `post_context` (3 lines each side, each cut at 300 characters) from the map's `sourcesContent`, to at most 50 frames per event in all: one budget shared by the top level `stacktrace` and every `exception.values[]` stack, spent on the top level stack first, then `values[0]`, `values[1]` and so on, each from its crash end (an event can hold any number of stacks, and each source is split into lines once per call); a map without it leaves the frame with no source lines, and any lines the SDK sent on a mapped frame are dropped because they describe the minified file
 6. it marks a frame whose filename, after mapping, has a `node_modules` path segment as `in_app: false` with the npm `package`; this runs for every event, including ones with no release or no maps. The browser SDK sets `in_app: true` on every frame, so the path is the only evidence
 7. it returns the enriched event while preserving the raw payload
 

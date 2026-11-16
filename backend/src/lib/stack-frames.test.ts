@@ -1,13 +1,19 @@
 import { describe, expect, test } from "bun:test";
 import {
   MAX_ANNOTATED_FRAMES,
+  MAX_SOURCE_LINE_FRAMES_PER_EVENT,
   classifyExceptionFrames,
   classifyFrame,
   classifyStacktraceFrames,
-  contextAround,
+  contextFromLines,
   firstAnnotatedFrame,
+  newSourceLineState,
   replaceSourceContext,
+  splitSourceLines,
 } from "./stack-frames";
+
+// The text-in form the tests below read most: split once, then take the lines around one.
+const contextAround = (content: string, line: number) => contextFromLines(splitSourceLines(content), line);
 
 describe("classifyFrame: a frame under node_modules is framework code, anything else is left exactly as sent", () => {
   // The browser SDK sets in_app: true on every frame, so the only evidence that can be added is the path.
@@ -140,13 +146,24 @@ describe("contextAround", () => {
   });
 });
 
+describe("splitSourceLines", () => {
+  test("LF and CRLF split lines, a trailing newline is not a line, and an empty text has none", () => {
+    expect(splitSourceLines("a\nb\r\nc")).toEqual(["a", "b", "c"]);
+    expect(splitSourceLines("a\nb\n")).toEqual(["a", "b"]);
+    expect(splitSourceLines("a\n\n")).toEqual(["a", ""]);
+    expect(splitSourceLines("")).toEqual([]);
+  });
+});
+
 describe("replaceSourceContext", () => {
   const sdkLines = { pre_context: ["minified before"], context_line: "minified line", post_context: ["minified after"] };
+  const replace = (frame: Record<string, unknown>, content: unknown, line: unknown, state = newSourceLineState()) =>
+    replaceSourceContext(frame, state, "k", () => content, line);
 
   test("replaces the SDK's lines with the source's, keeping every other field", () => {
     const frame = { filename: "src/a.ts", lineno: 2, function: "f", ...sdkLines };
 
-    expect(replaceSourceContext(frame, "a\nb\nc", 2)).toEqual({
+    expect(replace(frame, "a\nb\nc", 2)).toEqual({
       filename: "src/a.ts",
       lineno: 2,
       function: "f",
@@ -157,19 +174,76 @@ describe("replaceSourceContext", () => {
   });
 
   test("without source text the SDK's lines are dropped: they describe the minified file", () => {
-    expect(replaceSourceContext({ filename: "src/a.ts", lineno: 2, ...sdkLines }, null, 2)).toEqual({ filename: "src/a.ts", lineno: 2 });
+    expect(replace({ filename: "src/a.ts", lineno: 2, ...sdkLines }, null, 2)).toEqual({ filename: "src/a.ts", lineno: 2 });
   });
 
   test("source text that is not a string, as a malformed map can hold, leaves a header only frame instead of throwing", () => {
     for (const content of [5, {}, [], true, undefined]) {
-      expect(replaceSourceContext({ filename: "x", ...sdkLines }, content, 2)).toEqual({ filename: "x" });
+      expect(replace({ filename: "x", ...sdkLines }, content, 2)).toEqual({ filename: "x" });
     }
   });
 
   test("a line that is not in the text, or not a number, leaves a header only frame", () => {
-    expect(replaceSourceContext({ filename: "x", ...sdkLines }, "a\nb", 9)).toEqual({ filename: "x" });
-    expect(replaceSourceContext({ filename: "x", ...sdkLines }, "a\nb", "2")).toEqual({ filename: "x" });
-    expect(replaceSourceContext({ filename: "x", ...sdkLines }, "a\nb", undefined)).toEqual({ filename: "x" });
+    expect(replace({ filename: "x", ...sdkLines }, "a\nb", 9)).toEqual({ filename: "x" });
+    expect(replace({ filename: "x", ...sdkLines }, "a\nb", "2")).toEqual({ filename: "x" });
+    expect(replace({ filename: "x", ...sdkLines }, "a\nb", undefined)).toEqual({ filename: "x" });
+  });
+
+  describe("the event's budget", () => {
+    test("starts at one stack's worth, and each frame that gets lines spends one", () => {
+      const state = newSourceLineState();
+
+      expect(state.remaining).toBe(MAX_SOURCE_LINE_FRAMES_PER_EVENT);
+      replace({ filename: "x" }, "a\nb", 1, state);
+      replace({ filename: "x" }, "a\nb", 2, state);
+      expect(state.remaining).toBe(MAX_SOURCE_LINE_FRAMES_PER_EVENT - 2);
+    });
+
+    test("a frame that gets no lines spends nothing: no text, a line past the end, a bad line", () => {
+      const state = newSourceLineState();
+
+      replace({ filename: "x" }, null, 1, state);
+      replace({ filename: "x" }, "a", 9, state);
+      replace({ filename: "x" }, "a", "1", state);
+      expect(state.remaining).toBe(MAX_SOURCE_LINE_FRAMES_PER_EVENT);
+    });
+
+    test("once spent, no frame gets lines, the SDK's own are still dropped, and the source is not read again", () => {
+      const state = { ...newSourceLineState(), remaining: 1 };
+      let reads = 0;
+      const read = () => {
+        reads += 1;
+        return "a\nb";
+      };
+
+      const first = replaceSourceContext({ filename: "x", ...sdkLines }, state, "k", read, 1);
+      const second = replaceSourceContext({ filename: "x", ...sdkLines }, state, "other", read, 1);
+
+      expect(first.context_line).toBe("a");
+      expect(second).toEqual({ filename: "x" });
+      expect(reads).toBe(1);
+      expect(state.remaining).toBe(0);
+    });
+
+    test("a source is split once however many frames point into it, and a source with no text is remembered as none", () => {
+      const state = newSourceLineState();
+      let reads = 0;
+      const read = () => {
+        reads += 1;
+        return "a\nb\nc";
+      };
+
+      for (const line of [1, 2, 3, 2, 1]) {
+        replaceSourceContext({ filename: "x" }, state, "same", read, line);
+      }
+      expect(reads).toBe(1);
+
+      let emptyReads = 0;
+      for (let index = 0; index < 5; index += 1) {
+        replaceSourceContext({ filename: "x" }, state, "none", () => (emptyReads += 1, null), 1);
+      }
+      expect(emptyReads).toBe(1);
+    });
   });
 });
 

@@ -124,8 +124,9 @@ export interface ErrorEventDetail {
   // purpose: a public DSN can send any JSON, so a reader validates each field it uses. What the backend adds
   // to a frame (backend/src/lib/stack-frames.ts): `in_app: false` plus `package` on a frame whose mapped file
   // sits under node_modules, and `pre_context` (string[], at most 3 lines before), `context_line` and
-  // `post_context` (at most 3 after) on a source mapped frame whose map carries the source text. A frame
-  // without those fields has no source to show.
+  // `post_context` (at most 3 after) on a source mapped frame whose map carries the source text, for at most 50
+  // frames per event in all (the top level stacktrace first, then exception.values in order, each from its crash
+  // end). A frame without those fields has no source to show, including a mapped frame past that budget.
   stacktrace: Record<string, unknown> | null;
   browser: string | null;
   device: string | null;

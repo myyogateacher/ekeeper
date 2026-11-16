@@ -13,9 +13,18 @@ type UnknownRecord = Record<string, unknown>;
 
 // The SDK sends at most this many frames per stack (STACKTRACE_FRAME_LIMIT = 50 in @sentry/core
 // utils-hoist/stacktrace.js), so no real event loses anything. Ingest itself accepts any number of frames from
-// a public DSN, and this work runs on the single event loop in the request handler, so it is bounded to the
-// frames nearest the crash. Frames come oldest first, so those are the last ones.
+// a public DSN, and this work runs on the single event loop in the request handler, so the node_modules
+// classification is bounded to the frames nearest the crash of each stack. Frames come oldest first, so those are
+// the last ones. This bound is per stack; the source lines below have a bound per event.
 export const MAX_ANNOTATED_FRAMES = 50;
+
+// Source lines cost a lookup in the map and up to seven lines on the wire per frame, and an event can hold any
+// number of stacks (ingest stores `exception.values` as sent), so a bound per stack is no bound per event: 400
+// values of 50 frames over a 1 MB source took 5.5 s (PROD-10537 security review M1). One stack's worth, the SDK's
+// own frame limit, is the budget for the whole event, shared by every stack and spent in the order
+// deobfuscateEvent walks them: the top level stacktrace first (the stack the issue page shows), then
+// exception.values[0], [1] and so on, each from its crash end, the last frame, backwards.
+export const MAX_SOURCE_LINE_FRAMES_PER_EVENT = 50;
 
 // Same length-cap idea as MAX_NORMALIZED_TEXT_LENGTH in ingest.ts: a filename is cut before a regex reads it so
 // a crafted one costs a bounded amount of work (defect register entry 79). Real filenames are far shorter.
@@ -74,23 +83,23 @@ export interface SourceContext {
 }
 
 /**
- * Up to 3 lines before, the line itself and up to 3 after, from a source file's text. `line` is 1-based, as in
- * a frame's `lineno`. Null when the line does not exist: not a positive integer, or past the end of the text.
- * `split` stops after the needed pieces, so a 1 MB source costs a scan up to the frame's line, not a full
- * split.
+ * A source file's text as lines, split once so every frame in the event that points into it is a lookup. A
+ * trailing newline leaves one empty piece at the end that is the end of the last line, not a line of its own.
  */
-export function contextAround(content: string, line: number): SourceContext | null {
-  if (!Number.isInteger(line) || line < 1) {
-    return null;
-  }
-  const wanted = line + CONTEXT_LINES_EACH_SIDE;
-  const lines = content.split(/\r?\n/, wanted);
-  // Fewer pieces than asked for means the text ended. A trailing newline leaves one empty piece that is the
-  // end of the last line, not a line of its own.
-  if (lines.length < wanted && lines.at(-1) === "") {
+export function splitSourceLines(content: string): string[] {
+  const lines = content.split(/\r?\n/);
+  if (lines.at(-1) === "") {
     lines.pop();
   }
-  if (line > lines.length) {
+  return lines;
+}
+
+/**
+ * Up to 3 lines before, the line itself and up to 3 after. `line` is 1-based, as in a frame's `lineno`. Null when
+ * the line does not exist: not a positive integer, or past the end of the text.
+ */
+export function contextFromLines(lines: readonly string[], line: number): SourceContext | null {
+  if (!Number.isInteger(line) || line < 1 || line > lines.length) {
     return null;
   }
   const cut = (text: string) => text.slice(0, MAX_CONTEXT_LINE_LENGTH);
@@ -102,17 +111,51 @@ export function contextAround(content: string, line: number): SourceContext | nu
 }
 
 /**
+ * What one deobfuscateEvent call carries from frame to frame: how many frames may still get source lines, and the
+ * lines of every source already split, keyed by the caller (artifact and source). A source that many frames point
+ * into is split once per call, not once per frame.
+ */
+export interface SourceLineState {
+  remaining: number;
+  lines: Map<string, string[] | null>;
+}
+
+export function newSourceLineState(): SourceLineState {
+  return { remaining: MAX_SOURCE_LINE_FRAMES_PER_EVENT, lines: new Map() };
+}
+
+/**
  * Sets the three source line fields on a source mapped frame, or removes them. Whatever lines the SDK sent on
  * this frame described the minified file, and showing them under the original filename and line number would
- * be wrong, so they are always dropped; without source text the frame is a header row. `line` is the mapped
- * (original) line number.
+ * be wrong, so they are always dropped, budget or not; without source text the frame is a header row. `line` is
+ * the mapped (original) line number. A frame spends one unit of the event's budget only when it gets lines, so a
+ * frame into a source with no text costs nothing, and once the budget is spent `readContent` is never called.
  */
-export function replaceSourceContext(frame: UnknownRecord, content: unknown, line: unknown): UnknownRecord {
+export function replaceSourceContext(
+  frame: UnknownRecord,
+  state: SourceLineState,
+  key: string,
+  readContent: () => unknown,
+  line: unknown,
+): UnknownRecord {
   const { pre_context: _pre, context_line: _line, post_context: _post, ...rest } = frame;
-  // `content` is an entry of the uploaded map's sourcesContent, parsed from JSON, so it is a string only when the
-  // build wrote one: null for a source without text, and anything at all in a malformed map.
-  const context = typeof content === "string" && typeof line === "number" ? contextAround(content, line) : null;
-  return context ? { ...rest, ...context } : rest;
+  if (state.remaining <= 0) {
+    return rest;
+  }
+  let lines = state.lines.get(key);
+  if (lines === undefined) {
+    // `content` is an entry of the uploaded map's sourcesContent, parsed from JSON, so it is a string only when the
+    // build wrote one: null for a source without text, and anything at all in a malformed map.
+    const content = readContent();
+    lines = typeof content === "string" ? splitSourceLines(content) : null;
+    state.lines.set(key, lines);
+  }
+  const context = lines && typeof line === "number" ? contextFromLines(lines, line) : null;
+  if (!context) {
+    return rest;
+  }
+  state.remaining -= 1;
+  return { ...rest, ...context };
 }
 
 /**

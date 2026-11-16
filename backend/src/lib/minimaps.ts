@@ -8,7 +8,7 @@ import { config } from "../config";
 import { all, one, run } from "../db/sqlite";
 import { HttpError } from "./http";
 import { createId } from "./ids";
-import { classifyExceptionFrames, classifyStacktraceFrames, firstAnnotatedFrame, replaceSourceContext } from "./stack-frames";
+import { classifyExceptionFrames, classifyStacktraceFrames, newSourceLineState, replaceSourceContext, type SourceLineState } from "./stack-frames";
 import type { MinimapArtifact } from "@ekeeper/shared";
 
 type UnknownRecord = Record<string, unknown>;
@@ -173,7 +173,7 @@ function mapFrame(
   debugMetaByCodeFile: Map<string, string>,
   cache: Map<string, SourceMapConsumer>,
   sourceMapCache: Map<string, ParsedSourceMapArtifact>,
-  withSource: boolean,
+  source: SourceLineState,
 ): UnknownRecord {
   // `frames` is whatever the SDK sent (a public DSN can store `[null]`), so a non-object frame is passed
   // through. Without this guard the read of `frame.filename` below throws, the detail route answers 500,
@@ -237,15 +237,20 @@ function mapFrame(
     sourceMapArtifact: artifact.artifactName,
   };
   // A mapped frame never keeps the SDK's own source lines (they describe the minified file), so they are
-  // replaced even past the frame limit. The source text is read only for the frames nearest the crash:
-  // sourceContentFor is a lookup into the map already held in memory, null when the map has no sourcesContent.
+  // replaced even when the event's budget is spent. The source text is a lookup into the map already held in
+  // memory, null when the map has no sourcesContent, and is split into lines once per call (stack-frames.ts).
   return replaceSourceContext(
     mapped,
-    withSource ? consumer.sourceContentFor(original.source, true) : null,
+    source,
+    `${artifact.id}\u0000${original.source}`,
+    () => consumer.sourceContentFor(original.source, true),
     mapped.lineno,
   );
 }
 
+// Walks the frames from the last one, the crash site, to the first, because the event's source line budget is
+// spent in the order frames are mapped and the frames nearest the crash are the ones worth lines. The result keeps
+// the original order.
 function mapFrames(
   frames: UnknownRecord[],
   artifactMap: Map<string, SourceMapLookupArtifact>,
@@ -253,16 +258,18 @@ function mapFrames(
   debugMetaByCodeFile: Map<string, string>,
   cache: Map<string, SourceMapConsumer>,
   sourceMapCache: Map<string, ParsedSourceMapArtifact>,
+  source: SourceLineState,
 ) {
   let applied = false;
-  const sourceFrom = firstAnnotatedFrame(frames.length);
-  const mapped = frames.map((frame, index) => {
-    const nextFrame = mapFrame(frame, artifactMap, debugIdArtifactMap, debugMetaByCodeFile, cache, sourceMapCache, index >= sourceFrom);
+  const mapped = new Array<UnknownRecord>(frames.length);
+  for (let index = frames.length - 1; index >= 0; index -= 1) {
+    const frame = frames[index]!;
+    const nextFrame = mapFrame(frame, artifactMap, debugIdArtifactMap, debugMetaByCodeFile, cache, sourceMapCache, source);
     if (nextFrame !== frame) {
       applied = true;
     }
-    return nextFrame;
-  });
+    mapped[index] = nextFrame;
+  }
 
   return { frames: mapped, applied };
 }
@@ -759,6 +766,9 @@ function mapEventFrames(input: {
   const sourceMapCache = new Map(parsedArtifacts.map((artifact) => [artifact.artifact.id, artifact]));
   const debugMetaByCodeFile = buildDebugMetaLookup(rawPayload);
   const cache = new Map<string, SourceMapConsumer>();
+  // One source line budget for the whole event: the top level stacktrace is mapped first, then each
+  // exception.values entry in order, so the stack the page shows gets its lines before any other.
+  const source = newSourceLineState();
   let applied = false;
 
   const nextStacktrace =
@@ -771,6 +781,7 @@ function mapEventFrames(input: {
             debugMetaByCodeFile,
             cache,
             sourceMapCache,
+            source,
           );
           applied = applied || result.applied;
           return { ...stacktrace, frames: result.frames };
@@ -791,6 +802,7 @@ function mapEventFrames(input: {
         debugMetaByCodeFile,
         cache,
         sourceMapCache,
+        source,
       );
       applied = applied || result.applied;
       return {
