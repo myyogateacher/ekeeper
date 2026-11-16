@@ -1,4 +1,5 @@
 import { useState } from "react";
+import mytMark from "@/assets/myt-mark.svg";
 
 interface LoginPageProps {
   onLogin: () => Promise<void>;
@@ -12,9 +13,7 @@ export function LoginPage({ onLogin }: LoginPageProps) {
     <main className="flex min-h-screen items-center justify-center px-4 py-10">
       <div className="card flex w-full max-w-sm flex-col gap-5 p-6">
         <div className="flex items-center gap-2.5">
-          <span className="flex h-[26px] w-[26px] items-center justify-center rounded-md bg-accent text-xs font-bold text-accent-ink">
-            eK
-          </span>
+          <img src={mytMark} alt="MyYogaTeacher" className="h-[26px] w-[26px] shrink-0 object-contain" />
           <span className="text-[15px] font-semibold">eKeeper</span>
         </div>
         <div className="flex flex-col gap-1.5">

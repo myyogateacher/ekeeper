@@ -4,6 +4,7 @@ import { Link, NavLink, useLocation } from "react-router-dom";
 import { Inbox, LogOut, Menu, SlidersHorizontal, X } from "lucide-react";
 import type { User } from "@ekeeper/shared";
 import { api } from "@/lib/api";
+import mytMark from "@/assets/myt-mark.svg";
 import {
   DEFAULT_QUERY,
   SAVED_VIEWS,
@@ -80,9 +81,7 @@ export function AppShell({ children, user, onLogout }: AppShellProps) {
       <aside className="sticky top-0 flex h-screen w-[220px] shrink-0 flex-col border-r border-line bg-surface px-3 py-4 max-[720px]:static max-[720px]:h-auto max-[720px]:w-full max-[720px]:border-b max-[720px]:border-r-0 max-[720px]:py-2">
         <div className="flex items-center gap-2.5 px-2.5 pb-4 max-[720px]:px-1 max-[720px]:pb-0">
           <Link to="/errors" className="flex flex-1 items-center gap-2.5 max-[720px]:min-h-11">
-            <span className="flex h-[26px] w-[26px] items-center justify-center rounded-md bg-accent text-xs font-bold text-accent-ink">
-              eK
-            </span>
+            <img src={mytMark} alt="MyYogaTeacher" className="h-[26px] w-[26px] shrink-0 object-contain" />
             <span className="text-[15px] font-semibold">eKeeper</span>
           </Link>
           <button

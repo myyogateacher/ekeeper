@@ -10,8 +10,17 @@ import { announceLogout, useSessionSync } from "@/components/useSessionSync";
 import { clearPathAfterLogin, forgetPathAfterLogout, peekPathAfterLogin, rememberPathForLogin } from "@/lib/after-login";
 import { ErrorDetailPage } from "@/pages/ErrorDetailPage";
 import { ErrorsPage } from "@/pages/ErrorsPage";
+import { LandingPage } from "@/pages/LandingPage";
 import { LoginPage } from "@/pages/LoginPage";
 import { SettingsPage } from "@/pages/SettingsPage";
+
+function LoadingStatus() {
+  return (
+    <div className="flex min-h-screen items-center justify-center text-muted" role="status">
+      Loading
+    </div>
+  );
+}
 
 function ProtectedLayout() {
   const navigate = useNavigate();
@@ -20,11 +29,7 @@ function ProtectedLayout() {
   const { data, isLoading, isError, isFetching, refetch } = useQuery(meQuery);
 
   if (isLoading) {
-    return (
-      <div className="flex min-h-screen items-center justify-center text-muted" role="status">
-        Loading
-      </div>
-    );
+    return <LoadingStatus />;
   }
 
   // api.me resolves a 401 to null, so an error here is an outage (a 5xx during a deploy, no network), not a
@@ -97,6 +102,40 @@ function LoginRoute() {
   );
 }
 
+// `/` is outside ProtectedLayout so a signed-out visitor sees the landing page instead of being sent to /login.
+// A failed /api/me (a 5xx during a deploy, no network) also shows the landing page: it is static content that
+// needs nothing from the server, so an outage must not turn the front door into an error screen, and a sign-in
+// start that fails reports its own error (LandingPage toasts it). While /api/me is loading this renders the
+// same status as ProtectedLayout, so a signed-in user never sees the landing page flash before the redirect.
+// The backend's MCP OAuth authorize sends a signed-out user to `${FRONTEND_URL}/?next=...`
+// (backend/src/routes/oauth.ts:93) and nothing here reads `next`: before this route `/` went to /login and then
+// /errors, and now it shows the landing page, whose Sign in button reaches the same Google sign-in.
+function HomeRoute() {
+  const { data, isLoading } = useQuery(meQuery);
+
+  if (isLoading) {
+    return <LoadingStatus />;
+  }
+
+  if (data) {
+    return <Navigate to="/errors" replace />;
+  }
+
+  return (
+    <LandingPage
+      onLogin={async (returnTo) => {
+        const response = await api.loginUrl();
+        // After loginUrl resolves, so a failed start leaves no remembered page for a later sign-in to follow.
+        // RedirectAfterLogin restores it when Google lands the user on /dashboard.
+        if (returnTo) {
+          rememberPathForLogin(returnTo);
+        }
+        window.location.href = response.url;
+      }}
+    />
+  );
+}
+
 // Sends a signed-in user to the page a logged-out click was sent away from (a GitHub issue link), else to the
 // issues list. The backend lands every sign-in on /dashboard (backend/src/routes/auth.ts:25) and Overview was
 // dropped, so that path renders this too. The target is read once into state, not on every render: render
@@ -117,9 +156,9 @@ export default function App() {
   useSessionSync();
   return (
     <Routes>
+      <Route path="/" element={<HomeRoute />} />
       <Route path="/login" element={<LoginRoute />} />
       <Route element={<ProtectedLayout />}>
-        <Route path="/" element={<Navigate to="/errors" replace />} />
         <Route path="/dashboard" element={<RedirectAfterLogin />} />
         <Route path="/errors" element={<ErrorsPage />} />
         <Route
