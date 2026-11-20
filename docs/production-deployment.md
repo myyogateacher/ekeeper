@@ -77,7 +77,7 @@ Review these before starting production:
 - `MINIMAPS_STORAGE_PATH`
 
 Optional:
-- `SLACK_ALERT_WEBHOOK_URL`: a Slack incoming webhook. When set, the ingest flush posts a message for a new production error burst (10 or more production events of one title in a 5 minute bucket) and for a closed issue that receives an event again, within one flush (5 to 10 minutes). Blank turns alerts off; a value that is not a URL stops boot. Treat it as a secret: anyone holding it can post to the channel
+- `SLACK_ALERT_WEBHOOK_URL`: a Slack incoming webhook. When set, eKeeper posts to it for an error burst (10 or more production events of one title in a 5 minute window, the first time that title bursts) and for a closed issue that receives an event again, within 10 minutes of the first event. It sends one message per project per 5 minute window, listing at most 10 titles (regressions first, then the biggest bursts) and a count of any left out. The post never delays event storage. Blank turns alerts off; a value that is not a URL stops boot. Treat it as a secret: anyone holding it can post to the channel
 
 Notes:
 - `EKEEPER_URL` is derived from `APP_URL`

@@ -40,8 +40,9 @@ let insertAttempts: Array<{ table: string; size: number }> = [];
 let beforeInsert: ((options: InsertOptions) => void) | null = null;
 let githubIntegration: object | null = null;
 let issueCalls: Array<Record<string, unknown>> = [];
-// What the reopen UPDATE reports as changed rows: 1 stands for "a closed group was reopened", the real `changes` of bun:sqlite.
-let reopenChanges = 0;
+// The groups whose reopen UPDATE matches a row, standing for groups a person had closed: the mocked `run` reports 1 changed
+// row for them (the real `changes` of bun:sqlite) and 0 for every other group.
+let closedGroupIds = new Set<string>();
 let failIssueStep = false;
 // The alert dedup keys held by the fake Redis, see fakeRedis.set.
 let alertKeys = new Set<string>();
@@ -60,7 +61,8 @@ const fakeRedis = {
   },
   keys: async () => [...buckets.keys()],
   lRange: async (key: string) => buckets.get(key) ?? [],
-  del: async (key: string) => (buckets.delete(key) || alertKeys.delete(key) ? 1 : 0),
+  del: async (keys: string | string[]) =>
+    [keys].flat().filter((key) => buckets.delete(key) || alertKeys.delete(key)).length,
   multi: () => {
     const chain = {
       rPush: (key: string, items: string[]) => {
@@ -102,7 +104,8 @@ mock.module("../db/sqlite", () => ({
     return { name: "Project A" };
   },
   all: () => [],
-  run: () => ({ changes: reopenChanges, lastInsertRowid: 0 }),
+  // The reopen UPDATE binds the group id last: [reopenedAt, projectId, groupId].
+  run: (_query: string, params: unknown[]) => ({ changes: closedGroupIds.has(String(params[2])) ? 1 : 0, lastInsertRowid: 0 }),
 }));
 mock.module("./issue-sync", () => ({
   getGithubIntegration: () => githubIntegration,
@@ -152,7 +155,7 @@ beforeEach(() => {
   liveRewrite = null;
   githubIntegration = null;
   issueCalls = [];
-  reopenChanges = 0;
+  closedGroupIds = new Set();
   failIssueStep = false;
   alertKeys = new Set();
 });
@@ -275,25 +278,36 @@ describe("flushBufferedIngest", () => {
   });
 });
 
-// The Slack alert for a new production error burst or a regression of a closed issue is sent from insertEvents, so these run
-// the real flush with the fake Redis above and a spy on fetch standing in for Slack.
+// The Slack alerts are queued from insertEvents and delivered after the flush returns, so these run the real flush with the
+// fake Redis above and a spy on fetch standing in for Slack, and wait one macrotask after each flush: the fake Redis and the
+// spy answer in microtasks, so one macrotask lets the whole delivery chain finish, and no test ends with a delivery pending
+// (which would call the real fetch once the spy is restored).
 describe("flushBufferedIngest alerts", () => {
   const WEBHOOK = "https://hooks.example.com/services/T000/B000/secret";
   const SECOND_BUCKET = "ekeeper:ingest-buffer:2020-01-01T00:05:00.000Z";
   const originalWebhook = config.SLACK_ALERT_WEBHOOK_URL;
-  const alertEvent = (eventId: string, environment = "production") => ({
+  const VALUE = "Cannot read properties of null (reading 'x')";
+  const titleOf = (type: string) => `${type}: ${VALUE}`;
+  const TITLE = titleOf("TypeError");
+  const payloadOf = (eventId: string, type = "TypeError", environment = "production") => ({
     event_id: eventId,
     environment,
-    exception: { values: [{ type: "TypeError", value: "Cannot read properties of null (reading 'x')" }] },
+    exception: { values: [{ type, value: VALUE }] },
   });
-  const TITLE = "TypeError: Cannot read properties of null (reading 'x')";
-  const bucketOf = (prefix: string, count: number) =>
-    Array.from({ length: count }, (_, index) => entry("project_a", alertEvent(`${prefix}_${index}`)));
+  const bucketOf = (prefix: string, count: number, type = "TypeError") =>
+    Array.from({ length: count }, (_, index) => entry("project_a", payloadOf(`${prefix}_${type}_${index}`, type)));
+  const groupIdOf = (type: string) => original.ingest.normalizeEvent("project_a", payloadOf("probe", type)).groupId;
   // bun types `fetch` with a `preconnect` member that a stand-in for Slack never needs.
   const answering = (respond: () => Promise<Response>) => respond as unknown as typeof fetch;
   const slack = () => spyOn(globalThis, "fetch").mockImplementation(answering(async () => new Response("ok")));
+  const unavailable = answering(async () => new Response("unavailable", { status: 500 }));
   const postedTexts = (post: ReturnType<typeof slack>) =>
     post.mock.calls.map((call) => String(JSON.parse(String((call[1] as RequestInit).body)).text));
+  const settled = () => new Promise((resolve) => setTimeout(resolve, 0));
+  const flushAndSettle = async () => {
+    await flushBufferedIngest();
+    await settled();
+  };
 
   beforeEach(() => {
     config.SLACK_ALERT_WEBHOOK_URL = WEBHOOK;
@@ -307,9 +321,9 @@ describe("flushBufferedIngest alerts", () => {
     const post = slack();
     buckets.set(BUCKET, bucketOf("first", 10));
 
-    await flushBufferedIngest();
+    await flushAndSettle();
     buckets.set(SECOND_BUCKET, bucketOf("second", 10));
-    await flushBufferedIngest();
+    await flushAndSettle();
 
     expect(post).toHaveBeenCalledTimes(1);
     expect(post.mock.calls[0][0]).toBe(WEBHOOK);
@@ -321,40 +335,119 @@ describe("flushBufferedIngest alerts", () => {
     const post = slack();
     buckets.set(BUCKET, [
       ...bucketOf("few", 9),
-      ...Array.from({ length: 20 }, (_, index) => entry("project_a", alertEvent(`stg_${index}`, "staging"))),
+      ...Array.from({ length: 20 }, (_, index) => entry("project_a", payloadOf(`stg_${index}`, "TypeError", "staging"))),
     ]);
 
-    await flushBufferedIngest();
+    await flushAndSettle();
 
     expect(post).not.toHaveBeenCalled();
   });
 
-  // The dedup key is claimed before the post, so a failed post must give it back, or a Slack outage at the first crossing
-  // would silence that signature for good.
-  test("a failed post releases the dedup key, so the next bucket posts again", async () => {
-    spyOn(console, "error").mockImplementation(() => {});
-    const post = slack().mockImplementationOnce(answering(async () => new Response("unavailable", { status: 500 })));
+  // The flush must not wait for Slack. It is serial and holds a 300 s Redis lock that is never renewed, while the timer fires
+  // every 300 s, so a flush that outlives the lock is joined by the next tick, which inserts the same buckets again (every
+  // event stored twice). Each post is bounded to 5 s, but a sender who holds a DSN can create as many alerts as there are
+  // titles, so waiting on them has no bound of its own. Here the post never answers: the flush must still finish at once, with
+  // the events stored once and the bucket deleted.
+  test("a Slack post that never answers does not hold the flush", async () => {
+    let answer!: (response: Response) => void;
+    const slackAnswer = new Promise<Response>((resolve) => {
+      answer = resolve;
+    });
+    const post = spyOn(globalThis, "fetch").mockImplementation(answering(() => slackAnswer));
     buckets.set(BUCKET, bucketOf("first", 10));
 
-    await flushBufferedIngest();
-    expect(post).toHaveBeenCalledTimes(1);
+    const outcome = await Promise.race([
+      flushBufferedIngest().then(() => "flushed"),
+      new Promise((resolve) => setTimeout(resolve, 100, "held")),
+    ]);
+    // Let the pending post finish before asserting, so a failure here cannot leave a delivery running into the next test.
+    answer(new Response("ok"));
+    await settled();
 
-    buckets.set(SECOND_BUCKET, bucketOf("second", 10));
-    await flushBufferedIngest();
+    expect(outcome).toBe("flushed");
+    expect(storedEventIds()).toHaveLength(10);
+    expect(buckets.has(BUCKET)).toBe(false);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  // The ingest has no rate limit, so one DSN holder can make any number of titles cross the threshold, and Slack answers 429
+  // above about one message a second. One message per project per bucket bounds the posts; the cap of 10 listed titles keeps
+  // that message readable, regressions first because they are the rarer and costlier signal, then the biggest bursts. The
+  // titles past the cap are not claimed, so they alert in a later bucket instead of being lost.
+  test("12 titles over the threshold post one message of 10, regressions first, and the 2 left out can alert later", async () => {
+    const post = slack();
+    closedGroupIds = new Set([groupIdOf("Regressed")]);
+    const bursts = Array.from({ length: 11 }, (_, index) => ({ type: `Error${String.fromCharCode(65 + index)}`, count: 10 + index }));
+    buckets.set(BUCKET, [
+      ...bucketOf("first", 1, "Regressed"),
+      ...bursts.flatMap(({ type, count }) => bucketOf("first", count, type)),
+    ]);
+
+    await flushAndSettle();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    const lines = postedTexts(post)[0].split("\n");
+    // Header, 10 listed (the regression, then bursts of 20 down to 12 events), and the summary line.
+    expect(lines).toHaveLength(12);
+    expect(lines[1]).toContain("Closed issue is back");
+    expect(lines[1]).toContain(titleOf("Regressed"));
+    expect(lines.slice(2, 11).map((line) => /Error[A-K]/.exec(line)?.[0])).toEqual(
+      ["ErrorK", "ErrorJ", "ErrorI", "ErrorH", "ErrorG", "ErrorF", "ErrorE", "ErrorD", "ErrorC"],
+    );
+    expect(lines[11]).toBe("+2 more error titles over the threshold in this window");
+
+    buckets.set(SECOND_BUCKET, bucketOf("second", 10, "ErrorA"));
+    await flushAndSettle();
 
     expect(post).toHaveBeenCalledTimes(2);
+    expect(postedTexts(post)[1]).toContain(titleOf("ErrorA"));
+  });
+
+  // A regression posts whether or not its signature alerted before, because a person closing the issue is what makes the
+  // repeat worth sending.
+  test("a regression posts even when its title has alerted before", async () => {
+    const post = slack();
+    buckets.set(BUCKET, bucketOf("first", 10));
+    await flushAndSettle();
+
+    closedGroupIds = new Set([groupIdOf("TypeError")]);
+    buckets.set(SECOND_BUCKET, bucketOf("second", 1));
+    await flushAndSettle();
+
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(postedTexts(post)[1]).toContain("Closed issue is back");
+  });
+
+  // The dedup keys are claimed before the post, so a failed post must give back every one this delivery claimed, or a Slack
+  // outage at the first crossing would silence those signatures for good.
+  test("a failed post releases every dedup key it claimed, so the next bucket posts all of them again", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    const post = slack().mockImplementationOnce(unavailable);
+    buckets.set(BUCKET, [...bucketOf("first", 10, "ErrorA"), ...bucketOf("first", 10, "ErrorB"), ...bucketOf("first", 10, "ErrorC")]);
+
+    await flushAndSettle();
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(alertKeys.size).toBe(0);
+
+    buckets.set(SECOND_BUCKET, [...bucketOf("second", 10, "ErrorA"), ...bucketOf("second", 10, "ErrorB"), ...bucketOf("second", 10, "ErrorC")]);
+    await flushAndSettle();
+
+    expect(post).toHaveBeenCalledTimes(2);
+    for (const type of ["ErrorA", "ErrorB", "ErrorC"]) {
+      expect(postedTexts(post)[1]).toContain(titleOf(type));
+    }
   });
 
   // The webhook URL is a credential (whoever holds it can post to the channel) and a title can hold a user email, so the log
-  // line carries the project, the kind and the status, nothing else.
+  // line carries the project, the number of titles in the message and the status, nothing else.
   test("the log line for a failed post never holds the webhook URL or the title", async () => {
     const errorLog = spyOn(console, "error").mockImplementation(() => {});
-    slack().mockImplementationOnce(answering(async () => new Response("unavailable", { status: 500 })));
+    slack().mockImplementationOnce(unavailable);
     buckets.set(BUCKET, bucketOf("first", 10));
 
-    await flushBufferedIngest();
+    await flushAndSettle();
 
-    expect(errorLog.mock.calls[0]).toEqual(["[alerts] post failed", { projectId: "project_a", kind: "new", reason: "HTTP 500" }]);
+    expect(errorLog.mock.calls[0]).toEqual(["[alerts] delivery failed", { projectId: "project_a", alertCount: 1, reason: "HTTP 500" }]);
     const logged = JSON.stringify(errorLog.mock.calls);
     expect(logged).not.toContain("secret");
     expect(logged).not.toContain("Cannot read properties");
@@ -362,17 +455,17 @@ describe("flushBufferedIngest alerts", () => {
 
   test("a closed group that gets one production event posts a regression alert", async () => {
     const post = slack();
-    reopenChanges = 1;
-    buckets.set(BUCKET, [entry("project_a", alertEvent("evt_back"))]);
+    closedGroupIds = new Set([groupIdOf("TypeError")]);
+    buckets.set(BUCKET, bucketOf("first", 1));
 
-    await flushBufferedIngest();
+    await flushAndSettle();
 
     expect(post).toHaveBeenCalledTimes(1);
     expect(postedTexts(post)[0]).toContain("Closed issue is back");
   });
 
   // The reopen UPDATE matches only state = 'closed', so on a retry of the bucket it changes nothing and the regression
-  // cannot be detected again. The alert therefore goes out before the GitHub issue step. The GitHub API calls in that step
+  // cannot be detected again. The alert is therefore queued before the GitHub issue step. The GitHub API calls in that step
   // catch their own errors, but its SQLite reads do not, and a throw there leaves insertEvents and keeps the bucket; the
   // fake throws to stand for that.
   test("a throw from the GitHub issue step after the reopen does not lose the regression alert", async () => {
@@ -380,10 +473,10 @@ describe("flushBufferedIngest alerts", () => {
     const post = slack();
     githubIntegration = {};
     failIssueStep = true;
-    reopenChanges = 1;
-    buckets.set(BUCKET, [entry("project_a", alertEvent("evt_back"))]);
+    closedGroupIds = new Set([groupIdOf("TypeError")]);
+    buckets.set(BUCKET, bucketOf("first", 1));
 
-    await flushBufferedIngest();
+    await flushAndSettle();
 
     expect(buckets.has(BUCKET)).toBe(true);
     expect(post).toHaveBeenCalledTimes(1);
@@ -400,11 +493,34 @@ describe("flushBufferedIngest alerts", () => {
     );
     buckets.set(BUCKET, bucketOf("first", 10));
 
-    await flushBufferedIngest();
+    await flushAndSettle();
 
     expect(post).toHaveBeenCalledTimes(1);
     expect(storedEventIds()).toHaveLength(10);
     expect(buckets.has(BUCKET)).toBe(false);
+  });
+
+  // The deliveries share one chain, so a rejection left in it would skip every later alert for the life of the process. Here
+  // the post fails and then so does Redis while the claimed keys are released, which is a throw out of the delivery itself
+  // (not the handled failure of a post): the next bucket's delivery must still go out.
+  test("a delivery that throws does not stop the deliveries queued after it", async () => {
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    const post = slack().mockImplementationOnce(unavailable);
+    const realDel = fakeRedis.del;
+    spyOn(fakeRedis, "del").mockImplementation(async (keys: string | string[]) => {
+      if ([keys].flat().some((key) => key.startsWith("ekeeper:alert:"))) {
+        throw new Error("redis down");
+      }
+      return realDel(keys);
+    });
+    buckets.set(BUCKET, bucketOf("first", 10, "ErrorA"));
+    buckets.set(SECOND_BUCKET, bucketOf("second", 10, "ErrorB"));
+
+    await flushAndSettle();
+
+    expect(post).toHaveBeenCalledTimes(2);
+    expect(postedTexts(post)[1]).toContain(titleOf("ErrorB"));
+    expect(errorLog.mock.calls.map((call) => call[0])).toEqual(["[alerts] delivery failed", "[alerts] delivery failed"]);
   });
 });
 

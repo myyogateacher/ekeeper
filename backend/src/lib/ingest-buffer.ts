@@ -1,7 +1,7 @@
 import { ClickHouseError, type ClickHouseClient } from "@clickhouse/client";
 import { getClickHouseClient } from "../db/clickhouse";
 import { all, one, run } from "../db/sqlite";
-import { sendIngestAlerts } from "./alerts";
+import { queueIngestAlerts } from "./alerts";
 import { HttpError } from "./http";
 import { ensureGithubIssueForGroup, getGithubIntegration } from "./issue-sync";
 import { normalizeEvent, toClickHouseDateTime } from "./ingest";
@@ -236,12 +236,13 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
     }
   }
 
-  // Before maybeCreateGithubIssues, for two reasons. It awaits GitHub API calls for every new group, and the person on call
-  // should not wait for them. And its SQLite reads run outside the catch that ensureGithubIssueForGroup puts around the
+  // Queued, not awaited: delivery runs after the flush has returned. A flush that waited for Slack could outlive the 300 s
+  // flush lock, which is never renewed, and the next timer tick would then insert the same buckets again. Queued before
+  // maybeCreateGithubIssues because its SQLite reads run outside the catch that ensureGithubIssueForGroup puts around the
   // GitHub calls, so a throw there keeps the bucket for a retry, on which the UPDATE above no longer matches (the group is
-  // 'reopened'): a regression alert placed after it would be lost for good. sendIngestAlerts never throws, so it cannot
-  // cause such a retry itself.
-  await sendIngestAlerts(projectId, stored, reopenedGroupIds);
+  // 'reopened'): a regression queued after it would be lost for good. queueIngestAlerts never throws, so it cannot cause such
+  // a retry itself.
+  queueIngestAlerts(projectId, stored, reopenedGroupIds);
 
   await maybeCreateGithubIssues({ projectId, events: stored, affectedGroupIds });
 
