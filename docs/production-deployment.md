@@ -76,6 +76,9 @@ Review these before starting production:
 - `EKEEPER_ORG`
 - `MINIMAPS_STORAGE_PATH`
 
+Optional:
+- `SLACK_ALERT_WEBHOOK_URL`: a Slack incoming webhook. When set, the ingest flush posts a message for a new production error burst (10 or more production events of one title in a 5 minute bucket) and for a closed issue that receives an event again, within one flush (5 to 10 minutes). Blank turns alerts off; a value that is not a URL stops boot. Treat it as a secret: anyone holding it can post to the channel
+
 Notes:
 - `EKEEPER_URL` is derived from `APP_URL`
 - the plugin upload token is stored in SQLite and shown in `/settings`

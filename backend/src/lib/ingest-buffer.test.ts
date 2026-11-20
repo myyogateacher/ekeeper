@@ -3,6 +3,7 @@ import { ClickHouseError, createClient, type ClickHouseClient } from "@clickhous
 import { readdirSync, readFileSync } from "node:fs";
 import path from "node:path";
 import { Hono } from "hono";
+import { config } from "../config";
 import { normalizeTimestamp, toClickHouseDateTime } from "./ingest";
 
 // These tests run the real enqueueBufferedIngest, flushBufferedIngest and ingest routes against an in-memory Redis and
@@ -39,12 +40,27 @@ let insertAttempts: Array<{ table: string; size: number }> = [];
 let beforeInsert: ((options: InsertOptions) => void) | null = null;
 let githubIntegration: object | null = null;
 let issueCalls: Array<Record<string, unknown>> = [];
+// What the reopen UPDATE reports as changed rows: 1 stands for "a closed group was reopened", the real `changes` of bun:sqlite.
+let reopenChanges = 0;
+let failIssueStep = false;
+// The alert dedup keys held by the fake Redis, see fakeRedis.set.
+let alertKeys = new Set<string>();
 
+// SET NX is honoured only for the alert dedup keys (`ekeeper:alert:`), so the flush lock and bucket tests keep the
+// always-"OK" behaviour they were written against. A real NX that loses answers null, which is what the alert path reads.
 const fakeRedis = {
-  set: async () => "OK",
+  set: async (key: string, _value: string, options?: { NX?: boolean }) => {
+    if (options?.NX && key.startsWith("ekeeper:alert:")) {
+      if (alertKeys.has(key)) {
+        return null;
+      }
+      alertKeys.add(key);
+    }
+    return "OK";
+  },
   keys: async () => [...buckets.keys()],
   lRange: async (key: string) => buckets.get(key) ?? [],
-  del: async (key: string) => (buckets.delete(key) ? 1 : 0),
+  del: async (key: string) => (buckets.delete(key) || alertKeys.delete(key) ? 1 : 0),
   multi: () => {
     const chain = {
       rPush: (key: string, items: string[]) => {
@@ -86,11 +102,14 @@ mock.module("../db/sqlite", () => ({
     return { name: "Project A" };
   },
   all: () => [],
-  run: () => ({ changes: 0, lastInsertRowid: 0 }),
+  run: () => ({ changes: reopenChanges, lastInsertRowid: 0 }),
 }));
 mock.module("./issue-sync", () => ({
   getGithubIntegration: () => githubIntegration,
   ensureGithubIssueForGroup: async (input: Record<string, unknown>) => {
+    if (failIssueStep) {
+      throw new Error("issue step failed");
+    }
     issueCalls.push(input);
   },
 }));
@@ -133,6 +152,9 @@ beforeEach(() => {
   liveRewrite = null;
   githubIntegration = null;
   issueCalls = [];
+  reopenChanges = 0;
+  failIssueStep = false;
+  alertKeys = new Set();
 });
 
 const goodEvent = (eventId: string) => ({
@@ -250,6 +272,139 @@ describe("flushBufferedIngest", () => {
     await flushBufferedIngest();
     expect(buckets.has(BUCKET)).toBe(false);
     expect(storedEventIds()).toEqual(["evt_a"]);
+  });
+});
+
+// The Slack alert for a new production error burst or a regression of a closed issue is sent from insertEvents, so these run
+// the real flush with the fake Redis above and a spy on fetch standing in for Slack.
+describe("flushBufferedIngest alerts", () => {
+  const WEBHOOK = "https://hooks.example.com/services/T000/B000/secret";
+  const SECOND_BUCKET = "ekeeper:ingest-buffer:2020-01-01T00:05:00.000Z";
+  const originalWebhook = config.SLACK_ALERT_WEBHOOK_URL;
+  const alertEvent = (eventId: string, environment = "production") => ({
+    event_id: eventId,
+    environment,
+    exception: { values: [{ type: "TypeError", value: "Cannot read properties of null (reading 'x')" }] },
+  });
+  const TITLE = "TypeError: Cannot read properties of null (reading 'x')";
+  const bucketOf = (prefix: string, count: number) =>
+    Array.from({ length: count }, (_, index) => entry("project_a", alertEvent(`${prefix}_${index}`)));
+  // bun types `fetch` with a `preconnect` member that a stand-in for Slack never needs.
+  const answering = (respond: () => Promise<Response>) => respond as unknown as typeof fetch;
+  const slack = () => spyOn(globalThis, "fetch").mockImplementation(answering(async () => new Response("ok")));
+  const postedTexts = (post: ReturnType<typeof slack>) =>
+    post.mock.calls.map((call) => String(JSON.parse(String((call[1] as RequestInit).body)).text));
+
+  beforeEach(() => {
+    config.SLACK_ALERT_WEBHOOK_URL = WEBHOOK;
+  });
+  afterEach(() => {
+    config.SLACK_ALERT_WEBHOOK_URL = originalWebhook;
+  });
+
+  // One alert per signature, not one per flush: the same bug still firing in the next bucket must not post again.
+  test("a burst of one title posts once, and the same title in a later bucket does not post again", async () => {
+    const post = slack();
+    buckets.set(BUCKET, bucketOf("first", 10));
+
+    await flushBufferedIngest();
+    buckets.set(SECOND_BUCKET, bucketOf("second", 10));
+    await flushBufferedIngest();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(post.mock.calls[0][0]).toBe(WEBHOOK);
+    expect(postedTexts(post)[0]).toContain(TITLE);
+    expect(storedEventIds()).toHaveLength(20);
+  });
+
+  test("fewer than 10 production events, or staging events of any number, post nothing", async () => {
+    const post = slack();
+    buckets.set(BUCKET, [
+      ...bucketOf("few", 9),
+      ...Array.from({ length: 20 }, (_, index) => entry("project_a", alertEvent(`stg_${index}`, "staging"))),
+    ]);
+
+    await flushBufferedIngest();
+
+    expect(post).not.toHaveBeenCalled();
+  });
+
+  // The dedup key is claimed before the post, so a failed post must give it back, or a Slack outage at the first crossing
+  // would silence that signature for good.
+  test("a failed post releases the dedup key, so the next bucket posts again", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    const post = slack().mockImplementationOnce(answering(async () => new Response("unavailable", { status: 500 })));
+    buckets.set(BUCKET, bucketOf("first", 10));
+
+    await flushBufferedIngest();
+    expect(post).toHaveBeenCalledTimes(1);
+
+    buckets.set(SECOND_BUCKET, bucketOf("second", 10));
+    await flushBufferedIngest();
+
+    expect(post).toHaveBeenCalledTimes(2);
+  });
+
+  // The webhook URL is a credential (whoever holds it can post to the channel) and a title can hold a user email, so the log
+  // line carries the project, the kind and the status, nothing else.
+  test("the log line for a failed post never holds the webhook URL or the title", async () => {
+    const errorLog = spyOn(console, "error").mockImplementation(() => {});
+    slack().mockImplementationOnce(answering(async () => new Response("unavailable", { status: 500 })));
+    buckets.set(BUCKET, bucketOf("first", 10));
+
+    await flushBufferedIngest();
+
+    expect(errorLog.mock.calls[0]).toEqual(["[alerts] post failed", { projectId: "project_a", kind: "new", reason: "HTTP 500" }]);
+    const logged = JSON.stringify(errorLog.mock.calls);
+    expect(logged).not.toContain("secret");
+    expect(logged).not.toContain("Cannot read properties");
+  });
+
+  test("a closed group that gets one production event posts a regression alert", async () => {
+    const post = slack();
+    reopenChanges = 1;
+    buckets.set(BUCKET, [entry("project_a", alertEvent("evt_back"))]);
+
+    await flushBufferedIngest();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(postedTexts(post)[0]).toContain("Closed issue is back");
+  });
+
+  // The reopen UPDATE matches only state = 'closed', so on a retry of the bucket it changes nothing and the regression
+  // cannot be detected again. The alert therefore goes out before the GitHub issue step. The GitHub API calls in that step
+  // catch their own errors, but its SQLite reads do not, and a throw there leaves insertEvents and keeps the bucket; the
+  // fake throws to stand for that.
+  test("a throw from the GitHub issue step after the reopen does not lose the regression alert", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    const post = slack();
+    githubIntegration = {};
+    failIssueStep = true;
+    reopenChanges = 1;
+    buckets.set(BUCKET, [entry("project_a", alertEvent("evt_back"))]);
+
+    await flushBufferedIngest();
+
+    expect(buckets.has(BUCKET)).toBe(true);
+    expect(post).toHaveBeenCalledTimes(1);
+  });
+
+  // A throw out of insertEvents keeps the bucket, and the next flush inserts every event of it again (see flushBucket), so
+  // an alert that cannot be delivered must cost the alert only.
+  test("a Slack failure never fails the flush: the events are stored and the bucket deleted", async () => {
+    spyOn(console, "error").mockImplementation(() => {});
+    const post = spyOn(globalThis, "fetch").mockImplementation(
+      answering(async () => {
+        throw new Error("network down");
+      }),
+    );
+    buckets.set(BUCKET, bucketOf("first", 10));
+
+    await flushBufferedIngest();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    expect(storedEventIds()).toHaveLength(10);
+    expect(buckets.has(BUCKET)).toBe(false);
   });
 });
 
