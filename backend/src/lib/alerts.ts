@@ -18,8 +18,14 @@ export const ALERT_MIN_EVENTS_PER_BUCKET = 10;
 // Titles one message lists, which is what bounds a flood: ingest has no rate limit, so whoever holds a DSN can make any
 // number of titles cross the threshold, and Slack answers 429 to a webhook above about one message a second, which would
 // drop the real alert along with the rest. One message per project per bucket, listing at most this many titles, is at most
-// one post per project per 5 minutes however many titles there are. 10 is the same data precedent as the threshold: about 4
-// bursts a day in steady state leaves a normal bucket far below it, so the cap only bites on a flood or a mass regression.
+// one post per project per bucket however many titles there are (a backlog flushed after downtime posts one per project per
+// bucket, back to back). 10 is the same data precedent as the threshold: about 4 bursts a day in steady state leaves a normal
+// bucket far below it, so the cap only bites on a flood or a mass regression.
+//
+// What is past the cap is counted, not listed, and the two kinds differ. A burst past the cap is left unclaimed, so it can
+// still alert in a later bucket, and it is counted only if it has never alerted. A regression past the cap cannot be retried:
+// the reopen UPDATE matches a group only while it is closed, so the flush that reopened it is the only one that sees it, and
+// the count in the message is the only announcement it gets.
 const ALERTS_PER_MESSAGE = 10;
 
 // Neither the exception type (so neither the title) nor the release is capped at ingest, and both are chosen by whoever
@@ -33,9 +39,9 @@ const RELEASE_MAX_CHARS = 64;
 const POST_TIMEOUT_MS = 5000;
 
 export interface PlannedAlert {
-  // "regression" is a closed issue that received an event again. "burst" is a signature that crossed the threshold and has
-  // not alerted before, which is not the same as new: an error that has existed for weeks alerts the first time it bursts
-  // after its dedup key was first written, so no text shown to a reader may call a burst new.
+  // "regression" is a closed issue that received an event again. "burst" is a signature that crossed the threshold while no
+  // dedup key exists for it, and the first alert writes the key. That is not the same as new: an error that has existed for
+  // weeks alerts the first time it bursts after this shipped, so no text shown to a reader may call a burst new.
   kind: "burst" | "regression";
   title: string;
   eventCount: number;
@@ -106,19 +112,27 @@ function escapeSlack(text: string): string {
 // Text in an inline code span, safe for whatever the sender put in it. Whitespace runs collapse to one space first: the
 // exception type is neither normalised nor capped and the release is stored verbatim, and Slack ends an inline code span at
 // the end of the line, so a line break would leave the rest of the text to be formatted as mrkdwn (bold, a bare URL turned
-// into a link). Slack has no escape for a backtick either, so one inside the text would close the span early; it becomes a
-// quote, which reads the same in an error message. A cut can land inside a surrogate pair, so the clipped text is made well
-// formed again before it is sent as JSON.
+// into a link). U+0085 (next line) is added to `\s` because JavaScript's `\s` does not match it. Slack has no escape for a
+// backtick either, so one inside the text would close the span early; it becomes a quote, which reads the same in an error
+// message. A cut can land inside a surrogate pair, so the clipped text is made well formed again before it is sent as JSON.
 function inlineCode(text: string, maxChars: number): string {
-  const flat = text.replace(/\s+/g, " ");
+  const flat = text.replace(/[\s\u0085]+/g, " ");
   const clipped = flat.length > maxChars ? `${flat.slice(0, maxChars).toWellFormed()}...` : flat;
   return `\`${escapeSlack(clipped).replaceAll("`", "'")}\``;
 }
 
+// What did not fit under ALERTS_PER_MESSAGE, by kind, because the two are announced differently (see ALERTS_PER_MESSAGE):
+// `regressions` is every closed issue that came back past the cap, `bursts` only the bursts past the cap that never alerted.
+export interface LeftOut {
+  regressions: number;
+  bursts: number;
+}
+
 // Pure, like the planner: the message is the contract with the channel, and it is tested as text. `alerts` are the titles
-// listed and `unlisted` the number of candidates that did not fit under ALERTS_PER_MESSAGE. Mentions are never produced here
-// (no `<!channel>`, no `<!here>`); the only angle brackets are the links this function builds.
-export function formatIngestAlerts(alerts: PlannedAlert[], unlisted: number, projectName: string, projectId: string): string {
+// listed and `leftOut` what was counted instead of listed. Each line says only what is true of its kind: a regression has
+// one event and is not "over the threshold", and a burst past the cap is listed later only if it bursts again. Mentions are
+// never produced here (no `<!channel>`, no `<!here>`); the only angle brackets are the links this function builds.
+export function formatIngestAlerts(alerts: PlannedAlert[], leftOut: LeftOut, projectName: string, projectId: string): string {
   const lines = [`*${escapeSlack(projectName)}*, one 5 minute window`];
   for (const alert of alerts) {
     const label = alert.kind === "regression" ? "Closed issue is back" : "Error burst";
@@ -128,8 +142,14 @@ export function formatIngestAlerts(alerts: PlannedAlert[], unlisted: number, pro
       `• *${label}*, ${count}: ${inlineCode(alert.title, TITLE_MAX_CHARS)}${release} <${errorGroupUrl(projectId, alert.groupId)}|Open in eKeeper>`,
     );
   }
-  if (unlisted > 0) {
-    lines.push(`+${unlisted} more error ${unlisted === 1 ? "title" : "titles"} over the threshold in this window`);
+  if (leftOut.regressions > 0) {
+    lines.push(`+${leftOut.regressions} more closed ${leftOut.regressions === 1 ? "issue is" : "issues are"} back in this window`);
+  }
+  if (leftOut.bursts > 0) {
+    const single = leftOut.bursts === 1;
+    lines.push(
+      `+${leftOut.bursts} more error ${single ? "burst" : "bursts"} in this window, listed in a later window if ${single ? "it bursts" : "they burst"} again`,
+    );
   }
   return lines.join("\n");
 }
@@ -138,6 +158,14 @@ export function formatIngestAlerts(alerts: PlannedAlert[], unlisted: number, pro
 // payload, and payloads hold user emails). Repeated here instead of imported because ingest-buffer imports this file.
 function failureName(error: unknown): string {
   return error instanceof Error ? error.name : "non-Error thrown";
+}
+
+// One key per signature that ever alerted, with no TTL: at the rate estimated at ALERT_MIN_EVENTS_PER_BUCKET that is at
+// most about 120 keys a month, and a key that expired would re-announce a bug that is simply still firing. Re-alerting after
+// a person closes the issue is what the regression path is for. Hashed because a title is as long as the sender made it.
+// Keyed by title, not group id, for the reason given at planIngestAlerts.
+function alertKey(projectId: string, title: string): string {
+  return `ekeeper:alert:sent:${createHash("sha256").update(`${projectId}\n${title}`).digest("hex")}`;
 }
 
 // Posts one project's message for one bucket. It may throw (Redis or SQLite failing outside the post); the chain it runs on
@@ -149,21 +177,22 @@ async function deliverProjectAlerts(webhookUrl: string, projectId: string, plann
   const projectName = one<{ name: string }>("SELECT name FROM projects WHERE id = ?", [projectId])?.name ?? projectId;
   const claimedKeys: string[] = [];
   const listed: PlannedAlert[] = [];
-  let unlisted = 0;
+  const leftOut: LeftOut = { regressions: 0, bursts: 0 };
+  const leftOutBurstKeys: string[] = [];
   let reason: string;
   try {
     for (const alert of planned) {
-      // Candidates past the cap are neither claimed nor listed, so they can still alert in a later bucket instead of being
-      // marked as sent when no one was told.
+      // Candidates past the cap are neither claimed nor listed, see ALERTS_PER_MESSAGE. A burst's key is kept to ask Redis
+      // below whether it has alerted before.
       if (listed.length === ALERTS_PER_MESSAGE) {
-        unlisted += 1;
+        if (alert.kind === "regression") {
+          leftOut.regressions += 1;
+        } else {
+          leftOutBurstKeys.push(alertKey(projectId, alert.title));
+        }
         continue;
       }
-      // One key per signature that ever alerted, with no TTL: at the rate estimated at ALERT_MIN_EVENTS_PER_BUCKET that is
-      // at most about 120 keys a month, and a key that expired would re-announce a bug that is simply still firing.
-      // Re-alerting after a person closes the issue is what the regression path is for. Hashed because a title is as long
-      // as the sender made it. Keyed by title, not group id, for the reason given at planIngestAlerts.
-      const key = `ekeeper:alert:sent:${createHash("sha256").update(`${projectId}\n${alert.title}`).digest("hex")}`;
+      const key = alertKey(projectId, alert.title);
       // Claimed before the post, so two workers, or a retried bucket, cannot both announce the same signature. A burst that
       // loses the claim has alerted before and is skipped. A regression sets the key too but is listed whatever the answer
       // was, so that the same signature does not go out again as a burst on the next flush, once its group is no longer
@@ -179,10 +208,15 @@ async function deliverProjectAlerts(webhookUrl: string, projectId: string, plann
     if (listed.length === 0) {
       return;
     }
+    if (leftOutBurstKeys.length > 0) {
+      // EXISTS answers how many of the keys are set. Those bursts have alerted before and would never be listed, so only
+      // the rest are "more": errors the reader has not been told about and a later window can still announce.
+      leftOut.bursts = leftOutBurstKeys.length - (await redis.exists(leftOutBurstKeys));
+    }
     const response = await fetch(webhookUrl, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ text: formatIngestAlerts(listed, unlisted, projectName, projectId) }),
+      body: JSON.stringify({ text: formatIngestAlerts(listed, leftOut, projectName, projectId) }),
       signal: AbortSignal.timeout(POST_TIMEOUT_MS),
     });
     if (response.ok) {

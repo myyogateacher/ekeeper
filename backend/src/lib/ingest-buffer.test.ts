@@ -63,6 +63,7 @@ const fakeRedis = {
   lRange: async (key: string) => buckets.get(key) ?? [],
   del: async (keys: string | string[]) =>
     [keys].flat().filter((key) => buckets.delete(key) || alertKeys.delete(key)).length,
+  exists: async (keys: string | string[]) => [keys].flat().filter((key) => alertKeys.has(key)).length,
   multi: () => {
     const chain = {
       rPush: (key: string, items: string[]) => {
@@ -278,9 +279,9 @@ describe("flushBufferedIngest", () => {
   });
 });
 
-// The Slack alerts are queued from insertEvents and delivered after the flush returns, so these run the real flush with the
-// fake Redis above and a spy on fetch standing in for Slack, and wait one macrotask after each flush: the fake Redis and the
-// spy answer in microtasks, so one macrotask lets the whole delivery chain finish, and no test ends with a delivery pending
+// The Slack alerts are queued from insertEvents and the flush never awaits them, so these run the real flush with the fake
+// Redis above and a spy on fetch standing in for Slack, and wait one macrotask after each flush: the fake Redis and the spy
+// answer in microtasks, so one macrotask lets the whole delivery chain finish, and no test ends with a delivery pending
 // (which would call the real fetch once the spy is restored).
 describe("flushBufferedIngest alerts", () => {
   const WEBHOOK = "https://hooks.example.com/services/T000/B000/secret";
@@ -373,7 +374,7 @@ describe("flushBufferedIngest alerts", () => {
   // The ingest has no rate limit, so one DSN holder can make any number of titles cross the threshold, and Slack answers 429
   // above about one message a second. One message per project per bucket bounds the posts; the cap of 10 listed titles keeps
   // that message readable, regressions first because they are the rarer and costlier signal, then the biggest bursts. The
-  // titles past the cap are not claimed, so they alert in a later bucket instead of being lost.
+  // bursts past the cap are not claimed, so they alert in a later bucket instead of being lost.
   test("12 titles over the threshold post one message of 10, regressions first, and the 2 left out can alert later", async () => {
     const post = slack();
     closedGroupIds = new Set([groupIdOf("Regressed")]);
@@ -394,13 +395,57 @@ describe("flushBufferedIngest alerts", () => {
     expect(lines.slice(2, 11).map((line) => /Error[A-K]/.exec(line)?.[0])).toEqual(
       ["ErrorK", "ErrorJ", "ErrorI", "ErrorH", "ErrorG", "ErrorF", "ErrorE", "ErrorD", "ErrorC"],
     );
-    expect(lines[11]).toBe("+2 more error titles over the threshold in this window");
+    expect(lines[11]).toBe("+2 more error bursts in this window, listed in a later window if they burst again");
 
     buckets.set(SECOND_BUCKET, bucketOf("second", 10, "ErrorA"));
     await flushAndSettle();
 
     expect(post).toHaveBeenCalledTimes(2);
     expect(postedTexts(post)[1]).toContain(titleOf("ErrorA"));
+  });
+
+  // A regression is detected once: the reopen UPDATE matches a closed group only while it is closed, so a regression past the
+  // cap of 10 listed is never detected again and the count in the message is the only announcement it gets. Its line must
+  // say what the titles are (closed issues, with 1 event each), not "over the threshold".
+  test("12 closed issues coming back in one window list 10 and count the 2 left out as closed issues", async () => {
+    const post = slack();
+    const types = Array.from({ length: 12 }, (_, index) => `Closed${String.fromCharCode(65 + index)}`);
+    closedGroupIds = new Set(types.map(groupIdOf));
+    buckets.set(BUCKET, types.flatMap((type) => bucketOf("first", 1, type)));
+
+    await flushAndSettle();
+
+    expect(post).toHaveBeenCalledTimes(1);
+    const lines = postedTexts(post)[0].split("\n");
+    expect(lines).toHaveLength(12);
+    expect(lines.slice(1, 11).every((line) => line.includes("Closed issue is back"))).toBe(true);
+    expect(lines[11]).toBe("+2 more closed issues are back in this window");
+  });
+
+  // A burst past the cap stays unclaimed so it can alert in a later window, but one that alerted before would never be listed
+  // again, so counting it as "more" would point the reader at an error already announced. Of the 2 past the cap here, the
+  // lowest (ErrorA) alerted in an earlier window and ErrorB did not, so exactly 1 is counted, and ErrorB still alerts later.
+  test("a burst past the cap that alerted before is not counted as more, and one that did not still alerts later", async () => {
+    const post = slack();
+    const THIRD_BUCKET = "ekeeper:ingest-buffer:2020-01-01T00:10:00.000Z";
+    buckets.set(BUCKET, bucketOf("first", 10, "ErrorA"));
+    await flushAndSettle();
+
+    const bursts = Array.from({ length: 12 }, (_, index) => ({ type: `Error${String.fromCharCode(65 + index)}`, count: 10 + index }));
+    buckets.set(SECOND_BUCKET, bursts.flatMap(({ type, count }) => bucketOf("second", count, type)));
+    await flushAndSettle();
+
+    expect(post).toHaveBeenCalledTimes(2);
+    const lines = postedTexts(post)[1].split("\n");
+    expect(lines).toHaveLength(12);
+    expect(lines[11]).toBe("+1 more error burst in this window, listed in a later window if it bursts again");
+    expect(lines.join("\n")).not.toContain(titleOf("ErrorB"));
+
+    buckets.set(THIRD_BUCKET, bucketOf("third", 10, "ErrorB"));
+    await flushAndSettle();
+
+    expect(post).toHaveBeenCalledTimes(3);
+    expect(postedTexts(post)[2]).toContain(titleOf("ErrorB"));
   });
 
   // A regression posts whether or not its signature alerted before, because a person closing the issue is what makes the
