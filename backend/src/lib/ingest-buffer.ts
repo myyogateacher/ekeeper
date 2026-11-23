@@ -1,6 +1,7 @@
 import { ClickHouseError, type ClickHouseClient } from "@clickhouse/client";
 import { getClickHouseClient } from "../db/clickhouse";
 import { all, one, run } from "../db/sqlite";
+import { queueIngestAlerts } from "./alerts";
 import { HttpError } from "./http";
 import { ensureGithubIssueForGroup, getGithubIntegration } from "./issue-sync";
 import { normalizeEvent, toClickHouseDateTime } from "./ingest";
@@ -220,14 +221,28 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
 
   const affectedGroupIds = [...new Set(stored.map((event) => event.groupId))];
   const reopenedAt = new Date().toISOString();
+  // The groups this flush actually moved from closed to reopened: `changes` is the number of rows the UPDATE matched, and it
+  // matches only state = 'closed', so a group that was already open reports 0 here.
+  const reopenedGroupIds = new Set<string>();
   for (const groupId of affectedGroupIds) {
-    run(
+    const { changes } = run(
       `UPDATE issue_workflows
        SET state = 'reopened', updated_at = ?, closed_at = NULL
        WHERE project_id = ? AND group_id = ? AND state = 'closed'`,
       [reopenedAt, projectId, groupId],
     );
+    if (changes > 0) {
+      reopenedGroupIds.add(groupId);
+    }
   }
+
+  // Queued, not awaited: the flush never waits for Slack, so delivery runs on its own chain from the flush's next await on.
+  // A flush that waited could outlive the 300 s flush lock, which is never renewed, and the next timer tick would then insert
+  // the same buckets again. Queued before maybeCreateGithubIssues because its SQLite reads run outside the catch that
+  // ensureGithubIssueForGroup puts around the GitHub calls, so a throw there keeps the bucket for a retry, on which the UPDATE
+  // above no longer matches (the group is 'reopened'): a regression queued after it would be lost for good.
+  // queueIngestAlerts never throws, so it cannot cause such a retry itself.
+  queueIngestAlerts(projectId, stored, reopenedGroupIds);
 
   await maybeCreateGithubIssues({ projectId, events: stored, affectedGroupIds });
 
@@ -235,7 +250,7 @@ async function insertEvents(projectId: string, payloads: Record<string, unknown>
     projectId,
     eventCount: stored.length,
     breadcrumbCount: breadcrumbs.length,
-    reopenedGroupCount: affectedGroupIds.length,
+    reopenedGroupCount: reopenedGroupIds.size,
   });
 }
 

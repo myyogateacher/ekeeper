@@ -43,6 +43,10 @@ const envSchema = z.object({
   MINIMAPS_KEEP_RELEASES: optionalCount(10, 0),
   GITHUB_TOKEN: z.string().default(""),
   GITHUB_API_URL: z.string().url().default("https://api.github.com"),
+  // Slack incoming webhook for #ekeeper-alerts. Blank turns alerts off (an unset docker-compose substitution arrives as "",
+  // see optionalCount above), but a value that is not a URL fails boot: a typo here would otherwise surface as a post that
+  // fails on every flush, found out only when an alert was due and never came.
+  SLACK_ALERT_WEBHOOK_URL: z.union([z.literal(""), z.string().url()]).default(""),
 });
 
 const parsed = envSchema.parse(process.env);

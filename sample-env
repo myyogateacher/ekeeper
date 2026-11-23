@@ -40,3 +40,7 @@ MINIMAPS_KEEP_RELEASES=10
 # GitHub issue sync. Use a classic PAT with `repo` scope authorized for the org via SSO.
 GITHUB_TOKEN=
 GITHUB_API_URL=https://api.github.com
+
+# Slack incoming webhook for #ekeeper-alerts (C0CKPCA4C90). Posts a message when a production error bursts (once per title) or a closed
+# issue comes back. Blank turns alerts off. The URL is a credential: anyone holding it can post to the channel.
+SLACK_ALERT_WEBHOOK_URL=
