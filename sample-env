@@ -41,6 +41,6 @@ MINIMAPS_KEEP_RELEASES=10
 GITHUB_TOKEN=
 GITHUB_API_URL=https://api.github.com
 
-# Slack incoming webhook for #ekeeper-alerts (C0CKPCA4C90). Posts a message when a new production error bursts or a closed
+# Slack incoming webhook for #ekeeper-alerts (C0CKPCA4C90). Posts a message when a production error bursts (once per title) or a closed
 # issue comes back. Blank turns alerts off. The URL is a credential: anyone holding it can post to the channel.
 SLACK_ALERT_WEBHOOK_URL=

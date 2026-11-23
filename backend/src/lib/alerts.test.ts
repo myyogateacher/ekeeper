@@ -91,19 +91,18 @@ describe("formatIngestAlerts", () => {
   const regression: PlannedAlert = { kind: "regression", title: "Error: other", eventCount: 1, groupId: "g2", release: "2.0.0" };
   const nothingLeftOut = { regressions: 0, bursts: 0 };
 
-  // The message is the contract with the channel, so its whole shape is pinned: a header naming the project, one bullet per
-  // alert with the kind, the count, the title and release in code spans and the link, and a closing line for each kind of
-  // alert that did not fit.
-  test("the message is a header, one bullet per alert, and a line for each kind left out", () => {
+  // The message is the contract with the channel, so its whole shape is pinned: a header naming the project, one line per
+  // alert with the kind, the title as the link to its group, the count and the release, and one closing line counting what
+  // did not fit, by kind.
+  test("the message is a header, one line per alert with the title as its link, and one line for what was left out", () => {
     const text = formatIngestAlerts([regression, burst], { regressions: 2, bursts: 3 }, "Project A", "project_1");
 
     expect(text).toBe(
       [
-        "*Project A*, one 5 minute window",
-        `• *Closed issue is back*, 1 event: \`Error: other\` release \`2.0.0\` <${errorGroupUrl("project_1", "g2")}|Open in eKeeper>`,
-        `• *Error burst*, 23 events: \`${TITLE}\` release \`1.0.0\` <${errorGroupUrl("project_1", "g1")}|Open in eKeeper>`,
-        "+2 more closed issues are back in this window",
-        "+3 more error bursts in this window, listed in a later window if they burst again",
+        "*Project A* · production",
+        `:repeat: Closed issue is back: <${errorGroupUrl("project_1", "g2")}|Error: other> (1 event, 2.0.0)`,
+        `:fire: Error burst: <${errorGroupUrl("project_1", "g1")}|${TITLE}> (23 events in 5 min, 1.0.0)`,
+        "+5 more not shown (2 closed issues, 3 bursts)",
       ].join("\n"),
     );
   });
@@ -112,16 +111,16 @@ describe("formatIngestAlerts", () => {
     const text = formatIngestAlerts([{ ...burst, release: null }], nothingLeftOut, "Project A", "project_1");
 
     expect(text).toBe(
-      `*Project A*, one 5 minute window\n• *Error burst*, 23 events: \`${TITLE}\` <${errorGroupUrl("project_1", "g1")}|Open in eKeeper>`,
+      `*Project A* · production\n:fire: Error burst: <${errorGroupUrl("project_1", "g1")}|${TITLE}> (23 events in 5 min)`,
     );
   });
 
-  test("a single alert left out reads as singular, and a kind with none left out has no line", () => {
+  test("a single alert left out reads as singular, and a kind with none left out is not named", () => {
     const text = formatIngestAlerts([burst], { regressions: 0, bursts: 1 }, "Project A", "project_1");
-    expect(text.split("\n").at(-1)).toBe("+1 more error burst in this window, listed in a later window if it bursts again");
+    expect(text.split("\n").at(-1)).toBe("+1 more not shown (1 burst)");
 
     const closed = formatIngestAlerts([burst], { regressions: 1, bursts: 0 }, "Project A", "project_1");
-    expect(closed.split("\n").at(-1)).toBe("+1 more closed issue is back in this window");
+    expect(closed.split("\n").at(-1)).toBe("+1 more not shown (1 closed issue)");
   });
 
   // "burst" in the code only means "never alerted before": the first time an old error bursts after this ships, the message
@@ -151,8 +150,9 @@ describe("formatIngestAlerts", () => {
     // The only raw angle brackets left are the two of the link this message adds itself.
     expect(text.split("<")).toHaveLength(2);
     expect(text.split(">")).toHaveLength(2);
-    // The group id is one path segment, so "/" and "?" in it cannot start another segment or a query.
-    expect(text).toContain("/errors/project_1/a%2Fb%3Fc|Open in eKeeper>");
+    // The group id is one path segment, so "/" and "?" in it cannot start another segment or a query, and the title follows
+    // the URL's "|" as the link's text, so the destination is always the group's page.
+    expect(text).toContain("/errors/project_1/a%2Fb%3Fc|&lt;!channel&gt;");
   });
 
   // The ingest caps do not bound the exception type or the release, and Slack refuses an oversized message, which would fail
@@ -168,17 +168,11 @@ describe("formatIngestAlerts", () => {
     expect(text.length).toBeLessThan(1000);
   });
 
-  // A backtick in the title would close the inline code span and leave the rest of the title to be formatted as mrkdwn.
-  test("a backtick in the title cannot end the code span", () => {
-    const text = formatIngestAlerts([{ ...burst, title: "Error: reading `x` of null" }], nothingLeftOut, "Project A", "project_1");
-
-    expect(text.split("`")).toHaveLength(5);
-  });
-
   // The exception type is neither normalised nor capped and the release is stored verbatim, so a sender can put a line break
-  // in either. Slack ends an inline code span at the end of the line, and what follows is formatted as mrkdwn (bold, an
-  // auto-linked bare URL), so the break must not reach Slack. U+0085 (next line) is one a plain `\s` does not match.
-  test("a line break in the title or release cannot end the code span", () => {
+  // in either. A break inside the link would end it and leave the rest of the title on a line of its own, outside the link,
+  // where it reads as a line of the message and a bare URL in it becomes a link to wherever the sender chose. U+0085 (next
+  // line) is one a plain `\s` does not match.
+  test("a line break in the title or release cannot start a line of its own", () => {
     const text = formatIngestAlerts(
       [{ ...burst, title: "Error: first\n*bold* https://evil.example\u0085more", release: "1.0\r\nsecond\u0085third" }],
       nothingLeftOut,
@@ -187,8 +181,8 @@ describe("formatIngestAlerts", () => {
     );
 
     expect(text.split("\n")).toHaveLength(2);
-    expect(text).toContain("`Error: first *bold* https://evil.example more`");
-    expect(text).toContain("release `1.0 second third`");
+    expect(text).toContain("|Error: first *bold* https://evil.example more>");
+    expect(text).toContain("(23 events in 5 min, 1.0 second third)");
   });
 
   test("the text has no em or en dashes", () => {

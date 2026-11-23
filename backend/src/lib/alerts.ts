@@ -109,16 +109,16 @@ function escapeSlack(text: string): string {
   return text.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
 }
 
-// Text in an inline code span, safe for whatever the sender put in it. Whitespace runs collapse to one space first: the
-// exception type is neither normalised nor capped and the release is stored verbatim, and Slack ends an inline code span at
-// the end of the line, so a line break would leave the rest of the text to be formatted as mrkdwn (bold, a bare URL turned
-// into a link). U+0085 (next line) is added to `\s` because JavaScript's `\s` does not match it. Slack has no escape for a
-// backtick either, so one inside the text would close the span early; it becomes a quote, which reads the same in an error
-// message. A cut can land inside a surrogate pair, so the clipped text is made well formed again before it is sent as JSON.
-function inlineCode(text: string, maxChars: number): string {
+// Sender text (a title or a release) made safe to sit inside one line of the message. Whitespace runs collapse to one space
+// first: the exception type is neither normalised nor capped and the release is stored verbatim, so either can hold a line
+// break, which would end the title's link and put the rest on a line of its own, where it reads as a line of the message and
+// a bare URL in it becomes a link to wherever the sender chose. U+0085 (next line) is added to `\s` because JavaScript's `\s`
+// does not match it. A cut can land inside a surrogate pair, so the clipped text is made well formed again before it is sent
+// as JSON.
+function senderText(text: string, maxChars: number): string {
   const flat = text.replace(/[\s\u0085]+/g, " ");
   const clipped = flat.length > maxChars ? `${flat.slice(0, maxChars).toWellFormed()}...` : flat;
-  return `\`${escapeSlack(clipped).replaceAll("`", "'")}\``;
+  return escapeSlack(clipped);
 }
 
 // What did not fit under ALERTS_PER_MESSAGE, by kind, because the two are announced differently (see ALERTS_PER_MESSAGE):
@@ -129,27 +129,31 @@ export interface LeftOut {
 }
 
 // Pure, like the planner: the message is the contract with the channel, and it is tested as text. `alerts` are the titles
-// listed and `leftOut` what was counted instead of listed. Each line says only what is true of its kind: a regression has
-// one event and is not "over the threshold", and a burst past the cap is listed later only if it bursts again. Mentions are
-// never produced here (no `<!channel>`, no `<!here>`); the only angle brackets are the links this function builds.
+// listed and `leftOut` what was counted instead of listed. One line per alert, the title being the link to its group so the
+// line stays short. The part before the `|` is always errorGroupUrl, which percent-encodes the group id and so holds no `|`
+// or `>`, and the title after it has its `>` escaped, so a sender chooses what the link says but cannot end the link early
+// or change where it goes. "in 5 min" is on bursts only, because that is the threshold's window; a regression is one event
+// whatever the window. The header says production because the planner counts nothing else. Mentions are never produced here
+// (no `<!channel>`, no `<!here>`); the only angle brackets are the links this function builds.
 export function formatIngestAlerts(alerts: PlannedAlert[], leftOut: LeftOut, projectName: string, projectId: string): string {
-  const lines = [`*${escapeSlack(projectName)}*, one 5 minute window`];
+  const lines = [`*${escapeSlack(projectName)}* · production`];
   for (const alert of alerts) {
-    const label = alert.kind === "regression" ? "Closed issue is back" : "Error burst";
-    const count = `${alert.eventCount} ${alert.eventCount === 1 ? "event" : "events"}`;
-    const release = alert.release ? ` release ${inlineCode(alert.release, RELEASE_MAX_CHARS)}` : "";
+    const label = alert.kind === "regression" ? ":repeat: Closed issue is back" : ":fire: Error burst";
+    const count = `${alert.eventCount} ${alert.eventCount === 1 ? "event" : "events"}${alert.kind === "burst" ? " in 5 min" : ""}`;
+    const release = alert.release ? `, ${senderText(alert.release, RELEASE_MAX_CHARS)}` : "";
     lines.push(
-      `• *${label}*, ${count}: ${inlineCode(alert.title, TITLE_MAX_CHARS)}${release} <${errorGroupUrl(projectId, alert.groupId)}|Open in eKeeper>`,
+      `${label}: <${errorGroupUrl(projectId, alert.groupId)}|${senderText(alert.title, TITLE_MAX_CHARS)}> (${count}${release})`,
     );
   }
+  const parts: string[] = [];
   if (leftOut.regressions > 0) {
-    lines.push(`+${leftOut.regressions} more closed ${leftOut.regressions === 1 ? "issue is" : "issues are"} back in this window`);
+    parts.push(`${leftOut.regressions} closed ${leftOut.regressions === 1 ? "issue" : "issues"}`);
   }
   if (leftOut.bursts > 0) {
-    const single = leftOut.bursts === 1;
-    lines.push(
-      `+${leftOut.bursts} more error ${single ? "burst" : "bursts"} in this window, listed in a later window if ${single ? "it bursts" : "they burst"} again`,
-    );
+    parts.push(`${leftOut.bursts} ${leftOut.bursts === 1 ? "burst" : "bursts"}`);
+  }
+  if (parts.length > 0) {
+    lines.push(`+${leftOut.regressions + leftOut.bursts} more not shown (${parts.join(", ")})`);
   }
   return lines.join("\n");
 }

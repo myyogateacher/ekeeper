@@ -395,7 +395,7 @@ describe("flushBufferedIngest alerts", () => {
     expect(lines.slice(2, 11).map((line) => /Error[A-K]/.exec(line)?.[0])).toEqual(
       ["ErrorK", "ErrorJ", "ErrorI", "ErrorH", "ErrorG", "ErrorF", "ErrorE", "ErrorD", "ErrorC"],
     );
-    expect(lines[11]).toBe("+2 more error bursts in this window, listed in a later window if they burst again");
+    expect(lines[11]).toBe("+2 more not shown (2 bursts)");
 
     buckets.set(SECOND_BUCKET, bucketOf("second", 10, "ErrorA"));
     await flushAndSettle();
@@ -419,7 +419,7 @@ describe("flushBufferedIngest alerts", () => {
     const lines = postedTexts(post)[0].split("\n");
     expect(lines).toHaveLength(12);
     expect(lines.slice(1, 11).every((line) => line.includes("Closed issue is back"))).toBe(true);
-    expect(lines[11]).toBe("+2 more closed issues are back in this window");
+    expect(lines[11]).toBe("+2 more not shown (2 closed issues)");
   });
 
   // A burst past the cap stays unclaimed so it can alert in a later window, but one that alerted before would never be listed
@@ -438,7 +438,7 @@ describe("flushBufferedIngest alerts", () => {
     expect(post).toHaveBeenCalledTimes(2);
     const lines = postedTexts(post)[1].split("\n");
     expect(lines).toHaveLength(12);
-    expect(lines[11]).toBe("+1 more error burst in this window, listed in a later window if it bursts again");
+    expect(lines[11]).toBe("+1 more not shown (1 burst)");
     expect(lines.join("\n")).not.toContain(titleOf("ErrorB"));
 
     buckets.set(THIRD_BUCKET, bucketOf("third", 10, "ErrorB"));
