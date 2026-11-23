@@ -111,8 +111,8 @@ function escapeSlack(text: string): string {
 
 // Sender text (a title or a release) made safe to sit inside one line of the message. Whitespace runs collapse to one space
 // first: the exception type is neither normalised nor capped and the release is stored verbatim, so either can hold a line
-// break, which would end the title's link and put the rest on a line of its own, where it reads as a line of the message and
-// a bare URL in it becomes a link to wherever the sender chose. U+0085 (next line) is added to `\s` because JavaScript's `\s`
+// break, which would end the title's link or the release's code span and put the rest on a line of its own, where it reads
+// as a line of the message and a bare URL in it becomes a link to wherever the sender chose. U+0085 (next line) is added to `\s` because JavaScript's `\s`
 // does not match it. A cut can land inside a surrogate pair, so the clipped text is made well formed again before it is sent
 // as JSON.
 function senderText(text: string, maxChars: number): string {
@@ -140,7 +140,10 @@ export function formatIngestAlerts(alerts: PlannedAlert[], leftOut: LeftOut, pro
   for (const alert of alerts) {
     const label = alert.kind === "regression" ? ":repeat: Closed issue is back" : ":fire: Error burst";
     const count = `${alert.eventCount} ${alert.eventCount === 1 ? "event" : "events"}${alert.kind === "burst" ? " in 5 min" : ""}`;
-    const release = alert.release ? `, ${senderText(alert.release, RELEASE_MAX_CHARS)}` : "";
+    // The release is outside the link, where Slack turns a bare URL into a link of its own, so a sender could put a link to
+    // anywhere beside the real one. Slack does not link inside a code span, hence the backticks; it has no escape for a
+    // backtick either, so one in the release becomes a quote instead of closing the span early.
+    const release = alert.release ? `, \`${senderText(alert.release, RELEASE_MAX_CHARS).replaceAll("`", "'")}\`` : "";
     lines.push(
       `${label}: <${errorGroupUrl(projectId, alert.groupId)}|${senderText(alert.title, TITLE_MAX_CHARS)}> (${count}${release})`,
     );

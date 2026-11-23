@@ -100,8 +100,8 @@ describe("formatIngestAlerts", () => {
     expect(text).toBe(
       [
         "*Project A* · production",
-        `:repeat: Closed issue is back: <${errorGroupUrl("project_1", "g2")}|Error: other> (1 event, 2.0.0)`,
-        `:fire: Error burst: <${errorGroupUrl("project_1", "g1")}|${TITLE}> (23 events in 5 min, 1.0.0)`,
+        `:repeat: Closed issue is back: <${errorGroupUrl("project_1", "g2")}|Error: other> (1 event, \`2.0.0\`)`,
+        `:fire: Error burst: <${errorGroupUrl("project_1", "g1")}|${TITLE}> (23 events in 5 min, \`1.0.0\`)`,
         "+5 more not shown (2 closed issues, 3 bursts)",
       ].join("\n"),
     );
@@ -182,7 +182,17 @@ describe("formatIngestAlerts", () => {
 
     expect(text.split("\n")).toHaveLength(2);
     expect(text).toContain("|Error: first *bold* https://evil.example more>");
-    expect(text).toContain("(23 events in 5 min, 1.0 second third)");
+    expect(text).toContain("(23 events in 5 min, `1.0 second third`)");
+  });
+
+  // The release is shown outside the link, where Slack turns a bare URL into a link of its own, so a sender could put a link
+  // to anywhere beside the real eKeeper one. Slack does not link inside a code span, so the release sits in one, and as Slack
+  // has no escape for a backtick, one in the release becomes a quote instead of closing the span early.
+  test("a URL in the release is shown as code, never as a link of its own", () => {
+    const text = formatIngestAlerts([{ ...burst, release: "https://evil.example/login`x" }], nothingLeftOut, "Project A", "project_1");
+
+    expect(text).toContain("(23 events in 5 min, `https://evil.example/login'x`)");
+    expect(text.split("`")).toHaveLength(3);
   });
 
   test("the text has no em or en dashes", () => {
